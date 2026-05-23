@@ -1,0 +1,19 @@
+[package]
+name = "conversation-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Append-only journal storage for conversation events."
+
+[dependencies]
+conversation-core = { path = "../conversation-core" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

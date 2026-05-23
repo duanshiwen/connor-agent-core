@@ -1,0 +1,42 @@
+# Rust build artifacts
+/target/
+
+# Cargo package output
+*.crate
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Coverage / profiling output
+tarpaulin-report.html
+coverage/
+*.profraw
+*.profdata
+
+# Generated docs
+/doc/
+
+# Local agent/runtime data
+.agent-os/

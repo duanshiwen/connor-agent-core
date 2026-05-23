@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/conversation-core",
+    "crates/conversation-journal",
+    "crates/conversation-kernel",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["shiwen"]
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Testing
+tempfile = "3"
