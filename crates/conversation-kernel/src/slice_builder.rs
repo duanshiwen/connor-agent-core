@@ -180,6 +180,7 @@ mod tests {
 
     fn envelope(event: ConversationEvent) -> ConversationEventEnvelope {
         ConversationEventEnvelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
             event_id: EventId::from(format!("evt-{}", uuid::Uuid::new_v4())),
             conversation_id: ConversationId::from("conv-1"),
             occurred_at: now(),

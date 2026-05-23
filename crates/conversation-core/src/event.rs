@@ -10,9 +10,13 @@ use crate::session::ConversationSession;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Current persisted event envelope schema version.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 /// Metadata wrapping a conversation event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationEventEnvelope {
+    pub schema_version: u32,
     pub event_id: EventId,
     pub conversation_id: ConversationId,
     pub occurred_at: DateTime<Utc>,
@@ -37,8 +41,8 @@ pub enum SuggestionTrigger {
 /// All possible conversation events.
 ///
 /// This is the core vocabulary of the Conversation Kernel.
-/// New event types can be added without breaking existing journals
-/// because unknown tags are handled gracefully during deserialization.
+/// Persisted event changes must be coordinated with `CURRENT_SCHEMA_VERSION`
+/// and covered by roundtrip tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationEvent {
@@ -208,6 +212,7 @@ mod tests {
 
     fn wrap_event(event: ConversationEvent) -> ConversationEventEnvelope {
         ConversationEventEnvelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
             event_id: EventId::from(format!("evt-{}", uuid::Uuid::new_v4())),
             conversation_id: ConversationId::from("conv-001"),
             occurred_at: now(),
@@ -331,6 +336,16 @@ mod tests {
     fn conversation_created_has_type_tag() {
         let json = serde_json::to_string(&make_conversation_created()).unwrap();
         assert!(json.contains("\"type\":\"conversation_created\""));
+    }
+
+    #[test]
+    fn envelope_includes_schema_version() {
+        let envelope = wrap_event(make_message_appended());
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"schema_version\":1"));
+
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     // --- Integration: full event sequence ---

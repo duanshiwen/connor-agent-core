@@ -17,7 +17,9 @@ pub mod visibility;
 
 // Re-export commonly used types for convenience.
 pub use error::CoreError;
-pub use event::{ConversationEvent, ConversationEventEnvelope, SuggestionTrigger};
+pub use event::{
+    CURRENT_SCHEMA_VERSION, ConversationEvent, ConversationEventEnvelope, SuggestionTrigger,
+};
 pub use ids::{ConversationId, EventId, MessageId, ParticipantId, ThreadId};
 pub use message::{Message, MessageContent, SuggestedAction};
 pub use participant::{Participant, ParticipantKind};

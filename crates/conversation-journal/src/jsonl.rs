@@ -275,6 +275,7 @@ mod tests {
 
     fn make_event(conversation_id: &str, event_id: &str) -> ConversationEventEnvelope {
         ConversationEventEnvelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
             event_id: EventId::from(event_id),
             conversation_id: ConversationId::from(conversation_id),
             occurred_at: chrono::Utc::now(),

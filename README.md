@@ -87,7 +87,7 @@ The segmented JSONL layout is:
     └── ...
 ```
 
-Each line in a segment file is one serialized `ConversationEventEnvelope`. `manifest.json` tracks the active segment and segment metadata, avoiding a single ever-growing journal file for long conversations.
+Each line in a segment file is one serialized `ConversationEventEnvelope`. Every envelope includes `schema_version`, currently `1`, so persisted event formats can evolve intentionally. `manifest.json` tracks the active segment and segment metadata, avoiding a single ever-growing journal file for long conversations.
 
 ### `conversation-kernel`
 
@@ -241,6 +241,12 @@ The project follows a layered testing approach:
 4. **Kernel tests**: command validation and emitted event sequences.
 5. **Slice builder tests**: recent-window, thread, trigger-centered, and user-visibility filtering.
 6. **Integration tests**: full lifecycle flows across kernel, journal, projector, policy, and slice builder.
+
+## Architecture Decisions
+
+- [ADR 0001: Defer Per-Conversation Event Sequence](./docs/adr/0001-defer-event-sequence.md)
+
+`sequence` is intentionally not part of `ConversationEventEnvelope` yet. It will be added only after journal append ownership and concurrency semantics are specified.
 
 ## Non-Goals for v0.1
 

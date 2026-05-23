@@ -295,6 +295,7 @@ impl ConversationKernel {
         event: ConversationEvent,
     ) -> Result<()> {
         let envelope = ConversationEventEnvelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
             event_id: EventId(self.id_gen.new_id()),
             conversation_id: conversation_id.clone(),
             occurred_at,
