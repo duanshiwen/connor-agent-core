@@ -31,6 +31,16 @@ pub struct AgentRunOutput {
     pub text: String,
 }
 
+/// A requested agent run that has not yet completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAgentRun {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub trigger_message_id: MessageId,
+    pub context_slice_id: String,
+    pub context_message_ids: Vec<MessageId>,
+}
+
 /// Executes an agent run request.
 #[async_trait]
 pub trait AgentRunExecutor: Send + Sync {
@@ -75,6 +85,39 @@ where
     /// If the run has already completed, this method is idempotent and returns
     /// the existing output message ID without appending another assistant
     /// message.
+    pub async fn list_pending_runs(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<PendingAgentRun>> {
+        let state = self.kernel.load_state(conversation_id).await?;
+        let events = self.kernel.load_events(conversation_id).await?;
+        let mut pending = Vec::new();
+
+        for envelope in &events {
+            if let ConversationEvent::AgentRunRequested {
+                run_id,
+                trigger_message_id,
+                context_slice_id,
+            } = &envelope.event
+            {
+                if state.completed_agent_runs.contains_key(run_id) {
+                    continue;
+                }
+
+                let context_message_ids = find_context_message_ids(&events, context_slice_id)?;
+                pending.push(PendingAgentRun {
+                    conversation_id: conversation_id.clone(),
+                    run_id: run_id.clone(),
+                    trigger_message_id: trigger_message_id.clone(),
+                    context_slice_id: context_slice_id.clone(),
+                    context_message_ids,
+                });
+            }
+        }
+
+        Ok(pending)
+    }
+
     pub async fn process_pending_run(
         &self,
         conversation_id: &ConversationId,
@@ -166,23 +209,7 @@ where
             bail!("agent run not found: {run_id}");
         };
 
-        let mut message_ids = None;
-        for envelope in &events {
-            if let ConversationEvent::ContextSliceBuilt {
-                slice_id,
-                message_ids: candidate_message_ids,
-                ..
-            } = &envelope.event
-                && slice_id == &context_slice_id
-            {
-                message_ids = Some(candidate_message_ids.clone());
-                break;
-            }
-        }
-
-        let Some(message_ids) = message_ids else {
-            bail!("context slice not found: {context_slice_id}");
-        };
+        let message_ids = find_context_message_ids(&events, &context_slice_id)?;
 
         Ok(RequestedRun {
             trigger_message_id,
@@ -190,6 +217,25 @@ where
             message_ids,
         })
     }
+}
+
+fn find_context_message_ids(
+    events: &[conversation_core::ConversationEventEnvelope],
+    context_slice_id: &str,
+) -> Result<Vec<MessageId>> {
+    for envelope in events {
+        if let ConversationEvent::ContextSliceBuilt {
+            slice_id,
+            message_ids,
+            ..
+        } = &envelope.event
+            && slice_id == context_slice_id
+        {
+            return Ok(message_ids.clone());
+        }
+    }
+
+    bail!("context slice not found: {context_slice_id}");
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +250,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use conversation_core::*;
-    use conversation_journal::MemoryConversationJournal;
+    use conversation_journal::{ConversationJournal, MemoryConversationJournal};
     use conversation_kernel::{
         Clock, CreateConversationCommand, IdGenerator, RequestAgentRunCommand,
     };
@@ -248,9 +294,28 @@ mod tests {
 
     fn test_kernel() -> ConversationKernel {
         let journal = Arc::new(MemoryConversationJournal::new());
+        test_kernel_with_journal(journal)
+    }
+
+    fn test_kernel_with_journal(journal: Arc<MemoryConversationJournal>) -> ConversationKernel {
         let id_gen = Arc::new(SequentialIdGenerator::new());
         let clock = Arc::new(FixedClock::new("2026-05-23T10:00:00Z".parse().unwrap()));
         ConversationKernel::with_generators(journal, id_gen, clock)
+    }
+
+    fn envelope(
+        conversation_id: &ConversationId,
+        event_id: &str,
+        event: ConversationEvent,
+    ) -> ConversationEventEnvelope {
+        ConversationEventEnvelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            event_id: EventId::from(event_id),
+            conversation_id: conversation_id.clone(),
+            occurred_at: "2026-05-23T10:00:00Z".parse().unwrap(),
+            actor_id: None,
+            event,
+        }
     }
 
     fn human(id: &str, name: &str) -> Participant {
@@ -400,5 +465,185 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("agent run not found"));
+    }
+
+    #[tokio::test]
+    async fn list_pending_runs_excludes_completed_runs() {
+        let kernel = test_kernel();
+        let conversation_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: ConversationKind::AgentTask,
+                title: None,
+                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+
+        let trigger_message_id = kernel
+            .append_message(AppendMessageCommand {
+                conversation_id: conversation_id.clone(),
+                sender_id: ParticipantId::from("u1"),
+                content: MessageContent::Text {
+                    text: "帮我分析".into(),
+                },
+                reply_to: None,
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await
+            .unwrap();
+
+        let run_id = kernel
+            .request_agent_run(RequestAgentRunCommand {
+                conversation_id: conversation_id.clone(),
+                trigger_message_id,
+                requested_by: ParticipantId::from("u1"),
+            })
+            .await
+            .unwrap();
+
+        let runtime = ConversationRuntime::new(kernel, FakeAgentRunExecutor);
+        let pending = runtime.list_pending_runs(&conversation_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].run_id, run_id);
+        assert_eq!(pending[0].context_message_ids.len(), 1);
+
+        runtime
+            .process_pending_run(&conversation_id, &run_id)
+            .await
+            .unwrap();
+
+        let pending = runtime.list_pending_runs(&conversation_id).await.unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_context_slice_returns_error() {
+        let journal = Arc::new(MemoryConversationJournal::new());
+        let kernel = test_kernel_with_journal(journal.clone());
+        let conversation_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: ConversationKind::AgentTask,
+                title: None,
+                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+
+        journal
+            .append(envelope(
+                &conversation_id,
+                "evt-malformed-run",
+                ConversationEvent::AgentRunRequested {
+                    run_id: "run-missing-slice".into(),
+                    trigger_message_id: MessageId::from("msg-trigger"),
+                    context_slice_id: "missing-slice".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let runtime = ConversationRuntime::new(kernel, FakeAgentRunExecutor);
+        let err = runtime
+            .process_pending_run(&conversation_id, "run-missing-slice")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("context slice not found"));
+    }
+
+    #[tokio::test]
+    async fn missing_context_message_returns_error() {
+        let journal = Arc::new(MemoryConversationJournal::new());
+        let kernel = test_kernel_with_journal(journal.clone());
+        let conversation_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: ConversationKind::AgentTask,
+                title: None,
+                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+
+        journal
+            .append(envelope(
+                &conversation_id,
+                "evt-bad-slice",
+                ConversationEvent::ContextSliceBuilt {
+                    slice_id: "slice-bad".into(),
+                    trigger_message_id: MessageId::from("msg-trigger"),
+                    message_ids: vec![MessageId::from("msg-missing")],
+                },
+            ))
+            .await
+            .unwrap();
+        journal
+            .append(envelope(
+                &conversation_id,
+                "evt-bad-run",
+                ConversationEvent::AgentRunRequested {
+                    run_id: "run-bad-context".into(),
+                    trigger_message_id: MessageId::from("msg-trigger"),
+                    context_slice_id: "slice-bad".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let runtime = ConversationRuntime::new(kernel, FakeAgentRunExecutor);
+        let err = runtime
+            .process_pending_run(&conversation_id, "run-bad-context")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("context message not found"));
+    }
+
+    #[tokio::test]
+    async fn no_agent_participant_returns_error() {
+        let kernel = test_kernel();
+        let conversation_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: ConversationKind::AgentTask,
+                title: None,
+                participants: vec![human("u1", "诗闻")],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+
+        let trigger_message_id = kernel
+            .append_message(AppendMessageCommand {
+                conversation_id: conversation_id.clone(),
+                sender_id: ParticipantId::from("u1"),
+                content: MessageContent::Text {
+                    text: "帮我分析".into(),
+                },
+                reply_to: None,
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await
+            .unwrap();
+
+        let run_id = kernel
+            .request_agent_run(RequestAgentRunCommand {
+                conversation_id: conversation_id.clone(),
+                trigger_message_id,
+                requested_by: ParticipantId::from("u1"),
+            })
+            .await
+            .unwrap();
+
+        let runtime = ConversationRuntime::new(kernel, FakeAgentRunExecutor);
+        let err = runtime
+            .process_pending_run(&conversation_id, &run_id)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("no agent participant found"));
     }
 }

@@ -123,9 +123,10 @@ Includes:
 - `AgentRunOutput`
 - `AgentRunExecutor`
 - `FakeAgentRunExecutor`
+- `PendingAgentRun`
 - `ConversationRuntime`
 
-The runtime currently uses a fake deterministic executor for testability. Real local or remote LLMs should be added later as additional `AgentRunExecutor` implementations, not inside the kernel.
+The runtime can list pending runs, process a run idempotently, append assistant output, and mark the run as completed. It currently uses a fake deterministic executor for testability. Real local or remote LLMs should be added later as additional `AgentRunExecutor` implementations, not inside the kernel.
 
 ## Event-Sourced Flow
 
@@ -170,7 +171,7 @@ cargo test --workspace
 Current status:
 
 ```text
-104 tests passed
+108 tests passed
 ```
 
 ### Format
