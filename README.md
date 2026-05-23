@@ -37,17 +37,20 @@ The kernel is designed as an append-only, replayable, testable conversation subs
     │       ├── jsonl.rs
     │       ├── lib.rs
     │       └── memory.rs
-    └── conversation-kernel
-        ├── src
-        │   ├── commands.rs
-        │   ├── kernel.rs
-        │   ├── lib.rs
-        │   ├── policy.rs
-        │   ├── projector.rs
-        │   ├── slice_builder.rs
-        │   └── state.rs
-        └── tests
-            └── full_lifecycle.rs
+    ├── conversation-kernel
+    │   ├── src
+    │   │   ├── commands.rs
+    │   │   ├── kernel.rs
+    │   │   ├── lib.rs
+    │   │   ├── policy.rs
+    │   │   ├── projector.rs
+    │   │   ├── slice_builder.rs
+    │   │   └── state.rs
+    │   └── tests
+    │       └── full_lifecycle.rs
+    └── conversation-runtime
+        └── src
+            └── lib.rs
 ```
 
 ## Crates
@@ -108,6 +111,21 @@ Supported commands:
 - `AppendMessageCommand`
 - `CreateAssistantSuggestionCommand`
 - `RequestAgentRunCommand`
+- `CompleteAgentRunCommand`
+
+### `conversation-runtime`
+
+Runtime boundary for consuming `AgentRunRequested` events and writing agent outputs back into the conversation.
+
+Includes:
+
+- `AgentRunRequest`
+- `AgentRunOutput`
+- `AgentRunExecutor`
+- `FakeAgentRunExecutor`
+- `ConversationRuntime`
+
+The runtime currently uses a fake deterministic executor for testability. Real local or remote LLMs should be added later as additional `AgentRunExecutor` implementations, not inside the kernel.
 
 ## Event-Sourced Flow
 
@@ -121,6 +139,11 @@ graph LR
     State --> SliceBuilder[ConversationSliceBuilder]
     SliceBuilder --> Slice[ConversationSlice]
     Kernel --> BoundaryEvent[AgentRunRequested]
+    BoundaryEvent --> Runtime[ConversationRuntime]
+    Runtime --> Executor[AgentRunExecutor]
+    Executor --> Output[AgentRunOutput]
+    Runtime --> AssistantMessage[Assistant Message]
+    Runtime --> Completed[AgentRunCompleted]
 ```
 
 The kernel does not call a model directly. Instead, when an agent run is needed, it records boundary events such as:
@@ -128,7 +151,7 @@ The kernel does not call a model directly. Instead, when an agent run is needed,
 - `ContextSliceBuilt`
 - `AgentRunRequested`
 
-A separate runtime can observe these events and execute the actual agent run.
+`conversation-runtime` consumes those events through an `AgentRunExecutor`, appends an assistant output message, and records `AgentRunCompleted`.
 
 ## Quick Start
 
@@ -147,7 +170,7 @@ cargo test --workspace
 Current status:
 
 ```text
-97 tests passed
+104 tests passed
 ```
 
 ### Format
@@ -252,7 +275,7 @@ The project follows a layered testing approach:
 
 The first version intentionally does **not** implement:
 
-- LLM/model inference
+- Production LLM/model inference
 - Browser control
 - Plugin execution
 - Long-term memory writes

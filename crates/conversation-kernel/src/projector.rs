@@ -99,6 +99,15 @@ impl ConversationProjector {
                     .push(root_message_id.clone());
             }
 
+            ConversationEvent::AgentRunCompleted {
+                run_id,
+                output_message_id,
+            } => {
+                state
+                    .completed_agent_runs
+                    .insert(run_id.clone(), output_message_id.clone());
+            }
+
             // Other events don't affect the projected state.
             _ => {}
         }

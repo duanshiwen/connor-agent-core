@@ -125,6 +125,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "conversation-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "conversation-core",
+ "conversation-journal",
+ "conversation-kernel",
+ "tokio",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

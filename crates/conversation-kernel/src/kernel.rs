@@ -243,6 +243,10 @@ impl ConversationKernel {
             bail!("conversation not found: {}", cmd.conversation_id);
         }
 
+        if !state.messages_by_id.contains_key(&cmd.trigger_message_id) {
+            bail!("trigger message not found: {}", cmd.trigger_message_id);
+        }
+
         let run_id = self.id_gen.new_id();
         let slice_id = self.id_gen.new_id();
         let now = self.clock.now();
@@ -284,6 +288,42 @@ impl ConversationKernel {
         .await?;
 
         Ok(run_id)
+    }
+
+    /// Mark an agent run as completed.
+    ///
+    /// Validates: conversation exists, output message exists, run not already completed.
+    /// Produces: `AgentRunCompleted`.
+    pub async fn complete_agent_run(&self, cmd: CompleteAgentRunCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+
+        if state.session.is_none() {
+            bail!("conversation not found: {}", cmd.conversation_id);
+        }
+
+        if state.completed_agent_runs.contains_key(&cmd.run_id) {
+            bail!("agent run already completed: {}", cmd.run_id);
+        }
+
+        if !state.messages_by_id.contains_key(&cmd.output_message_id) {
+            bail!("output message not found: {}", cmd.output_message_id);
+        }
+
+        if !state.participants.contains_key(&cmd.completed_by) {
+            bail!("completed_by is not a participant: {}", cmd.completed_by);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.completed_by),
+            now,
+            ConversationEvent::AgentRunCompleted {
+                run_id: cmd.run_id,
+                output_message_id: cmd.output_message_id,
+            },
+        )
+        .await
     }
 
     /// Helper to create and append an event envelope.

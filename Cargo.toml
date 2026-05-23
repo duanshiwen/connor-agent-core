@@ -3,6 +3,7 @@ members = [
     "crates/conversation-core",
     "crates/conversation-journal",
     "crates/conversation-kernel",
+    "crates/conversation-runtime",
 ]
 resolver = "2"
 

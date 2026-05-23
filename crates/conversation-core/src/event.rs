@@ -101,6 +101,12 @@ pub enum ConversationEvent {
         trigger_message_id: MessageId,
         context_slice_id: String,
     },
+
+    /// An agent run completed and produced an output message.
+    AgentRunCompleted {
+        run_id: String,
+        output_message_id: MessageId,
+    },
 }
 
 #[cfg(test)]
@@ -207,6 +213,13 @@ mod tests {
             run_id: "run-001".to_string(),
             trigger_message_id: MessageId::from("msg-003"),
             context_slice_id: "slice-001".to_string(),
+        }
+    }
+
+    fn make_agent_run_completed() -> ConversationEvent {
+        ConversationEvent::AgentRunCompleted {
+            run_id: "run-001".to_string(),
+            output_message_id: MessageId::from("msg-output-001"),
         }
     }
 
@@ -324,6 +337,14 @@ mod tests {
         assert_eq!(decoded.event, envelope.event);
     }
 
+    #[test]
+    fn agent_run_completed_roundtrip() {
+        let envelope = wrap_event(make_agent_run_completed());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
     // --- Event type tag tests ---
 
     #[test]
@@ -360,6 +381,7 @@ mod tests {
             wrap_event(make_assistant_suggestion()),
             wrap_event(make_context_slice_built()),
             wrap_event(make_agent_run_requested()),
+            wrap_event(make_agent_run_completed()),
         ];
 
         // Serialize all events to JSONL

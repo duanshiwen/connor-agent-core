@@ -42,3 +42,12 @@ pub struct RequestAgentRunCommand {
     pub trigger_message_id: MessageId,
     pub requested_by: ParticipantId,
 }
+
+/// Command to mark an agent run as completed.
+#[derive(Debug, Clone)]
+pub struct CompleteAgentRunCommand {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub output_message_id: MessageId,
+    pub completed_by: ParticipantId,
+}
