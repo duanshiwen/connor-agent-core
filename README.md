@@ -76,13 +76,18 @@ Includes:
 - `MemoryConversationJournal` for tests and in-memory workflows
 - `JsonlConversationJournal` for local durable JSONL storage
 
-The JSONL layout is:
+The segmented JSONL layout is:
 
 ```text
-{root_dir}/{conversation_id}/journal.jsonl
+{root_dir}/{conversation_id}/
+├── manifest.json
+└── segments/
+    ├── 00000000000000000000.jsonl
+    ├── 00000000000000000001.jsonl
+    └── ...
 ```
 
-Each line is one serialized `ConversationEventEnvelope`.
+Each line in a segment file is one serialized `ConversationEventEnvelope`. `manifest.json` tracks the active segment and segment metadata, avoiding a single ever-growing journal file for long conversations.
 
 ### `conversation-kernel`
 
