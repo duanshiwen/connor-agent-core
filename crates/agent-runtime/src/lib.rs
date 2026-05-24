@@ -1344,6 +1344,7 @@ mod tests {
             policy: &policy,
             executor,
             audit_log: &audit,
+            artifact_resolver: None,
         };
 
         let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
@@ -1491,6 +1492,7 @@ mod tests {
             policy: &policy,
             executor: &executor,
             audit_log: &audit,
+            artifact_resolver: None,
         };
         let detector = NoopActionProposalDetector;
 

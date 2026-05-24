@@ -3,7 +3,7 @@ use action_core::{
     ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
 };
 use action_runtime::{
-    ActionRuntime, ActionRuntimeOutcome, ArtifactProducingExecutor,
+    ActionRuntime, ActionRuntimeOutcome, ArtifactProducingExecutor, ArtifactStoreResolver,
     DeterministicArtifactDescriptorFactory, ProcessActionRequest,
 };
 use artifact_core::{ArtifactId, ArtifactKind, ArtifactStore, MemoryArtifactStore};
@@ -194,6 +194,29 @@ async fn process_action(
     action_id: &str,
     kind: &str,
 ) -> ActionRuntimeOutcome {
+    process_action_with_artifact_resolver(
+        kernel,
+        registry,
+        executor,
+        audit,
+        None,
+        conversation_id,
+        action_id,
+        kind,
+    )
+    .await
+}
+
+async fn process_action_with_artifact_resolver(
+    kernel: &ConversationKernel,
+    registry: &ActionRegistry,
+    executor: &dyn ActionExecutor,
+    audit: &dyn AuditLog,
+    artifact_resolver: Option<&dyn action_runtime::ArtifactResolver>,
+    conversation_id: &ConversationId,
+    action_id: &str,
+    kind: &str,
+) -> ActionRuntimeOutcome {
     let policy = CapabilityPolicy::default_safe();
     let runtime = ActionRuntime {
         kernel,
@@ -201,6 +224,7 @@ async fn process_action(
         policy: &policy,
         executor,
         audit_log: audit,
+        artifact_resolver,
     };
     runtime
         .process(ProcessActionRequest {
@@ -333,9 +357,116 @@ async fn artifact_producing_executor_stores_artifact_and_records_ref_payload() {
         ActionResultPayload::ArtifactRef(ArtifactId::from("artifact-action-1"))
     );
 
+    assert!(state.linked_artifacts.is_empty());
+
     let events = audit.list().await.unwrap();
     assert_eq!(events[0].policy_decision, "allow");
     assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn artifact_ref_result_links_artifact_to_conversation() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let store = Arc::new(MemoryArtifactStore::new());
+    let resolver = ArtifactStoreResolver::new(store.clone());
+    let executor = ArtifactProducingExecutor::new(
+        store.clone(),
+        Arc::new(DeterministicArtifactDescriptorFactory::new(
+            ArtifactKind::ToolResult,
+        )),
+    );
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_artifact_resolver(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        Some(&resolver),
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+
+    let artifact_id = ArtifactId::from("artifact-action-1");
+    assert!(matches!(outcome, ActionRuntimeOutcome::Completed { .. }));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let linked_artifact = state.linked_artifacts.get(&artifact_id).unwrap();
+    assert_eq!(linked_artifact.id, artifact_id);
+    assert_eq!(linked_artifact.kind, ArtifactKind::ToolResult);
+    assert_eq!(
+        linked_artifact.title.as_deref(),
+        Some("knowledge.search result")
+    );
+    assert_eq!(state.messages.len(), 0);
+    assert_eq!(state.participants.len(), 2);
+}
+
+#[tokio::test]
+async fn missing_artifact_ref_does_not_fail_completed_action() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let store = Arc::new(MemoryArtifactStore::new());
+    let resolver = ArtifactStoreResolver::new(store);
+    let artifact_id = ArtifactId::from("artifact-missing");
+    let executor = CountingExecutor::returning_artifact_ref(artifact_id.clone());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_artifact_resolver(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        Some(&resolver),
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+
+    assert!(matches!(outcome, ActionRuntimeOutcome::Completed { .. }));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&ActionId::from("action-1")).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+    assert_eq!(
+        action.result.as_ref().unwrap().payload,
+        ActionResultPayload::ArtifactRef(artifact_id)
+    );
+    assert!(state.linked_artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn text_result_does_not_attempt_artifact_linking() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let store = Arc::new(MemoryArtifactStore::new());
+    let resolver = ArtifactStoreResolver::new(store);
+    let executor = CountingExecutor::default();
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_artifact_resolver(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        Some(&resolver),
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+
+    assert!(matches!(outcome, ActionRuntimeOutcome::Completed { .. }));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    assert!(state.linked_artifacts.is_empty());
 }
 
 #[tokio::test]

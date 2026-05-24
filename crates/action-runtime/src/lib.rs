@@ -18,7 +18,7 @@ use chrono::Utc;
 use conversation_core::{ConversationId, ParticipantId};
 use conversation_kernel::{
     CompleteActionCommand, ConversationKernel, DenyActionCommand, FailActionCommand,
-    RequestActionCommand, RequireActionApprovalCommand, StartActionCommand,
+    LinkArtifactCommand, RequestActionCommand, RequireActionApprovalCommand, StartActionCommand,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -48,6 +48,39 @@ pub struct ProcessActionRequest<'a> {
     pub action_request: ActionRequest,
     pub requested_by: Option<ParticipantId>,
     pub runtime_actor: Option<ParticipantId>,
+}
+
+/// Resolves artifact descriptors from lightweight artifact references.
+#[async_trait::async_trait]
+pub trait ArtifactResolver: Send + Sync {
+    async fn resolve_artifact(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<ArtifactDescriptor>>;
+}
+
+/// Adapter that resolves artifacts from an `ArtifactStore`.
+pub struct ArtifactStoreResolver {
+    store: Arc<dyn ArtifactStore>,
+}
+
+impl ArtifactStoreResolver {
+    pub fn new(store: Arc<dyn ArtifactStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactResolver for ArtifactStoreResolver {
+    async fn resolve_artifact(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<ArtifactDescriptor>> {
+        self.store
+            .get(artifact_id)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+    }
 }
 
 /// Builds deterministic artifact descriptors from action requests.
@@ -130,6 +163,7 @@ pub struct ActionRuntime<'a> {
     pub policy: &'a CapabilityPolicy,
     pub executor: &'a dyn ActionExecutor,
     pub audit_log: &'a dyn AuditLog,
+    pub artifact_resolver: Option<&'a dyn ArtifactResolver>,
 }
 
 impl<'a> ActionRuntime<'a> {
@@ -194,9 +228,15 @@ impl<'a> ActionRuntime<'a> {
                                 conversation_id: conversation_id.clone(),
                                 action_id: action_id.clone(),
                                 result: result.clone(),
-                                completed_by: runtime_actor,
+                                completed_by: runtime_actor.clone(),
                             })
                             .await?;
+                        self.link_artifact_result_if_available(
+                            conversation_id,
+                            &result,
+                            runtime_actor.clone(),
+                        )
+                        .await?;
                         self.record_audit(AuditRecordInput {
                             request: &action_request,
                             side_effect: Some(&side_effect),
@@ -275,6 +315,33 @@ impl<'a> ActionRuntime<'a> {
                 Ok(ActionRuntimeOutcome::Denied { action_id, reason })
             }
         }
+    }
+
+    async fn link_artifact_result_if_available(
+        &self,
+        conversation_id: &ConversationId,
+        result: &ActionResult,
+        linked_by: Option<ParticipantId>,
+    ) -> Result<()> {
+        let ActionResultPayload::ArtifactRef(artifact_id) = &result.payload else {
+            return Ok(());
+        };
+
+        let Some(resolver) = self.artifact_resolver else {
+            return Ok(());
+        };
+
+        if let Some(artifact) = resolver.resolve_artifact(artifact_id).await? {
+            self.kernel
+                .link_artifact(LinkArtifactCommand {
+                    conversation_id: conversation_id.clone(),
+                    artifact,
+                    linked_by,
+                })
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn record_audit(&self, input: AuditRecordInput<'_>) -> Result<()> {
