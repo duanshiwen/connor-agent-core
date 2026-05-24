@@ -8,6 +8,7 @@ description = "In-process scheduler for AgentOS — manages scheduled jobs and p
 
 [dependencies]
 chrono.workspace = true
+notification-core = { path = "../notification-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -702,6 +702,7 @@ name = "scheduler"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "notification-core",
  "serde",
  "serde_json",
  "thiserror",

@@ -265,12 +265,76 @@ impl Scheduler {
 }
 
 // ---------------------------------------------------------------------------
+// ReminderNotificationBridge
+// ---------------------------------------------------------------------------
+
+/// Bridge that connects the scheduler to the notification system.
+/// Polls for due jobs and emits notifications for each one.
+pub struct ReminderNotificationBridge {
+    scheduler: Scheduler,
+    sink: std::sync::Arc<dyn notification_core::NotificationSink>,
+    store: std::sync::Arc<dyn notification_core::NotificationStore>,
+}
+
+impl ReminderNotificationBridge {
+    pub fn new(
+        scheduler: Scheduler,
+        sink: std::sync::Arc<dyn notification_core::NotificationSink>,
+        store: std::sync::Arc<dyn notification_core::NotificationStore>,
+    ) -> Self {
+        Self {
+            scheduler,
+            sink,
+            store,
+        }
+    }
+
+    /// Poll scheduler for due jobs, create notifications, emit and store them.
+    pub async fn process_due(&self) -> Vec<notification_core::Notification> {
+        let due_jobs = self.scheduler.poll_due_jobs();
+        let mut notifications = Vec::new();
+
+        for job in due_jobs {
+            let notification = notification_core::Notification {
+                id: notification_core::NotificationId(format!("notif-{}", job.id)),
+                title: "Reminder Due".to_string(),
+                body: format!("Reminder {} is due.", job.reminder_id),
+                notification_type: notification_core::NotificationType::ReminderDue,
+                source_reminder_id: Some(job.reminder_id.clone()),
+                created_at: self.scheduler.clock.now(),
+                read_at: None,
+            };
+
+            // Emit to sink
+            if let Err(e) = self.sink.emit(&notification).await {
+                eprintln!("Failed to emit notification: {}", e);
+            }
+
+            // Store
+            if let Err(e) = self.store.save(&notification).await {
+                eprintln!("Failed to store notification: {}", e);
+            }
+
+            notifications.push(notification);
+        }
+
+        notifications
+    }
+
+    /// Access the scheduler.
+    pub fn scheduler(&self) -> &Scheduler {
+        &self.scheduler
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notification_core::NotificationStore;
 
     fn ts() -> DateTime<Utc> {
         "2026-05-24T12:00:00Z".parse().unwrap()
@@ -476,5 +540,123 @@ mod tests {
         let due = scheduler.poll_due_jobs();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, ScheduledJobId::from("job-later"));
+    }
+
+    // ---- ReminderNotificationBridge tests ----
+
+    #[tokio::test]
+    async fn bridge_due_reminder_generates_notification() {
+        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let scheduler = Scheduler::new(clock.clone());
+        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
+        let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
+
+        // Schedule a job due now
+        bridge
+            .scheduler()
+            .schedule(
+                ScheduledJobId::from("job-1"),
+                "reminder-1".to_string(),
+                ts(),
+                ts(),
+            )
+            .unwrap();
+
+        let notifications = bridge.process_due().await;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].notification_type,
+            notification_core::NotificationType::ReminderDue
+        );
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bridge_completed_reminder_does_not_generate_notification() {
+        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let scheduler = Scheduler::new(clock.clone());
+        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
+        let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
+
+        // Schedule and cancel before due
+        bridge
+            .scheduler()
+            .schedule(
+                ScheduledJobId::from("job-1"),
+                "reminder-1".to_string(),
+                ts(),
+                ts(),
+            )
+            .unwrap();
+        bridge
+            .scheduler()
+            .cancel(&ScheduledJobId::from("job-1"))
+            .unwrap();
+
+        let notifications = bridge.process_due().await;
+        assert!(notifications.is_empty());
+        assert_eq!(sink.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn bridge_cancelled_reminder_does_not_fire() {
+        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let scheduler = Scheduler::new(clock.clone());
+        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
+        let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
+
+        // Schedule, then cancel
+        bridge
+            .scheduler()
+            .schedule(
+                ScheduledJobId::from("job-cancelled"),
+                "reminder-cancel".to_string(),
+                ts(),
+                ts(),
+            )
+            .unwrap();
+        bridge
+            .scheduler()
+            .cancel(&ScheduledJobId::from("job-cancelled"))
+            .unwrap();
+
+        let notifications = bridge.process_due().await;
+        assert!(notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bridge_snoozed_reminder_fires_after_duration() {
+        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let scheduler = Scheduler::new(clock.clone());
+        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
+        let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
+
+        // Schedule a job due in 1 hour (simulating snooze)
+        bridge
+            .scheduler()
+            .schedule(
+                ScheduledJobId::from("job-snoozed"),
+                "reminder-snooze".to_string(),
+                ts() + chrono::Duration::hours(1),
+                ts(),
+            )
+            .unwrap();
+
+        // Not due yet
+        let notifications = bridge.process_due().await;
+        assert!(notifications.is_empty());
+
+        // Advance clock
+        clock.advance(chrono::Duration::hours(1));
+
+        // Now should fire
+        let notifications = bridge.process_due().await;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(sink.count(), 1);
     }
 }
