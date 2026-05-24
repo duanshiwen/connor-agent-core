@@ -9,7 +9,8 @@
 use conversation_core::{
     ConversationId, ConversationKind, Participant, ParticipantId, ParticipantKind,
 };
-use entity_core::EntityKind;
+use conversation_kernel::{ConversationKernel, CreateConversationCommand, LinkEntityCommand};
+use entity_core::{EntityCapability, EntityDescriptor, EntityId, EntityKind, LinkReason};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -212,6 +213,113 @@ impl AssistantConversationService {
     ) -> AssistantConversationSpec {
         spec.linked_entity_kinds = linked_entity_kinds;
         spec
+    }
+
+    pub async fn create_main_conversation(
+        kernel: &ConversationKernel,
+        profile: &AssistantProfile,
+        owner: Participant,
+        linked_entities: Vec<EntityDescriptor>,
+    ) -> anyhow::Result<AssistantMainConversation> {
+        let spec = Self::main_conversation_spec(profile, owner)?;
+        let conversation_id = Self::create_conversation_from_spec(
+            kernel,
+            profile,
+            spec,
+            linked_entities,
+            Some(profile.owner_user_id.clone()),
+        )
+        .await?;
+
+        Ok(AssistantMainConversation {
+            assistant_id: profile.id.clone(),
+            conversation_id,
+            owner_user_id: profile.owner_user_id.clone(),
+        })
+    }
+
+    pub async fn create_group_conversation(
+        kernel: &ConversationKernel,
+        profile: &AssistantProfile,
+        humans: Vec<Participant>,
+        title: Option<String>,
+        linked_entities: Vec<EntityDescriptor>,
+        actor_id: Option<ParticipantId>,
+    ) -> anyhow::Result<ConversationId> {
+        let spec = Self::group_conversation_spec(profile, humans, title)?;
+        Self::create_conversation_from_spec(kernel, profile, spec, linked_entities, actor_id).await
+    }
+
+    async fn create_conversation_from_spec(
+        kernel: &ConversationKernel,
+        profile: &AssistantProfile,
+        spec: AssistantConversationSpec,
+        linked_entities: Vec<EntityDescriptor>,
+        actor_id: Option<ParticipantId>,
+    ) -> anyhow::Result<ConversationId> {
+        let conversation_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: spec.kind,
+                title: spec.title,
+                participants: spec.participants,
+                actor_id: actor_id.clone(),
+            })
+            .await?;
+
+        for entity in linked_entities {
+            kernel
+                .link_entity(LinkEntityCommand {
+                    conversation_id: conversation_id.clone(),
+                    entity,
+                    reason: LinkReason::SystemDefault,
+                    linked_by: actor_id
+                        .clone()
+                        .or_else(|| Some(profile.owner_user_id.clone())),
+                })
+                .await?;
+        }
+
+        Ok(conversation_id)
+    }
+
+    pub fn default_entity_descriptor(kind: EntityKind) -> EntityDescriptor {
+        let slug = format!("{}", EntityKindName(&kind));
+        EntityDescriptor {
+            id: EntityId::from(slug.clone()),
+            kind,
+            display_name: slug
+                .split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            capabilities: vec![EntityCapability::new("metadata")],
+            default_policy_ref: None,
+        }
+    }
+}
+
+struct EntityKindName<'a>(&'a EntityKind);
+
+impl fmt::Display for EntityKindName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self.0 {
+            EntityKind::Browser => "browser",
+            EntityKind::Mail => "mail",
+            EntityKind::Knowledge => "knowledge",
+            EntityKind::Reminder => "reminder",
+            EntityKind::Person => "person",
+            EntityKind::Device => "device",
+            EntityKind::Plugin => "plugin",
+            EntityKind::ExternalService => "external-service",
+            EntityKind::System => "system",
+        };
+        f.write_str(name)
     }
 }
 
@@ -448,5 +556,195 @@ mod tests {
 
         assert_eq!(preferences.get("tone"), Some("concise"));
         assert_eq!(preferences.get("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod kernel_integration_tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use conversation_core::{MessageContent, Visibility};
+    use conversation_journal::MemoryConversationJournal;
+    use conversation_kernel::{AppendMessageCommand, Clock, IdGenerator};
+    use std::sync::Arc;
+
+    struct SequentialIdGenerator {
+        counter: std::sync::Mutex<u64>,
+    }
+
+    impl SequentialIdGenerator {
+        fn new() -> Self {
+            Self {
+                counter: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl IdGenerator for SequentialIdGenerator {
+        fn new_id(&self) -> String {
+            let mut c = self.counter.lock().unwrap();
+            *c += 1;
+            format!("id-{}", c)
+        }
+    }
+
+    struct FixedClock {
+        time: DateTime<Utc>,
+    }
+
+    impl FixedClock {
+        fn new(time: DateTime<Utc>) -> Self {
+            Self { time }
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.time
+        }
+    }
+
+    fn kernel() -> ConversationKernel {
+        let journal = Arc::new(MemoryConversationJournal::new());
+        let id_gen = Arc::new(SequentialIdGenerator::new());
+        let clock = Arc::new(FixedClock::new("2026-05-24T13:00:00Z".parse().unwrap()));
+        ConversationKernel::with_generators(journal, id_gen, clock)
+    }
+
+    fn human(id: &str, name: &str) -> Participant {
+        Participant {
+            id: ParticipantId::from(id),
+            kind: ParticipantKind::Human,
+            display_name: name.to_string(),
+        }
+    }
+
+    fn profile() -> AssistantProfile {
+        AssistantProfile::new("assistant-main", "Assistant", ParticipantId::from("u1")).unwrap()
+    }
+
+    fn browser_entity() -> EntityDescriptor {
+        EntityDescriptor {
+            id: EntityId::from("browser-main"),
+            kind: EntityKind::Browser,
+            display_name: "Browser".to_string(),
+            capabilities: vec![EntityCapability::new("read_page")],
+            default_policy_ref: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_main_assistant_conversation_through_kernel() {
+        let kernel = kernel();
+        let profile = profile();
+
+        let main = AssistantConversationService::create_main_conversation(
+            &kernel,
+            &profile,
+            human("u1", "诗闻"),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let state = kernel.load_state(&main.conversation_id).await.unwrap();
+        assert_eq!(main.assistant_id, AssistantId::from("assistant-main"));
+        assert_eq!(main.owner_user_id, ParticipantId::from("u1"));
+        assert_eq!(state.participants.len(), 2);
+        assert!(state.participants.contains_key(&ParticipantId::from("u1")));
+        assert!(
+            state
+                .participants
+                .contains_key(&ParticipantId::from("assistant-main"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_main_conversation_links_browser_without_participant() {
+        let kernel = kernel();
+        let profile = profile();
+
+        let main = AssistantConversationService::create_main_conversation(
+            &kernel,
+            &profile,
+            human("u1", "诗闻"),
+            vec![browser_entity()],
+        )
+        .await
+        .unwrap();
+
+        let state = kernel.load_state(&main.conversation_id).await.unwrap();
+        assert!(
+            state
+                .linked_entities
+                .contains_key(&EntityId::from("browser-main"))
+        );
+        assert!(
+            !state
+                .participants
+                .contains_key(&ParticipantId::from("browser-main"))
+        );
+        assert_eq!(state.participants.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn assistant_conversation_can_immediately_append_user_message() {
+        let kernel = kernel();
+        let profile = profile();
+        let main = AssistantConversationService::create_main_conversation(
+            &kernel,
+            &profile,
+            human("u1", "诗闻"),
+            vec![browser_entity()],
+        )
+        .await
+        .unwrap();
+
+        let message_id = kernel
+            .append_message(AppendMessageCommand {
+                conversation_id: main.conversation_id.clone(),
+                sender_id: ParticipantId::from("u1"),
+                content: MessageContent::Text {
+                    text: "总结这个网页".to_string(),
+                },
+                reply_to: None,
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await
+            .unwrap();
+
+        let state = kernel.load_state(&main.conversation_id).await.unwrap();
+        assert!(state.messages_by_id.contains_key(&message_id));
+        assert!(
+            state
+                .linked_entities
+                .contains_key(&EntityId::from("browser-main"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_group_assistant_conversation_through_kernel() {
+        let kernel = kernel();
+        let profile = profile();
+
+        let conversation_id = AssistantConversationService::create_group_conversation(
+            &kernel,
+            &profile,
+            vec![human("u1", "诗闻"), human("u2", "Teammate")],
+            Some("Group".to_string()),
+            vec![],
+            Some(ParticipantId::from("u1")),
+        )
+        .await
+        .unwrap();
+
+        let state = kernel.load_state(&conversation_id).await.unwrap();
+        assert_eq!(state.participants.len(), 3);
+        assert!(
+            state
+                .participants
+                .contains_key(&ParticipantId::from("assistant-main"))
+        );
     }
 }

@@ -8,7 +8,14 @@ description = "Core Assistant domain types for AgentOS — profiles, capabilitie
 
 [dependencies]
 conversation-core = { path = "../conversation-core" }
+conversation-kernel = { path = "../conversation-kernel" }
 entity-core = { path = "../entity-core" }
+anyhow.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+conversation-journal = { path = "../conversation-journal" }
+tokio.workspace = true
