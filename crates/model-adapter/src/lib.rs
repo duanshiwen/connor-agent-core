@@ -2,9 +2,13 @@
 //!
 //! Text-only model adapter abstractions for AgentOS.
 //!
-//! This crate intentionally avoids concrete LLM provider integrations. It
-//! provides deterministic request/response types, a typed async executor trait,
-//! a small model registry, and a fake executor for tests and early runtime work.
+//! This crate provides deterministic request/response types, a typed async
+//! executor trait, a small model registry, and a fake executor for tests and
+//! early runtime work. The [`openai`] module supplies a concrete adapter for
+//! any OpenAI-compatible Chat Completions endpoint (DeepSeek, Qwen, vLLM, etc.).
+
+pub mod openai;
+pub use openai::{OpenAiCompatibleAdapter, OpenAiProviderConfig};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -159,7 +159,13 @@
 
 ### `model-adapter`
 
-模型适配器抽象层，为对话内核提供统一的 LLM 调用接口。支持不同的模型提供商通过适配器模式集成。
+模型适配器抽象层，为对话内核提供统一的 LLM 调用接口。包含：
+
+- `ModelAdapter` async trait — 统一 LLM 调用接口
+- `FakeModelAdapter` — 确定性假适配器，用于测试
+- `ModelRegistry` — 模型注册与解析
+- `OpenAiCompatibleAdapter` — 真实 LLM 适配器，支持所有 OpenAI Chat Completions API 兼容端点（DeepSeek、Qwen、OpenAI、vLLM、Ollama 等）
+- `OpenAiProviderConfig` — 支持从环境变量 `OPENAI_API_KEY`、`OPENAI_ENDPOINT`、`OPENAI_MODEL` 构建配置
 
 ### `artifact-core`
 
@@ -220,7 +226,7 @@ cargo test --workspace
 当前状态：
 
 ```text
-242 个测试全部通过
+519 个测试全部通过
 ```
 
 ### 格式化
