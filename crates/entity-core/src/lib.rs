@@ -8,7 +8,6 @@
 //! entities through `LinkedEntityBinding` metadata.
 
 use chrono::{DateTime, Utc};
-use conversation_core::ConversationId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -108,7 +107,7 @@ pub enum LinkReason {
 /// Metadata binding an entity to a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedEntityBinding {
-    pub conversation_id: ConversationId,
+    pub conversation_id: String,
     pub entity_id: EntityId,
     pub reason: LinkReason,
     pub linked_at: DateTime<Utc>,
@@ -238,7 +237,7 @@ mod tests {
     #[test]
     fn linked_entity_binding_serde_roundtrip() {
         let binding = LinkedEntityBinding {
-            conversation_id: ConversationId::from("conv-001"),
+            conversation_id: "conv-001".to_string(),
             entity_id: EntityId::from("browser-main"),
             reason: LinkReason::UserRequested,
             linked_at: "2026-05-24T11:00:00Z".parse().unwrap(),

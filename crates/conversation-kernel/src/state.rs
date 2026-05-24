@@ -4,6 +4,7 @@
 //! It is never mutated directly — always rebuilt from the event journal.
 
 use conversation_core::*;
+use entity_core::{EntityDescriptor, EntityId};
 use std::collections::HashMap;
 
 /// The projected state of a conversation, rebuilt from its event journal.
@@ -23,6 +24,9 @@ pub struct ConversationState {
 
     /// Thread index: thread_id → message IDs in that thread.
     pub threads: HashMap<ThreadId, Vec<MessageId>>,
+
+    /// Linked entities keyed by entity ID.
+    pub linked_entities: HashMap<EntityId, EntityDescriptor>,
 
     /// Agent runs keyed by run ID.
     pub agent_runs: HashMap<String, AgentRunState>,

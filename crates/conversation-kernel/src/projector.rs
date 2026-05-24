@@ -102,6 +102,22 @@ impl ConversationProjector {
                     .push(root_message_id.clone());
             }
 
+            ConversationEvent::EntityLinkedToConversation { entity, .. } => {
+                state
+                    .linked_entities
+                    .insert(entity.id.clone(), entity.clone());
+            }
+
+            ConversationEvent::EntityUnlinkedFromConversation { entity_id, .. } => {
+                state.linked_entities.remove(entity_id);
+            }
+
+            ConversationEvent::EntityStateObserved { .. }
+            | ConversationEvent::EntityQueried { .. } => {
+                // Observation/query metadata is append-only audit data for now.
+                // It does not change the current linked-entity projection.
+            }
+
             ConversationEvent::AgentRunRequested {
                 run_id,
                 trigger_message_id,

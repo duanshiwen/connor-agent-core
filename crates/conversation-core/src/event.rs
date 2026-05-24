@@ -8,6 +8,7 @@ use crate::message::{Message, MessageContent};
 use crate::participant::Participant;
 use crate::session::ConversationSession;
 use chrono::{DateTime, Utc};
+use entity_core::{EntityDescriptor, EntityId, LinkReason};
 use serde::{Deserialize, Serialize};
 
 /// Current persisted event envelope schema version.
@@ -122,6 +123,28 @@ pub enum ConversationEvent {
     /// An agent run was cancelled before completion.
     AgentRunCancelled { run_id: String, reason: String },
 
+    /// An entity was linked to the conversation.
+    EntityLinkedToConversation {
+        entity: EntityDescriptor,
+        reason: LinkReason,
+    },
+
+    /// An entity was unlinked from the conversation.
+    EntityUnlinkedFromConversation { entity_id: EntityId, reason: String },
+
+    /// Metadata about an entity state observation was recorded.
+    EntityStateObserved {
+        entity_id: EntityId,
+        state_ref: String,
+    },
+
+    /// Metadata about an entity query was recorded.
+    EntityQueried {
+        entity_id: EntityId,
+        query: String,
+        result_ref: Option<String>,
+    },
+
     /// An agent run timed out before completion.
     AgentRunTimedOut { run_id: String },
 }
@@ -133,6 +156,7 @@ mod tests {
     use crate::message::SuggestedAction;
     use crate::session::{ConversationKind, ConversationStatus};
     use crate::visibility::Visibility;
+    use entity_core::{EntityCapability, EntityKind};
 
     fn now() -> DateTime<Utc> {
         Utc::now()
@@ -264,6 +288,16 @@ mod tests {
     fn make_agent_run_timed_out() -> ConversationEvent {
         ConversationEvent::AgentRunTimedOut {
             run_id: "run-001".to_string(),
+        }
+    }
+
+    fn make_browser_entity() -> EntityDescriptor {
+        EntityDescriptor {
+            id: EntityId::from("browser-main"),
+            kind: EntityKind::Browser,
+            display_name: "Browser".to_string(),
+            capabilities: vec![EntityCapability::new("read_page")],
+            default_policy_ref: Some("policy/browser/default".to_string()),
         }
     }
 
@@ -418,6 +452,51 @@ mod tests {
     #[test]
     fn agent_run_timed_out_roundtrip() {
         let envelope = wrap_event(make_agent_run_timed_out());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn entity_linked_to_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::EntityLinkedToConversation {
+            entity: make_browser_entity(),
+            reason: LinkReason::UserRequested,
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn entity_unlinked_from_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::EntityUnlinkedFromConversation {
+            entity_id: EntityId::from("browser-main"),
+            reason: "user removed browser".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn entity_state_observed_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::EntityStateObserved {
+            entity_id: EntityId::from("browser-main"),
+            state_ref: "state/browser-main/001".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn entity_queried_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::EntityQueried {
+            entity_id: EntityId::from("browser-main"),
+            query: "current page title".to_string(),
+            result_ref: Some("query/browser-main/001".to_string()),
+        });
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.event, envelope.event);

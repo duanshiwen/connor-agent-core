@@ -4,6 +4,7 @@
 //! the data needed to produce one or more `ConversationEvent`s.
 
 use conversation_core::*;
+use entity_core::{EntityDescriptor, EntityId, LinkReason};
 
 /// Command to create a new conversation.
 #[derive(Debug, Clone)]
@@ -42,6 +43,43 @@ pub struct CreateAssistantSuggestionCommand {
     pub text: String,
     pub actions: Vec<SuggestedAction>,
     pub trigger: SuggestionTrigger,
+}
+
+/// Command to link an entity to a conversation.
+#[derive(Debug, Clone)]
+pub struct LinkEntityCommand {
+    pub conversation_id: ConversationId,
+    pub entity: EntityDescriptor,
+    pub reason: LinkReason,
+    pub linked_by: Option<ParticipantId>,
+}
+
+/// Command to unlink an entity from a conversation.
+#[derive(Debug, Clone)]
+pub struct UnlinkEntityCommand {
+    pub conversation_id: ConversationId,
+    pub entity_id: EntityId,
+    pub reason: String,
+    pub unlinked_by: Option<ParticipantId>,
+}
+
+/// Command to record metadata about an entity state observation.
+#[derive(Debug, Clone)]
+pub struct ObserveEntityStateCommand {
+    pub conversation_id: ConversationId,
+    pub entity_id: EntityId,
+    pub state_ref: String,
+    pub observed_by: Option<ParticipantId>,
+}
+
+/// Command to record metadata about an entity query.
+#[derive(Debug, Clone)]
+pub struct QueryEntityCommand {
+    pub conversation_id: ConversationId,
+    pub entity_id: EntityId,
+    pub query: String,
+    pub result_ref: Option<String>,
+    pub queried_by: Option<ParticipantId>,
 }
 
 /// Command to request an agent run (does NOT directly invoke a model).

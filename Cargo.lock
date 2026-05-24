@@ -87,6 +87,7 @@ name = "conversation-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "entity-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -116,6 +117,7 @@ dependencies = [
  "chrono",
  "conversation-core",
  "conversation-journal",
+ "entity-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -148,7 +150,6 @@ name = "entity-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "conversation-core",
  "serde",
  "serde_json",
  "thiserror",

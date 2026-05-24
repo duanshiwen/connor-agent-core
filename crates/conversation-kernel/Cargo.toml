@@ -9,6 +9,7 @@ description = "The Conversation Kernel — commands, projector, and slice builde
 [dependencies]
 conversation-core = { path = "../conversation-core" }
 conversation-journal = { path = "../conversation-journal" }
+entity-core = { path = "../entity-core" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

@@ -14,7 +14,8 @@ pub mod state;
 pub use commands::{
     AppendMessageCommand, CancelAgentRunCommand, CompleteAgentRunCommand,
     CreateAssistantSuggestionCommand, CreateConversationCommand, EditMessageCommand,
-    FailAgentRunCommand, RequestAgentRunCommand, StartAgentRunCommand, TimeoutAgentRunCommand,
+    FailAgentRunCommand, LinkEntityCommand, ObserveEntityStateCommand, QueryEntityCommand,
+    RequestAgentRunCommand, StartAgentRunCommand, TimeoutAgentRunCommand, UnlinkEntityCommand,
 };
 pub use kernel::{Clock, ConversationKernel, IdGenerator, UtcClock, UuidGenerator};
 pub use policy::{AgentRunReason, ConversationPolicy, RuleBasedPolicy};

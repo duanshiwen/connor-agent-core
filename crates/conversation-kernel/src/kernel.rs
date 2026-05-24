@@ -294,6 +294,107 @@ impl ConversationKernel {
         Ok(message_id)
     }
 
+    /// Link an entity to a conversation.
+    ///
+    /// Validates: conversation exists and optional actor is a participant.
+    /// Produces: `EntityLinkedToConversation`.
+    pub async fn link_entity(&self, cmd: LinkEntityCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.linked_by.as_ref(), "linked_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.linked_by,
+            now,
+            ConversationEvent::EntityLinkedToConversation {
+                entity: cmd.entity,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Unlink an entity from a conversation.
+    ///
+    /// Validates: conversation exists, entity is linked, optional actor is a participant.
+    /// Produces: `EntityUnlinkedFromConversation`.
+    pub async fn unlink_entity(&self, cmd: UnlinkEntityCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.unlinked_by.as_ref(), "unlinked_by")?;
+
+        if !state.linked_entities.contains_key(&cmd.entity_id) {
+            bail!("linked entity not found: {}", cmd.entity_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.unlinked_by,
+            now,
+            ConversationEvent::EntityUnlinkedFromConversation {
+                entity_id: cmd.entity_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Record metadata about an entity state observation.
+    ///
+    /// Validates: conversation exists, entity is linked, optional actor is a participant.
+    /// Produces: `EntityStateObserved`.
+    pub async fn observe_entity_state(&self, cmd: ObserveEntityStateCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.observed_by.as_ref(), "observed_by")?;
+
+        if !state.linked_entities.contains_key(&cmd.entity_id) {
+            bail!("linked entity not found: {}", cmd.entity_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.observed_by,
+            now,
+            ConversationEvent::EntityStateObserved {
+                entity_id: cmd.entity_id,
+                state_ref: cmd.state_ref,
+            },
+        )
+        .await
+    }
+
+    /// Record metadata about an entity query.
+    ///
+    /// Validates: conversation exists, entity is linked, optional actor is a participant.
+    /// Produces: `EntityQueried`.
+    pub async fn query_entity(&self, cmd: QueryEntityCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.queried_by.as_ref(), "queried_by")?;
+
+        if !state.linked_entities.contains_key(&cmd.entity_id) {
+            bail!("linked entity not found: {}", cmd.entity_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.queried_by,
+            now,
+            ConversationEvent::EntityQueried {
+                entity_id: cmd.entity_id,
+                query: cmd.query,
+                result_ref: cmd.result_ref,
+            },
+        )
+        .await
+    }
+
     /// Request an agent run. Builds a conversation slice and emits boundary events.
     ///
     /// Produces: `ContextSliceBuilt` + `AgentRunRequested`.
@@ -475,6 +576,30 @@ impl ConversationKernel {
             ConversationEvent::AgentRunTimedOut { run_id: cmd.run_id },
         )
         .await
+    }
+
+    fn validate_conversation_exists(
+        &self,
+        state: &ConversationState,
+        conversation_id: &ConversationId,
+    ) -> Result<()> {
+        if state.session.is_none() {
+            bail!("conversation not found: {}", conversation_id);
+        }
+        Ok(())
+    }
+
+    fn validate_optional_actor(
+        state: &ConversationState,
+        actor_id: Option<&ParticipantId>,
+        field_name: &str,
+    ) -> Result<()> {
+        if let Some(actor_id) = actor_id
+            && !state.participants.contains_key(actor_id)
+        {
+            bail!("{field_name} is not a participant: {actor_id}");
+        }
+        Ok(())
     }
 
     fn validate_visibility(state: &ConversationState, visibility: &Visibility) -> Result<()> {
