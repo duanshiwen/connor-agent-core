@@ -588,6 +588,159 @@ impl ConversationKernel {
         .await
     }
 
+    /// Record that an action was requested.
+    ///
+    /// Validates: conversation exists and optional actor is a participant.
+    /// Produces: `ActionRequested`.
+    pub async fn request_action(&self, cmd: RequestActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.requested_by.as_ref(), "requested_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.requested_by,
+            now,
+            ConversationEvent::ActionRequested {
+                action_request: cmd.action_request,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action requires approval before execution.
+    pub async fn require_action_approval(&self, cmd: RequireActionApprovalCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_action_not_terminal(&state, &cmd.conversation_id, &cmd.action_id)?;
+        Self::validate_optional_actor(&state, cmd.required_by.as_ref(), "required_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.required_by,
+            now,
+            ConversationEvent::ActionApprovalRequired {
+                action_id: cmd.action_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action was approved.
+    pub async fn approve_action(&self, cmd: ApproveActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        let action = self.validate_action_exists(&state, &cmd.conversation_id, &cmd.action_id)?;
+        if action.status != ConversationActionStatus::ApprovalRequired {
+            bail!("action is not awaiting approval: {}", cmd.action_id);
+        }
+        Self::validate_optional_actor(&state, Some(&cmd.approved_by), "approved_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.approved_by.clone()),
+            now,
+            ConversationEvent::ActionApproved {
+                action_id: cmd.action_id,
+                approved_by: cmd.approved_by,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action was denied.
+    pub async fn deny_action(&self, cmd: DenyActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_action_not_terminal(&state, &cmd.conversation_id, &cmd.action_id)?;
+        Self::validate_optional_actor(&state, cmd.denied_by.as_ref(), "denied_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.denied_by,
+            now,
+            ConversationEvent::ActionDenied {
+                action_id: cmd.action_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action started execution.
+    pub async fn start_action(&self, cmd: StartActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        let action = self.validate_action_exists(&state, &cmd.conversation_id, &cmd.action_id)?;
+        match action.status {
+            ConversationActionStatus::Requested | ConversationActionStatus::Approved => {}
+            ConversationActionStatus::ApprovalRequired => {
+                bail!("action requires approval before start: {}", cmd.action_id);
+            }
+            _ if action.status.is_terminal() => {
+                bail!("action already terminal: {}", cmd.action_id);
+            }
+            _ => bail!("action cannot start from status: {:?}", action.status),
+        }
+        Self::validate_optional_actor(&state, cmd.started_by.as_ref(), "started_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.started_by,
+            now,
+            ConversationEvent::ActionStarted {
+                action_id: cmd.action_id,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action completed execution.
+    pub async fn complete_action(&self, cmd: CompleteActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        let action = self.validate_action_exists(&state, &cmd.conversation_id, &cmd.action_id)?;
+        if action.status != ConversationActionStatus::Started {
+            bail!("action is not started: {}", cmd.action_id);
+        }
+        Self::validate_optional_actor(&state, cmd.completed_by.as_ref(), "completed_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.completed_by,
+            now,
+            ConversationEvent::ActionCompleted {
+                action_id: cmd.action_id,
+                result: cmd.result,
+            },
+        )
+        .await
+    }
+
+    /// Record that an action failed during execution.
+    pub async fn fail_action(&self, cmd: FailActionCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        let action = self.validate_action_exists(&state, &cmd.conversation_id, &cmd.action_id)?;
+        if action.status != ConversationActionStatus::Started {
+            bail!("action is not started: {}", cmd.action_id);
+        }
+        Self::validate_optional_actor(&state, cmd.failed_by.as_ref(), "failed_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.failed_by,
+            now,
+            ConversationEvent::ActionFailed {
+                action_id: cmd.action_id,
+                error_message: cmd.error_message,
+            },
+        )
+        .await
+    }
+
     fn validate_conversation_exists(
         &self,
         state: &ConversationState,
@@ -640,6 +793,32 @@ impl ConversationKernel {
                 Ok(())
             }
         }
+    }
+
+    fn validate_action_exists<'a>(
+        &self,
+        state: &'a ConversationState,
+        conversation_id: &ConversationId,
+        action_id: &action_core::ActionId,
+    ) -> Result<&'a ConversationActionState> {
+        self.validate_conversation_exists(state, conversation_id)?;
+        state
+            .actions
+            .get(action_id)
+            .with_context(|| format!("action not found: {action_id}"))
+    }
+
+    fn validate_action_not_terminal<'a>(
+        &self,
+        state: &'a ConversationState,
+        conversation_id: &ConversationId,
+        action_id: &action_core::ActionId,
+    ) -> Result<&'a ConversationActionState> {
+        let action = self.validate_action_exists(state, conversation_id, action_id)?;
+        if action.status.is_terminal() {
+            bail!("action already terminal: {action_id}");
+        }
+        Ok(action)
     }
 
     fn validate_agent_run_transition(

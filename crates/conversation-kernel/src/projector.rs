@@ -3,7 +3,8 @@
 use crate::state::ConversationState;
 use anyhow::Result;
 use conversation_core::{
-    AgentRunState, AgentRunStatus, ConversationEvent, ConversationEventEnvelope,
+    AgentRunState, AgentRunStatus, ConversationActionState, ConversationActionStatus,
+    ConversationEvent, ConversationEventEnvelope,
 };
 
 /// Replays a sequence of events into a `ConversationState`.
@@ -190,6 +191,71 @@ impl ConversationProjector {
                     run.error_code = None;
                     run.error_message = None;
                     run.cancel_reason = None;
+                }
+            }
+
+            ConversationEvent::ActionRequested { action_request } => {
+                state.actions.insert(
+                    action_request.action_id.clone(),
+                    ConversationActionState::requested(action_request.clone()),
+                );
+            }
+
+            ConversationEvent::ActionApprovalRequired { action_id, reason } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::ApprovalRequired;
+                    action.approval_required_reason = Some(reason.clone());
+                    action.denial_reason = None;
+                    action.result = None;
+                    action.error_message = None;
+                }
+            }
+
+            ConversationEvent::ActionApproved {
+                action_id,
+                approved_by,
+            } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::Approved;
+                    action.approved_by = Some(approved_by.clone());
+                    action.denial_reason = None;
+                    action.error_message = None;
+                }
+            }
+
+            ConversationEvent::ActionDenied { action_id, reason } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::Denied;
+                    action.denial_reason = Some(reason.clone());
+                    action.result = None;
+                    action.error_message = None;
+                }
+            }
+
+            ConversationEvent::ActionStarted { action_id } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::Started;
+                    action.result = None;
+                    action.error_message = None;
+                }
+            }
+
+            ConversationEvent::ActionCompleted { action_id, result } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::Completed;
+                    action.result = Some(result.clone());
+                    action.error_message = None;
+                }
+            }
+
+            ConversationEvent::ActionFailed {
+                action_id,
+                error_message,
+            } => {
+                if let Some(action) = state.actions.get_mut(action_id) {
+                    action.status = ConversationActionStatus::Failed;
+                    action.result = None;
+                    action.error_message = Some(error_message.clone());
                 }
             }
 

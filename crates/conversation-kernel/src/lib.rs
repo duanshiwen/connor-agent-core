@@ -12,10 +12,12 @@ pub mod slice_builder;
 pub mod state;
 
 pub use commands::{
-    AppendMessageCommand, CancelAgentRunCommand, CompleteAgentRunCommand,
-    CreateAssistantSuggestionCommand, CreateConversationCommand, EditMessageCommand,
-    FailAgentRunCommand, LinkEntityCommand, ObserveEntityStateCommand, QueryEntityCommand,
-    RequestAgentRunCommand, StartAgentRunCommand, TimeoutAgentRunCommand, UnlinkEntityCommand,
+    AppendMessageCommand, ApproveActionCommand, CancelAgentRunCommand, CompleteActionCommand,
+    CompleteAgentRunCommand, CreateAssistantSuggestionCommand, CreateConversationCommand,
+    DenyActionCommand, EditMessageCommand, FailActionCommand, FailAgentRunCommand,
+    LinkEntityCommand, ObserveEntityStateCommand, QueryEntityCommand, RequestActionCommand,
+    RequestAgentRunCommand, RequireActionApprovalCommand, StartActionCommand, StartAgentRunCommand,
+    TimeoutAgentRunCommand, UnlinkEntityCommand,
 };
 pub use kernel::{Clock, ConversationKernel, IdGenerator, UtcClock, UuidGenerator};
 pub use policy::{AgentRunReason, ConversationPolicy, RuleBasedPolicy};

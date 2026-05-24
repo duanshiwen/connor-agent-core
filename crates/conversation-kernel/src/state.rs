@@ -3,6 +3,7 @@
 //! `ConversationState` is a read model derived from replaying events.
 //! It is never mutated directly — always rebuilt from the event journal.
 
+use action_core::ActionId;
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId};
 use std::collections::HashMap;
@@ -27,6 +28,9 @@ pub struct ConversationState {
 
     /// Linked entities keyed by entity ID.
     pub linked_entities: HashMap<EntityId, EntityDescriptor>,
+
+    /// Actions keyed by action ID.
+    pub actions: HashMap<ActionId, ConversationActionState>,
 
     /// Agent runs keyed by run ID.
     pub agent_runs: HashMap<String, AgentRunState>,

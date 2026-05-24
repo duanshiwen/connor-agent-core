@@ -3,6 +3,7 @@
 //! Commands are validated before producing events. Each command contains
 //! the data needed to produce one or more `ConversationEvent`s.
 
+use action_core::{ActionId, ActionRequest, ActionResult};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
 
@@ -124,6 +125,66 @@ pub struct CancelAgentRunCommand {
     pub run_id: String,
     pub reason: String,
     pub cancelled_by: ParticipantId,
+}
+
+/// Command to record that an action was requested.
+#[derive(Debug, Clone)]
+pub struct RequestActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_request: ActionRequest,
+    pub requested_by: Option<ParticipantId>,
+}
+
+/// Command to record that an action requires approval.
+#[derive(Debug, Clone)]
+pub struct RequireActionApprovalCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub reason: String,
+    pub required_by: Option<ParticipantId>,
+}
+
+/// Command to record action approval.
+#[derive(Debug, Clone)]
+pub struct ApproveActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub approved_by: ParticipantId,
+}
+
+/// Command to record action denial.
+#[derive(Debug, Clone)]
+pub struct DenyActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub reason: String,
+    pub denied_by: Option<ParticipantId>,
+}
+
+/// Command to record action execution start.
+#[derive(Debug, Clone)]
+pub struct StartActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub started_by: Option<ParticipantId>,
+}
+
+/// Command to record action execution completion.
+#[derive(Debug, Clone)]
+pub struct CompleteActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub result: ActionResult,
+    pub completed_by: Option<ParticipantId>,
+}
+
+/// Command to record action execution failure.
+#[derive(Debug, Clone)]
+pub struct FailActionCommand {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub error_message: String,
+    pub failed_by: Option<ParticipantId>,
 }
 
 /// Command to mark an agent run as timed out.

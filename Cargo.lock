@@ -160,6 +160,7 @@ dependencies = [
 name = "conversation-core"
 version = "0.1.0"
 dependencies = [
+ "action-core",
  "chrono",
  "entity-core",
  "serde",
@@ -186,6 +187,7 @@ dependencies = [
 name = "conversation-kernel"
 version = "0.1.0"
 dependencies = [
+ "action-core",
  "anyhow",
  "async-trait",
  "chrono",

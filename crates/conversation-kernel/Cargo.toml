@@ -7,6 +7,7 @@ authors.workspace = true
 description = "The Conversation Kernel — commands, projector, and slice builder."
 
 [dependencies]
+action-core = { path = "../action-core" }
 conversation-core = { path = "../conversation-core" }
 conversation-journal = { path = "../conversation-journal" }
 entity-core = { path = "../entity-core" }

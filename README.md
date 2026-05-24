@@ -23,6 +23,8 @@ The kernel is designed as an append-only, replayable, testable conversation subs
 └── crates
     ├── conversation-core
     │   └── src
+    │       ├── action_lifecycle.rs
+    │       ├── agent_run.rs
     │       ├── error.rs
     │       ├── event.rs
     │       ├── ids.rs
@@ -47,7 +49,19 @@ The kernel is designed as an append-only, replayable, testable conversation subs
     │   │   ├── slice_builder.rs
     │   │   └── state.rs
     │   └── tests
-    │       └── full_lifecycle.rs
+    │       ├── action_lifecycle.rs
+    │       ├── agent_run_lifecycle.rs
+    │       ├── command_validation.rs
+    │       ├── full_lifecycle.rs
+    │       ├── linked_entity_events.rs
+    │       └── message_edit.rs
+    ├── entity-core
+    ├── assistant-core
+    ├── model-adapter
+    ├── agent-runtime
+    ├── action-core
+    ├── capability-policy
+    ├── audit-log
     └── conversation-runtime
         └── src
             └── lib.rs
@@ -113,9 +127,17 @@ Supported commands:
 - `RequestAgentRunCommand`
 - `CompleteAgentRunCommand`
 
+### `agent-runtime`
+
+Current runtime boundary for text-only agent runs. It bridges the conversation kernel with `model-adapter`, builds context, calls a model adapter, appends assistant output, and records agent run lifecycle events.
+
+### `action-core`, `capability-policy`, and `audit-log`
+
+Foundation crates for the future action execution pipeline. The conversation kernel now records action lifecycle events and projects action state, but action execution orchestration, policy gating, and audit writing remain higher-layer responsibilities.
+
 ### `conversation-runtime`
 
-Runtime boundary for consuming `AgentRunRequested` events and writing agent outputs back into the conversation.
+Deprecated runtime boundary for consuming `AgentRunRequested` events and writing agent outputs back into the conversation. It has been replaced by `agent-runtime` for current development.
 
 Includes:
 
@@ -171,7 +193,7 @@ cargo test --workspace
 Current status:
 
 ```text
-108 tests passed
+230 tests passed
 ```
 
 ### Format

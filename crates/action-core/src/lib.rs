@@ -130,7 +130,7 @@ pub enum ActionStatus {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// The result payload of an action execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ActionResultPayload {
     /// Plain text result.
@@ -144,7 +144,7 @@ pub enum ActionResultPayload {
 }
 
 /// Complete result of an action execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionResult {
     pub status: ActionStatus,
     pub payload: ActionResultPayload,
@@ -157,7 +157,7 @@ pub struct ActionResult {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// A request to execute an action.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionRequest {
     /// Unique ID for this invocation.
     pub action_id: ActionId,

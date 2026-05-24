@@ -7,6 +7,7 @@ use crate::ids::{ConversationId, EventId, MessageId, ParticipantId};
 use crate::message::{Message, MessageContent};
 use crate::participant::Participant;
 use crate::session::ConversationSession;
+use action_core::{ActionId, ActionRequest, ActionResult};
 use chrono::{DateTime, Utc};
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,36 @@ pub enum ConversationEvent {
     /// An agent run was cancelled before completion.
     AgentRunCancelled { run_id: String, reason: String },
 
+    /// An action was requested in the conversation.
+    ActionRequested { action_request: ActionRequest },
+
+    /// An action requires approval before it can execute.
+    ActionApprovalRequired { action_id: ActionId, reason: String },
+
+    /// An action was approved by a participant.
+    ActionApproved {
+        action_id: ActionId,
+        approved_by: ParticipantId,
+    },
+
+    /// An action was denied and must not execute.
+    ActionDenied { action_id: ActionId, reason: String },
+
+    /// An action started execution.
+    ActionStarted { action_id: ActionId },
+
+    /// An action completed execution.
+    ActionCompleted {
+        action_id: ActionId,
+        result: ActionResult,
+    },
+
+    /// An action failed during execution.
+    ActionFailed {
+        action_id: ActionId,
+        error_message: String,
+    },
+
     /// An entity was linked to the conversation.
     EntityLinkedToConversation {
         entity: EntityDescriptor,
@@ -156,6 +187,7 @@ mod tests {
     use crate::message::SuggestedAction;
     use crate::session::{ConversationKind, ConversationStatus};
     use crate::visibility::Visibility;
+    use action_core::{ActionKind, ActionResultPayload, ActionStatus};
     use entity_core::{EntityCapability, EntityKind};
 
     fn now() -> DateTime<Utc> {
@@ -288,6 +320,27 @@ mod tests {
     fn make_agent_run_timed_out() -> ConversationEvent {
         ConversationEvent::AgentRunTimedOut {
             run_id: "run-001".to_string(),
+        }
+    }
+
+    fn make_action_request() -> ActionRequest {
+        ActionRequest {
+            action_id: ActionId::from("action-001"),
+            action_kind: ActionKind::from("knowledge.search"),
+            input: serde_json::json!({"query": "agent os"}),
+            requested_by: "u1".to_string(),
+            conversation_id: Some("conv-001".to_string()),
+            message_id: Some("msg-001".to_string()),
+            requested_at: now(),
+        }
+    }
+
+    fn make_action_result() -> ActionResult {
+        ActionResult {
+            status: ActionStatus::Completed,
+            payload: ActionResultPayload::Text("search complete".to_string()),
+            summary: "Search completed".to_string(),
+            completed_at: now(),
         }
     }
 
@@ -452,6 +505,81 @@ mod tests {
     #[test]
     fn agent_run_timed_out_roundtrip() {
         let envelope = wrap_event(make_agent_run_timed_out());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_requested_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionRequested {
+            action_request: make_action_request(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_approval_required_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionApprovalRequired {
+            action_id: ActionId::from("action-001"),
+            reason: "write requires approval".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_approved_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionApproved {
+            action_id: ActionId::from("action-001"),
+            approved_by: ParticipantId::from("u1"),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_denied_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionDenied {
+            action_id: ActionId::from("action-001"),
+            reason: "denied by policy".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_started_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionStarted {
+            action_id: ActionId::from("action-001"),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_completed_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionCompleted {
+            action_id: ActionId::from("action-001"),
+            result: make_action_result(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn action_failed_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ActionFailed {
+            action_id: ActionId::from("action-001"),
+            error_message: "executor failed".to_string(),
+        });
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.event, envelope.event);

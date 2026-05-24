@@ -6,6 +6,7 @@
 //! IDs, events, messages, participants, visibility rules, sessions, and slices.
 //! All types are serializable and designed for event-sourced append-only workflows.
 
+pub mod action_lifecycle;
 pub mod agent_run;
 pub mod error;
 pub mod event;
@@ -17,6 +18,7 @@ pub mod slice;
 pub mod visibility;
 
 // Re-export commonly used types for convenience.
+pub use action_lifecycle::{ConversationActionState, ConversationActionStatus};
 pub use agent_run::{AgentRunState, AgentRunStatus};
 pub use error::CoreError;
 pub use event::{
