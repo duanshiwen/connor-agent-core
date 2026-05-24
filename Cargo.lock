@@ -450,6 +450,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-entity"
+version = "0.1.0"
+dependencies = [
+ "artifact-core",
+ "asset-core",
+ "async-trait",
+ "chrono",
+ "entity-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

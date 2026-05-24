@@ -16,6 +16,7 @@ members = [
     "crates/surface-core",
     "crates/asset-core",
     "crates/asset-index",
+    "crates/knowledge-entity",
 ]
 resolver = "2"
 
