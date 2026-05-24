@@ -1954,4 +1954,153 @@ mod tests {
         assert_eq!(action.status, ConversationActionStatus::Failed);
         assert_eq!(audit.list().await.unwrap()[0].result_status, "failed");
     }
+
+    // ---- PR 37: Browser AgentRuntime proposal integration ----
+
+    async fn process_static_browser_action_response(
+        response_text: &str,
+    ) -> (
+        AgentRunWithActionsOutcome,
+        ConversationKernel,
+        ConversationId,
+        String,
+        audit_log::MemoryAuditSink,
+    ) {
+        let kernel = test_kernel();
+        let (conv_id, user_msg, run_id) = setup_run(&kernel).await;
+        let adapter = StaticAdapter {
+            text: response_text.to_string(),
+        };
+        let context_builder = AgentContextBuilder::new(50);
+        let config = AgentRuntimeConfig::default();
+        let mut registry = action_core::ActionRegistry::new();
+        browser_entity::register_browser_action_schemas(&mut registry).unwrap();
+        let policy = capability_policy::CapabilityPolicy::default_safe();
+        let executor = browser_entity::FakeBrowserExecutor::new(chrono::Utc::now());
+        let audit = audit_log::MemoryAuditSink::new();
+        let action_runtime = action_runtime::ActionRuntime {
+            kernel: &kernel,
+            registry: &registry,
+            policy: &policy,
+            executor: &executor,
+            audit_log: &audit,
+            artifact_resolver: None,
+        };
+        let detector = KeywordActionProposalDetector;
+
+        let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
+            kernel: &kernel,
+            adapter: &adapter,
+            context_builder: &context_builder,
+            config: &config,
+            conversation_id: &conv_id,
+            run_id: &run_id,
+            trigger_message_id: &user_msg,
+            agent_participant_id: &ParticipantId::from("a1"),
+            detector: &detector,
+            action_runtime: &action_runtime,
+        })
+        .await
+        .unwrap();
+
+        (outcome, kernel, conv_id, run_id, audit)
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_executes_browser_extract_content_proposal() {
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_browser_action_response(
+            "I will extract. ACTION browser.extract_content {\"url\":\"https://example.com\"}",
+        )
+        .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome,
+                output_message_id,
+                ..
+            } => {
+                assert!(matches!(
+                    action_outcome,
+                    action_runtime::ActionRuntimeOutcome::Completed { .. }
+                ));
+                output_message_id
+            }
+            _ => panic!("expected completed with action"),
+        };
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Completed);
+        assert_eq!(audit.list().await.unwrap()[0].policy_decision, "allow");
+        assert_eq!(audit.list().await.unwrap()[0].result_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_browser_open_url_approval_required() {
+        let (outcome, kernel, conv_id, run_id, audit) =
+            process_static_browser_action_response(
+                "I will open. ACTION browser.open_url {\"url\":\"https://example.com\",\"take_snapshot\":true}",
+            )
+            .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome,
+                output_message_id,
+                ..
+            } => {
+                assert!(matches!(
+                    action_outcome,
+                    action_runtime::ActionRuntimeOutcome::ApprovalRequired { .. }
+                ));
+                output_message_id
+            }
+            _ => panic!("expected completed with action"),
+        };
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+        assert_eq!(audit.list().await.unwrap()[0].policy_decision, "ask");
+        assert_eq!(
+            audit.list().await.unwrap()[0].result_status,
+            "approval_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_browser_capture_snapshot_approval_required() {
+        let (outcome, kernel, conv_id, run_id, audit) =
+            process_static_browser_action_response(
+                "I will capture. ACTION browser.capture_snapshot {\"url\":\"https://example.com\",\"include_html\":false}",
+            )
+            .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome,
+                output_message_id,
+                ..
+            } => {
+                assert!(matches!(
+                    action_outcome,
+                    action_runtime::ActionRuntimeOutcome::ApprovalRequired { .. }
+                ));
+                output_message_id
+            }
+            _ => panic!("expected completed with action"),
+        };
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+        assert_eq!(audit.list().await.unwrap()[0].policy_decision, "ask");
+        assert_eq!(
+            audit.list().await.unwrap()[0].result_status,
+            "approval_required"
+        );
+    }
 }

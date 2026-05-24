@@ -22,6 +22,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 audit-log = { path = "../audit-log" }
+browser-entity = { path = "../browser-entity" }
 capability-policy = { path = "../capability-policy" }
 conversation-journal = { path = "../conversation-journal" }
 knowledge-entity = { path = "../knowledge-entity" }
