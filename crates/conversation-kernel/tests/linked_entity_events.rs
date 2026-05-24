@@ -79,7 +79,7 @@ async fn create_conversation(kernel: &ConversationKernel) -> ConversationId {
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::AgentTask,
             title: Some("Linked entity".to_string()),
-            participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+            participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await

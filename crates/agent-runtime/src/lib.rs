@@ -14,6 +14,8 @@
 //!     → kernel.complete_agent_run(run_id)
 //! ```
 
+use action_core::{ActionId, ActionKind, ActionRequest};
+use action_runtime::{ActionRuntime, ActionRuntimeOutcome, ProcessActionRequest};
 use anyhow::{Context, Result};
 use conversation_core::*;
 use conversation_kernel::{ConversationKernel, ConversationState};
@@ -171,6 +173,87 @@ impl PromptRenderer {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Action Proposal Detection
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Deterministic action proposal extracted from model output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentActionProposal {
+    pub action_id: ActionId,
+    pub action_kind: ActionKind,
+    pub input: serde_json::Value,
+    pub summary: String,
+}
+
+/// Detects whether a model response proposes an action.
+pub trait ActionProposalDetector: Send + Sync {
+    fn detect(
+        &self,
+        context: &AgentContext,
+        model_response: &ModelResponse,
+    ) -> Option<AgentActionProposal>;
+}
+
+/// Detector that never proposes actions. Preserves text-only behavior.
+#[derive(Debug, Default)]
+pub struct NoopActionProposalDetector;
+
+impl ActionProposalDetector for NoopActionProposalDetector {
+    fn detect(
+        &self,
+        _context: &AgentContext,
+        _model_response: &ModelResponse,
+    ) -> Option<AgentActionProposal> {
+        None
+    }
+}
+
+/// Deterministic fake detector for tests and early action integration.
+///
+/// It recognizes response markers like:
+///
+/// ```text
+/// ACTION knowledge.search {"query":"agent os"}
+/// ACTION knowledge.save_entry {"title":"AgentOS"}
+/// ACTION mail.send {"to":"user@example.com"}
+/// ```
+#[derive(Debug, Default)]
+pub struct KeywordActionProposalDetector;
+
+impl ActionProposalDetector for KeywordActionProposalDetector {
+    fn detect(
+        &self,
+        _context: &AgentContext,
+        model_response: &ModelResponse,
+    ) -> Option<AgentActionProposal> {
+        let marker = "ACTION ";
+        let start = model_response.text.find(marker)? + marker.len();
+        let rest = model_response.text[start..].trim();
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let kind = parts.next()?.trim();
+        if kind.is_empty() {
+            return None;
+        }
+        let input_text = parts.next().unwrap_or("{}").trim();
+        let input = if input_text.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(input_text).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "raw": input_text,
+                })
+            })
+        };
+        Some(AgentActionProposal {
+            action_id: ActionId::from(format!("action-{}", uuid::Uuid::new_v4())),
+            action_kind: ActionKind::from(kind),
+            input,
+            summary: format!("Proposed action {kind}"),
+        })
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Agent Run Processor
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -189,6 +272,44 @@ pub enum AgentRunOutcome {
         error_code: String,
         error_message: String,
     },
+}
+
+/// Result of processing a run with optional action proposal handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentRunWithActionsOutcome {
+    /// No action was detected; normal text path completed.
+    CompletedText {
+        run_id: String,
+        output_message_id: MessageId,
+        response_text: String,
+    },
+    /// An action was detected and processed through action-runtime.
+    CompletedWithAction {
+        run_id: String,
+        output_message_id: MessageId,
+        response_text: String,
+        action_outcome: ActionRuntimeOutcome,
+    },
+    /// Run failed.
+    Failed {
+        run_id: String,
+        error_code: String,
+        error_message: String,
+    },
+}
+
+/// Request to process a run with optional action integration.
+pub struct ProcessRunWithActionsRequest<'a> {
+    pub kernel: &'a ConversationKernel,
+    pub adapter: &'a dyn ModelAdapter,
+    pub context_builder: &'a AgentContextBuilder,
+    pub config: &'a AgentRuntimeConfig,
+    pub conversation_id: &'a ConversationId,
+    pub run_id: &'a str,
+    pub trigger_message_id: &'a MessageId,
+    pub agent_participant_id: &'a ParticipantId,
+    pub detector: &'a dyn ActionProposalDetector,
+    pub action_runtime: &'a ActionRuntime<'a>,
 }
 
 /// Request to process a single agent run.
@@ -313,6 +434,164 @@ impl AgentRunProcessor {
             response_text: response.text,
         })
     }
+
+    /// Process a pending run and route deterministic action proposals through action-runtime.
+    pub async fn process_with_actions(
+        req: ProcessRunWithActionsRequest<'_>,
+    ) -> Result<AgentRunWithActionsOutcome> {
+        let ProcessRunWithActionsRequest {
+            kernel,
+            adapter,
+            context_builder,
+            config,
+            conversation_id,
+            run_id,
+            trigger_message_id,
+            agent_participant_id,
+            detector,
+            action_runtime,
+        } = req;
+
+        kernel
+            .start_agent_run(conversation_kernel::StartAgentRunCommand {
+                conversation_id: conversation_id.clone(),
+                run_id: run_id.to_string(),
+                started_by: agent_participant_id.clone(),
+            })
+            .await?;
+
+        let state = kernel.load_state(conversation_id).await?;
+        let context = match context_builder.build(&state, run_id, trigger_message_id, config) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                kernel
+                    .fail_agent_run(conversation_kernel::FailAgentRunCommand {
+                        conversation_id: conversation_id.clone(),
+                        run_id: run_id.to_string(),
+                        error_code: "context_build_failed".to_string(),
+                        error_message: e.to_string(),
+                        failed_by: agent_participant_id.clone(),
+                    })
+                    .await?;
+                return Ok(AgentRunWithActionsOutcome::Failed {
+                    run_id: run_id.to_string(),
+                    error_code: "context_build_failed".to_string(),
+                    error_message: e.to_string(),
+                });
+            }
+        };
+
+        let request = PromptRenderer::render(&context);
+        let response = match adapter.complete(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                kernel
+                    .fail_agent_run(conversation_kernel::FailAgentRunCommand {
+                        conversation_id: conversation_id.clone(),
+                        run_id: run_id.to_string(),
+                        error_code: "model_call_failed".to_string(),
+                        error_message: e.to_string(),
+                        failed_by: agent_participant_id.clone(),
+                    })
+                    .await?;
+                return Ok(AgentRunWithActionsOutcome::Failed {
+                    run_id: run_id.to_string(),
+                    error_code: "model_call_failed".to_string(),
+                    error_message: e.to_string(),
+                });
+            }
+        };
+
+        let action_outcome = if let Some(proposal) = detector.detect(&context, &response) {
+            let action_request = ActionRequest {
+                action_id: proposal.action_id,
+                action_kind: proposal.action_kind,
+                input: proposal.input,
+                requested_by: agent_participant_id.to_string(),
+                conversation_id: Some(conversation_id.to_string()),
+                message_id: Some(trigger_message_id.to_string()),
+                requested_at: chrono::Utc::now(),
+            };
+            Some(
+                action_runtime
+                    .process(ProcessActionRequest {
+                        conversation_id,
+                        action_request,
+                        requested_by: Some(agent_participant_id.clone()),
+                        runtime_actor: Some(agent_participant_id.clone()),
+                    })
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        let response_text = match &action_outcome {
+            Some(outcome) => format!(
+                "{}
+
+[Action outcome] {}",
+                response.text,
+                summarize_action_outcome(outcome)
+            ),
+            None => response.text.clone(),
+        };
+
+        let output_message_id = kernel
+            .append_message(conversation_kernel::AppendMessageCommand {
+                conversation_id: conversation_id.clone(),
+                sender_id: agent_participant_id.clone(),
+                content: MessageContent::Text {
+                    text: response_text.clone(),
+                },
+                reply_to: Some(trigger_message_id.clone()),
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await?;
+
+        kernel
+            .complete_agent_run(conversation_kernel::CompleteAgentRunCommand {
+                conversation_id: conversation_id.clone(),
+                run_id: run_id.to_string(),
+                output_message_id: output_message_id.clone(),
+                completed_by: agent_participant_id.clone(),
+            })
+            .await?;
+
+        if let Some(action_outcome) = action_outcome {
+            Ok(AgentRunWithActionsOutcome::CompletedWithAction {
+                run_id: run_id.to_string(),
+                output_message_id,
+                response_text,
+                action_outcome,
+            })
+        } else {
+            Ok(AgentRunWithActionsOutcome::CompletedText {
+                run_id: run_id.to_string(),
+                output_message_id,
+                response_text,
+            })
+        }
+    }
+}
+
+fn summarize_action_outcome(outcome: &ActionRuntimeOutcome) -> String {
+    match outcome {
+        ActionRuntimeOutcome::Completed { action_id, result } => {
+            format!("action {action_id} completed: {}", result.summary)
+        }
+        ActionRuntimeOutcome::ApprovalRequired { action_id, reason } => {
+            format!("action {action_id} requires approval: {reason}")
+        }
+        ActionRuntimeOutcome::Denied { action_id, reason } => {
+            format!("action {action_id} denied: {reason}")
+        }
+        ActionRuntimeOutcome::Failed {
+            action_id,
+            error_message,
+        } => format!("action {action_id} failed: {error_message}"),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -374,6 +653,7 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use audit_log::AuditLog;
     use conversation_journal::MemoryConversationJournal;
     use conversation_kernel::{Clock, IdGenerator};
     use std::sync::Arc;
@@ -447,7 +727,7 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -495,7 +775,7 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -541,7 +821,7 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -675,7 +955,7 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: Some("Test Task".to_string()),
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -753,13 +1033,13 @@ mod tests {
     async fn e2e_model_failure_records_failed_run() {
         let kernel = test_kernel();
         // Use an adapter that rejects empty requests.
-        let adapter = FakeModelAdapter::default();
+        let _adapter = FakeModelAdapter::default();
 
         let conv_id = kernel
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -861,7 +1141,7 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent_participant("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -898,5 +1178,261 @@ mod tests {
             .unwrap();
 
         assert!(matches!(outcome, AgentRunOutcome::Completed { .. }));
+    }
+
+    // ── AgentRunProcessor action integration tests ───────────────────────
+
+    struct StaticAdapter {
+        text: String,
+    }
+
+    #[async_trait]
+    impl ModelAdapter for StaticAdapter {
+        async fn complete(
+            &self,
+            request: ModelRequest,
+        ) -> Result<ModelResponse, ModelAdapterError> {
+            Ok(ModelResponse {
+                text: self.text.clone(),
+                usage: None,
+                model_id: request.model_id,
+            })
+        }
+    }
+
+    fn action_registry() -> action_core::ActionRegistry {
+        let mut registry = action_core::ActionRegistry::new();
+        for (kind, side_effect) in [
+            ("knowledge.search", action_core::SideEffectKind::ReadOnly),
+            (
+                "knowledge.save_entry",
+                action_core::SideEffectKind::RuntimeStateMutation,
+            ),
+            (
+                "mail.send",
+                action_core::SideEffectKind::ExternalSystemMutation,
+            ),
+        ] {
+            registry
+                .register(action_core::ActionSchema {
+                    kind: action_core::ActionKind::from(kind),
+                    display_name: kind.to_string(),
+                    description: kind.to_string(),
+                    side_effect,
+                    input_schema: None,
+                    output_schema: None,
+                })
+                .unwrap();
+        }
+        registry
+    }
+
+    async fn setup_run(kernel: &ConversationKernel) -> (ConversationId, MessageId, String) {
+        let conv_id = kernel
+            .create_conversation(conversation_kernel::CreateConversationCommand {
+                kind: ConversationKind::AgentTask,
+                title: Some("Action integration".to_string()),
+                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+        let user_msg = kernel
+            .append_message(conversation_kernel::AppendMessageCommand {
+                conversation_id: conv_id.clone(),
+                sender_id: ParticipantId::from("u1"),
+                content: MessageContent::Text {
+                    text: "please act".to_string(),
+                },
+                reply_to: None,
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await
+            .unwrap();
+        let run_id = kernel
+            .request_agent_run(conversation_kernel::RequestAgentRunCommand {
+                conversation_id: conv_id.clone(),
+                trigger_message_id: user_msg.clone(),
+                requested_by: ParticipantId::from("u1"),
+            })
+            .await
+            .unwrap();
+        (conv_id, user_msg, run_id)
+    }
+
+    async fn process_static_action_response(
+        response_text: &str,
+    ) -> (
+        AgentRunWithActionsOutcome,
+        ConversationKernel,
+        ConversationId,
+        audit_log::MemoryAuditSink,
+    ) {
+        let kernel = test_kernel();
+        let (conv_id, user_msg, run_id) = setup_run(&kernel).await;
+        let adapter = StaticAdapter {
+            text: response_text.to_string(),
+        };
+        let context_builder = AgentContextBuilder::new(50);
+        let config = AgentRuntimeConfig::default();
+        let registry = action_registry();
+        let policy = capability_policy::CapabilityPolicy::default_safe();
+        let executor = action_core::FakeActionExecutor::new("from agent runtime");
+        let audit = audit_log::MemoryAuditSink::new();
+        let action_runtime = action_runtime::ActionRuntime {
+            kernel: &kernel,
+            registry: &registry,
+            policy: &policy,
+            executor: &executor,
+            audit_log: &audit,
+        };
+        let detector = KeywordActionProposalDetector;
+
+        let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
+            kernel: &kernel,
+            adapter: &adapter,
+            context_builder: &context_builder,
+            config: &config,
+            conversation_id: &conv_id,
+            run_id: &run_id,
+            trigger_message_id: &user_msg,
+            agent_participant_id: &ParticipantId::from("a1"),
+            detector: &detector,
+            action_runtime: &action_runtime,
+        })
+        .await
+        .unwrap();
+
+        (outcome, kernel, conv_id, audit)
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_executes_read_only_action_from_fake_proposal() {
+        let (outcome, kernel, conv_id, audit) = process_static_action_response(
+            "I will search. ACTION knowledge.search {\"query\":\"agent os\"}",
+        )
+        .await;
+
+        match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome,
+                response_text,
+                ..
+            } => {
+                assert!(matches!(
+                    action_outcome,
+                    action_runtime::ActionRuntimeOutcome::Completed { .. }
+                ));
+                assert!(response_text.contains("[Action outcome]"));
+            }
+            _ => panic!("expected completed with action"),
+        }
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_eq!(state.actions.len(), 1);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Completed);
+        assert_eq!(
+            action.action_kind,
+            action_core::ActionKind::from("knowledge.search")
+        );
+        assert_eq!(audit.list().await.unwrap()[0].result_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_approval_required_for_write_action() {
+        let (outcome, kernel, conv_id, audit) = process_static_action_response(
+            "I will save. ACTION knowledge.save_entry {\"title\":\"AgentOS\"}",
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::ApprovalRequired { .. },
+                ..
+            }
+        ));
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+        assert_eq!(
+            audit.list().await.unwrap()[0].result_status,
+            "approval_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_denied_action_without_execution() {
+        let (outcome, kernel, conv_id, audit) =
+            process_static_action_response("I will send. ACTION mail.send {\"to\":\"x@y.z\"}")
+                .await;
+
+        assert!(matches!(
+            outcome,
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::Denied { .. },
+                ..
+            }
+        ));
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Denied);
+        assert_eq!(audit.list().await.unwrap()[0].result_status, "denied");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_noop_detector_preserves_text_only_outcome() {
+        let kernel = test_kernel();
+        let (conv_id, user_msg, run_id) = setup_run(&kernel).await;
+        let adapter = StaticAdapter {
+            text: "Plain text response".to_string(),
+        };
+        let context_builder = AgentContextBuilder::new(50);
+        let config = AgentRuntimeConfig::default();
+        let registry = action_registry();
+        let policy = capability_policy::CapabilityPolicy::default_safe();
+        let executor = action_core::FakeActionExecutor::default();
+        let audit = audit_log::MemoryAuditSink::new();
+        let action_runtime = action_runtime::ActionRuntime {
+            kernel: &kernel,
+            registry: &registry,
+            policy: &policy,
+            executor: &executor,
+            audit_log: &audit,
+        };
+        let detector = NoopActionProposalDetector;
+
+        let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
+            kernel: &kernel,
+            adapter: &adapter,
+            context_builder: &context_builder,
+            config: &config,
+            conversation_id: &conv_id,
+            run_id: &run_id,
+            trigger_message_id: &user_msg,
+            agent_participant_id: &ParticipantId::from("a1"),
+            detector: &detector,
+            action_runtime: &action_runtime,
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            AgentRunWithActionsOutcome::CompletedText { .. }
+        ));
+        assert!(
+            kernel
+                .load_state(&conv_id)
+                .await
+                .unwrap()
+                .actions
+                .is_empty()
+        );
+        assert!(audit.list().await.unwrap().is_empty());
     }
 }

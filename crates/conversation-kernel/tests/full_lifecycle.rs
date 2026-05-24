@@ -86,7 +86,7 @@ async fn full_agent_task_lifecycle() {
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::AgentTask,
             title: Some("Design Conversation Kernel".into()),
-            participants: vec![human("u1", "诗闻"), agent("a1", "小助理")],
+            participants: vec![human("u1", "Test User"), agent("a1", "小助理")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await
@@ -245,7 +245,7 @@ async fn group_chat_with_private_suggestion() {
             kind: ConversationKind::Group,
             title: Some("Team Chat".into()),
             participants: vec![
-                human("u1", "诗闻"),
+                human("u1", "Test User"),
                 human("u2", "Alice"),
                 agent("a1", "小助理"),
             ],
@@ -357,7 +357,7 @@ async fn jsonl_journal_persistence_roundtrip() {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: Some("Persistent Task".into()),
-                participants: vec![human("u1", "诗闻"), agent("a1", "小助理")],
+                participants: vec![human("u1", "Test User"), agent("a1", "小助理")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await

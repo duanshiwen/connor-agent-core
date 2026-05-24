@@ -45,7 +45,7 @@ mod tests {
         Participant {
             id: ParticipantId::from("user-001"),
             kind: ParticipantKind::Human,
-            display_name: "诗闻".to_string(),
+            display_name: "Test User".to_string(),
         }
     }
 

@@ -16,11 +16,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "action-runtime"
+version = "0.1.0"
+dependencies = [
+ "action-core",
+ "anyhow",
+ "async-trait",
+ "audit-log",
+ "capability-policy",
+ "chrono",
+ "conversation-core",
+ "conversation-journal",
+ "conversation-kernel",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
+ "action-core",
+ "action-runtime",
  "anyhow",
  "async-trait",
+ "audit-log",
+ "capability-policy",
  "chrono",
  "conversation-core",
  "conversation-journal",
@@ -31,6 +55,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -71,7 +71,7 @@ async fn create_conversation(kernel: &ConversationKernel) -> ConversationId {
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::Direct,
             title: Some("Validation".to_string()),
-            participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+            participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await
@@ -133,7 +133,7 @@ async fn append_message_rejects_archived_conversation() {
             occurred_at: now,
             actor_id: Some(ParticipantId::from("u1")),
             event: ConversationEvent::ParticipantAdded {
-                participant: human("u1", "诗闻"),
+                participant: human("u1", "Test User"),
             },
         })
         .await
@@ -255,7 +255,7 @@ async fn append_message_rejects_agent_only_without_agent_participant() {
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::Direct,
             title: None,
-            participants: vec![human("u1", "诗闻")],
+            participants: vec![human("u1", "Test User")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await
@@ -281,7 +281,7 @@ async fn create_assistant_suggestion_rejects_conversation_without_agent() {
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::Direct,
             title: None,
-            participants: vec![human("u1", "诗闻")],
+            participants: vec![human("u1", "Test User")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await

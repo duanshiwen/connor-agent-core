@@ -359,7 +359,7 @@ mod tests {
     fn project_participants() {
         let events = vec![
             envelope(conversation_created_event()),
-            envelope(participant_added_event("u1", "诗闻")),
+            envelope(participant_added_event("u1", "Test User")),
             envelope(participant_added_event("a1", "小助理")),
         ];
         let state = ConversationProjector::project(&events).unwrap();
@@ -373,7 +373,7 @@ mod tests {
     fn project_participant_removed() {
         let events = vec![
             envelope(conversation_created_event()),
-            envelope(participant_added_event("u1", "诗闻")),
+            envelope(participant_added_event("u1", "Test User")),
             envelope(participant_added_event("u2", "Other")),
             envelope(ConversationEvent::ParticipantRemoved {
                 participant_id: ParticipantId::from("u2"),
@@ -489,7 +489,7 @@ mod tests {
     fn projection_is_deterministic() {
         let events = vec![
             envelope(conversation_created_event()),
-            envelope(participant_added_event("u1", "诗闻")),
+            envelope(participant_added_event("u1", "Test User")),
             envelope(message_appended_event("msg-1", "hello", None, None)),
             envelope(message_appended_event("msg-2", "world", None, None)),
         ];

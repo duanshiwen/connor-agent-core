@@ -213,7 +213,7 @@ mod tests {
             participant: Participant {
                 id: ParticipantId::from("u1"),
                 kind: crate::participant::ParticipantKind::Human,
-                display_name: "诗闻".to_string(),
+                display_name: "Test User".to_string(),
             },
         }
     }

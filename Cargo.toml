@@ -9,6 +9,7 @@ members = [
     "crates/model-adapter",
     "crates/agent-runtime",
     "crates/action-core",
+    "crates/action-runtime",
     "crates/capability-policy",
     "crates/audit-log",
 ]

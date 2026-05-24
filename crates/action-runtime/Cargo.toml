@@ -1,28 +1,25 @@
 [package]
-name = "agent-runtime"
+name = "action-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Agent runtime — bridges conversation kernel with model adapter for agent runs."
+description = "Action runtime — orchestrates action policy, execution, audit, and conversation lifecycle events."
 
 [dependencies]
 action-core = { path = "../action-core" }
-action-runtime = { path = "../action-runtime" }
+audit-log = { path = "../audit-log" }
+capability-policy = { path = "../capability-policy" }
 conversation-core = { path = "../conversation-core" }
 conversation-kernel = { path = "../conversation-kernel" }
-entity-core = { path = "../entity-core" }
-model-adapter = { path = "../model-adapter" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
-audit-log = { path = "../audit-log" }
-capability-policy = { path = "../capability-policy" }
 conversation-journal = { path = "../conversation-journal" }
 tempfile.workspace = true

@@ -372,7 +372,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: Some("Runtime Test".into()),
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -430,7 +430,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -483,7 +483,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -505,7 +505,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -557,7 +557,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -593,7 +593,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+                participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -640,7 +640,7 @@ mod tests {
             .create_conversation(CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "诗闻")],
+                participants: vec![human("u1", "Test User")],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await

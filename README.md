@@ -60,6 +60,7 @@ The kernel is designed as an append-only, replayable, testable conversation subs
     ├── model-adapter
     ├── agent-runtime
     ├── action-core
+    ├── action-runtime
     ├── capability-policy
     ├── audit-log
     └── conversation-runtime
@@ -129,11 +130,11 @@ Supported commands:
 
 ### `agent-runtime`
 
-Current runtime boundary for text-only agent runs. It bridges the conversation kernel with `model-adapter`, builds context, calls a model adapter, appends assistant output, and records agent run lifecycle events.
+Current runtime boundary for text-only agent runs and deterministic fake action proposals. It bridges the conversation kernel with `model-adapter`, builds context, calls a model adapter, optionally detects an action proposal, routes it through `action-runtime`, appends assistant output, and records agent run lifecycle events.
 
-### `action-core`, `capability-policy`, and `audit-log`
+### `action-core`, `action-runtime`, `capability-policy`, and `audit-log`
 
-Foundation crates for the future action execution pipeline. The conversation kernel now records action lifecycle events and projects action state, but action execution orchestration, policy gating, and audit writing remain higher-layer responsibilities.
+Foundation crates for the action execution pipeline. The conversation kernel records action lifecycle events and projects action state. `action-runtime` now orchestrates `ActionRequest → ActionRegistry → CapabilityPolicy → ActionExecutor → AuditLog` for Allow / Ask / Deny / failure paths. Concrete Browser / Knowledge / Mail executors are intentionally still future work.
 
 ### `conversation-runtime`
 
@@ -193,7 +194,7 @@ cargo test --workspace
 Current status:
 
 ```text
-230 tests passed
+242 tests passed
 ```
 
 ### Format

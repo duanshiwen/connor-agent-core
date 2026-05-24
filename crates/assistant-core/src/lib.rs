@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn create_main_assistant_conversation_includes_exactly_human_and_assistant() {
         let profile = profile();
-        let owner = human("u1", "诗闻");
+        let owner = human("u1", "Test User");
 
         let spec = AssistantConversationService::main_conversation_spec(&profile, owner).unwrap();
 
@@ -464,7 +464,7 @@ mod tests {
         let profile = profile();
         let spec = AssistantConversationService::group_conversation_spec(
             &profile,
-            vec![human("u1", "诗闻"), human("u2", "Teammate")],
+            vec![human("u1", "Test User"), human("u2", "Teammate")],
             Some("Group".to_string()),
         )
         .unwrap();
@@ -495,7 +495,10 @@ mod tests {
         let profile = profile();
         let result = AssistantConversationService::group_conversation_spec(
             &profile,
-            vec![human("u1", "诗闻"), integration("browser-main", "Browser")],
+            vec![
+                human("u1", "Test User"),
+                integration("browser-main", "Browser"),
+            ],
             Some("Bad group".to_string()),
         );
 
@@ -508,7 +511,7 @@ mod tests {
     #[test]
     fn browser_can_be_modeled_as_linked_entity_kind_not_participant() {
         let profile = profile();
-        let owner = human("u1", "诗闻");
+        let owner = human("u1", "Test User");
         let spec = AssistantConversationService::main_conversation_spec(&profile, owner).unwrap();
         let spec = AssistantConversationService::with_linked_entity_kinds(
             spec,
@@ -641,7 +644,7 @@ mod kernel_integration_tests {
         let main = AssistantConversationService::create_main_conversation(
             &kernel,
             &profile,
-            human("u1", "诗闻"),
+            human("u1", "Test User"),
             vec![],
         )
         .await
@@ -667,7 +670,7 @@ mod kernel_integration_tests {
         let main = AssistantConversationService::create_main_conversation(
             &kernel,
             &profile,
-            human("u1", "诗闻"),
+            human("u1", "Test User"),
             vec![browser_entity()],
         )
         .await
@@ -694,7 +697,7 @@ mod kernel_integration_tests {
         let main = AssistantConversationService::create_main_conversation(
             &kernel,
             &profile,
-            human("u1", "诗闻"),
+            human("u1", "Test User"),
             vec![browser_entity()],
         )
         .await
@@ -731,7 +734,7 @@ mod kernel_integration_tests {
         let conversation_id = AssistantConversationService::create_group_conversation(
             &kernel,
             &profile,
-            vec![human("u1", "诗闻"), human("u2", "Teammate")],
+            vec![human("u1", "Test User"), human("u2", "Teammate")],
             Some("Group".to_string()),
             vec![],
             Some(ParticipantId::from("u1")),

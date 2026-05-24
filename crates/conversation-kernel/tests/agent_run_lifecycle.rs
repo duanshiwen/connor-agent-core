@@ -68,7 +68,7 @@ async fn create_conversation_with_run(kernel: &ConversationKernel) -> (Conversat
         .create_conversation(CreateConversationCommand {
             kind: ConversationKind::AgentTask,
             title: Some("Agent run lifecycle".to_string()),
-            participants: vec![human("u1", "诗闻"), agent("a1", "Assistant")],
+            participants: vec![human("u1", "Test User"), agent("a1", "Assistant")],
             actor_id: Some(ParticipantId::from("u1")),
         })
         .await
