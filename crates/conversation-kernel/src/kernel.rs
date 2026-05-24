@@ -42,6 +42,7 @@ impl Clock for UtcClock {
 ///
 /// Provides validated command processing for conversations.
 /// All state changes are represented as events and persisted to the journal.
+#[derive(Clone)]
 pub struct ConversationKernel {
     journal: Arc<dyn ConversationJournal>,
     id_gen: Arc<dyn IdGenerator>,

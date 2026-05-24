@@ -1,0 +1,23 @@
+[package]
+name = "agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Agent runtime — bridges conversation kernel with model adapter for agent runs."
+
+[dependencies]
+conversation-core = { path = "../conversation-core" }
+conversation-kernel = { path = "../conversation-kernel" }
+entity-core = { path = "../entity-core" }
+model-adapter = { path = "../model-adapter" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+conversation-journal = { path = "../conversation-journal" }
+tempfile.workspace = true
