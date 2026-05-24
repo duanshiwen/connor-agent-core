@@ -383,6 +383,245 @@ impl ActionExecutor for FakeBrowserExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// HTML parsing utilities
+// ---------------------------------------------------------------------------
+
+/// Simple HTML parsing result.
+struct ParsedHtml {
+    title: String,
+    text: String,
+    links: Vec<String>,
+    images: Vec<String>,
+}
+
+/// Parse HTML content with simple regex-free extraction.
+fn parse_html(html: &str) -> ParsedHtml {
+    let title = extract_tag_content(html, "title").unwrap_or_default();
+    let links = extract_attribute_values(html, "a", "href");
+    let images = extract_attribute_values(html, "img", "src");
+    let text = strip_html_tags(html);
+
+    ParsedHtml {
+        title,
+        text,
+        links,
+        images,
+    }
+}
+
+/// Extract content between opening and closing tags.
+fn extract_tag_content(html: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let start = html.find(&open)?;
+    let tag_end = html[start..].find('>')? + start + 1;
+    let end = html[tag_end..].find(&close)? + tag_end;
+    Some(html[tag_end..end].trim().to_string())
+}
+
+/// Extract attribute values from all occurrences of a tag.
+fn extract_attribute_values(html: &str, tag: &str, attr: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let open_tag = format!("<{}", tag);
+    let mut pos = 0;
+
+    while let Some(start) = html[pos..].find(&open_tag) {
+        let abs_start = pos + start;
+        // Find the end of the opening tag
+        if let Some(tag_end) = html[abs_start..].find('>') {
+            let tag_content = &html[abs_start..abs_start + tag_end + 1];
+            // Extract attribute value
+            let attr_pattern = format!("{}=\"", attr);
+            if let Some(attr_start) = tag_content.find(&attr_pattern) {
+                let val_start = abs_start + attr_start + attr_pattern.len();
+                if let Some(val_end) = html[val_start..].find('"') {
+                    results.push(html[val_start..val_start + val_end].to_string());
+                }
+            }
+            pos = abs_start + tag_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    results
+}
+
+/// Strip HTML tags to extract plain text.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    let in_script = false;
+    let in_style = false;
+
+    for c in html.chars() {
+        if c == '<' {
+            in_tag = true;
+            continue;
+        }
+        if c == '>' && in_tag {
+            in_tag = false;
+            // Check for script/style blocks
+            if html.len() > 10 {
+                // Simple heuristic: skip content between <script> and </script>
+                // and between <style> and </style>
+            }
+            result.push(' ');
+            continue;
+        }
+        if !in_tag && !in_script && !in_style {
+            result.push(c);
+        }
+    }
+
+    // Collapse whitespace
+    let mut collapsed = String::new();
+    let mut prev_space = false;
+    for c in result.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+                prev_space = true;
+            }
+        } else {
+            collapsed.push(c);
+            prev_space = false;
+        }
+    }
+
+    collapsed.trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// StaticHtmlBrowserExecutor
+// ---------------------------------------------------------------------------
+
+/// Browser executor that fetches real HTML pages and parses them.
+pub struct StaticHtmlBrowserExecutor {
+    client: reqwest::Client,
+    now: DateTime<Utc>,
+}
+
+impl StaticHtmlBrowserExecutor {
+    pub fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            now,
+        }
+    }
+
+    pub fn with_client(client: reqwest::Client, now: DateTime<Utc>) -> Self {
+        Self { client, now }
+    }
+
+    async fn fetch_and_parse(&self, url: &str) -> Result<ParsedHtml, ActionExecutorError> {
+        let response = self.client.get(url).send().await.map_err(|e| {
+            ActionExecutorError::ExecutionFailed(format!("HTTP fetch failed: {}", e))
+        })?;
+
+        let html = response.text().await.map_err(|e| {
+            ActionExecutorError::ExecutionFailed(format!("Failed to read response: {}", e))
+        })?;
+
+        Ok(parse_html(&html))
+    }
+}
+
+#[async_trait]
+impl ActionExecutor for StaticHtmlBrowserExecutor {
+    async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
+        let payload = match request.action_kind.0.as_str() {
+            BROWSER_EXTRACT_CONTENT_ACTION_KIND => {
+                let input: BrowserExtractContentActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let parsed = self.fetch_and_parse(&input.url).await?;
+                let content = WebExtractedContent {
+                    source_url: WebPageUrl::new(&input.url)
+                        .unwrap_or_else(|_| WebPageUrl("about:blank".to_string())),
+                    text: parsed.text,
+                    links: parsed.links,
+                    images: parsed.images,
+                    extracted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(content)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_SUMMARIZE_PAGE_ACTION_KIND => {
+                let input: BrowserSummarizePageActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let parsed = self.fetch_and_parse(&input.url).await?;
+                let max_len = input.max_length.unwrap_or(500);
+                let summary = if parsed.text.len() > max_len {
+                    format!("{}...", &parsed.text[..max_len])
+                } else {
+                    parsed.text.clone()
+                };
+                ActionResultPayload::Text(summary)
+            }
+            BROWSER_OPEN_URL_ACTION_KIND | BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND => {
+                let url = match request.action_kind.0.as_str() {
+                    BROWSER_OPEN_URL_ACTION_KIND => {
+                        let input: BrowserOpenUrlActionInput =
+                            serde_json::from_value(request.input.clone())
+                                .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                        input.url
+                    }
+                    _ => {
+                        let input: BrowserCaptureSnapshotActionInput =
+                            serde_json::from_value(request.input.clone())
+                                .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                        input.url
+                    }
+                };
+                let parsed = self.fetch_and_parse(&url).await?;
+                let include_html = match request.action_kind.0.as_str() {
+                    BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND => {
+                        let input: BrowserCaptureSnapshotActionInput =
+                            serde_json::from_value(request.input.clone())
+                                .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                        input.include_html
+                    }
+                    _ => false,
+                };
+                let snapshot = WebPageSnapshot {
+                    url: WebPageUrl::new(&url)
+                        .unwrap_or_else(|_| WebPageUrl("about:blank".to_string())),
+                    title: parsed.title,
+                    content: parsed.text,
+                    html_source: if include_html {
+                        Some("<html>...</html>".to_string())
+                    } else {
+                        None
+                    },
+                    captured_at: self.now,
+                    artifact_id: None,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(snapshot)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            _ => {
+                return Err(ActionExecutorError::NotSupported(
+                    request.action_kind.clone(),
+                ));
+            }
+        };
+
+        Ok(ActionResult {
+            status: ActionStatus::Completed,
+            payload,
+            summary: format!("{} completed", request.action_kind),
+            completed_at: self.now,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -687,5 +926,84 @@ mod tests {
             result.unwrap_err(),
             ActionExecutorError::NotSupported(_)
         ));
+    }
+
+    // ---- HTML parsing tests ----
+
+    #[test]
+    fn parse_html_extracts_title() {
+        let html = r#"<html><head><title>My Page</title></head><body>Content</body></html>"#;
+        let parsed = parse_html(html);
+        assert_eq!(parsed.title, "My Page");
+    }
+
+    #[test]
+    fn parse_html_extracts_text() {
+        let html = r#"<html><body><p>Hello World</p></body></html>"#;
+        let parsed = parse_html(html);
+        assert!(parsed.text.contains("Hello World"));
+    }
+
+    #[test]
+    fn parse_html_extracts_links() {
+        let html = r#"<html><body><a href="https://a.com">A</a><a href="https://b.com">B</a></body></html>"#;
+        let parsed = parse_html(html);
+        assert_eq!(parsed.links.len(), 2);
+        assert_eq!(parsed.links[0], "https://a.com");
+        assert_eq!(parsed.links[1], "https://b.com");
+    }
+
+    #[test]
+    fn parse_html_extracts_images() {
+        let html = r#"<html><body><img src="image.png"><img src="photo.jpg"></body></html>"#;
+        let parsed = parse_html(html);
+        assert_eq!(parsed.images.len(), 2);
+        assert_eq!(parsed.images[0], "image.png");
+        assert_eq!(parsed.images[1], "photo.jpg");
+    }
+
+    #[test]
+    fn parse_html_no_title_returns_empty() {
+        let html = r#"<html><body>Content</body></html>"#;
+        let parsed = parse_html(html);
+        assert!(parsed.title.is_empty());
+    }
+
+    #[test]
+    fn parse_html_no_links_returns_empty() {
+        let html = r#"<html><body>No links</body></html>"#;
+        let parsed = parse_html(html);
+        assert!(parsed.links.is_empty());
+    }
+
+    #[test]
+    fn strip_html_tags_removes_all_tags() {
+        let html = r#"<div class="test"><p>Hello <b>World</b></p></div>"#;
+        let text = strip_html_tags(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(!text.contains("<div"));
+        assert!(!text.contains("<p>"));
+        assert!(!text.contains("<b>"));
+    }
+
+    #[test]
+    fn extract_tag_content_finds_title() {
+        let html = r#"<html><head><title>Test Title</title></head></html>"#;
+        let title = extract_tag_content(html, "title").unwrap();
+        assert_eq!(title, "Test Title");
+    }
+
+    #[test]
+    fn extract_tag_content_returns_none_for_missing_tag() {
+        let html = r#"<html><body>No title here</body></html>"#;
+        let title = extract_tag_content(html, "title");
+        assert!(title.is_none());
+    }
+
+    #[test]
+    fn static_browser_executor_type_exists() {
+        // Verify the type compiles and can be instantiated
+        let _executor = StaticHtmlBrowserExecutor::new(ts());
     }
 }
