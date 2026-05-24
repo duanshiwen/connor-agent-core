@@ -1302,12 +1302,30 @@ mod tests {
         (conv_id, user_msg, run_id)
     }
 
-    async fn process_static_action_response(
+    #[derive(Debug)]
+    struct FailingActionExecutor;
+
+    #[async_trait]
+    impl action_core::ActionExecutor for FailingActionExecutor {
+        async fn execute(
+            &self,
+            _request: &action_core::ActionRequest,
+        ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+            Err(action_core::ActionExecutorError::ExecutionFailed(
+                "intentional failure".to_string(),
+            ))
+        }
+    }
+
+    async fn process_static_action_response_with_executor(
         response_text: &str,
+        executor: &dyn action_core::ActionExecutor,
+        detector: &dyn ActionProposalDetector,
     ) -> (
         AgentRunWithActionsOutcome,
         ConversationKernel,
         ConversationId,
+        String,
         audit_log::MemoryAuditSink,
     ) {
         let kernel = test_kernel();
@@ -1319,16 +1337,14 @@ mod tests {
         let config = AgentRuntimeConfig::default();
         let registry = action_registry();
         let policy = capability_policy::CapabilityPolicy::default_safe();
-        let executor = action_core::FakeActionExecutor::new("from agent runtime");
         let audit = audit_log::MemoryAuditSink::new();
         let action_runtime = action_runtime::ActionRuntime {
             kernel: &kernel,
             registry: &registry,
             policy: &policy,
-            executor: &executor,
+            executor,
             audit_log: &audit,
         };
-        let detector = KeywordActionProposalDetector;
 
         let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
             kernel: &kernel,
@@ -1339,26 +1355,51 @@ mod tests {
             run_id: &run_id,
             trigger_message_id: &user_msg,
             agent_participant_id: &ParticipantId::from("a1"),
-            detector: &detector,
+            detector,
             action_runtime: &action_runtime,
         })
         .await
         .unwrap();
 
-        (outcome, kernel, conv_id, audit)
+        (outcome, kernel, conv_id, run_id, audit)
+    }
+
+    async fn process_static_action_response(
+        response_text: &str,
+    ) -> (
+        AgentRunWithActionsOutcome,
+        ConversationKernel,
+        ConversationId,
+        String,
+        audit_log::MemoryAuditSink,
+    ) {
+        let executor = action_core::FakeActionExecutor::new("from agent runtime");
+        let detector = KeywordActionProposalDetector;
+        process_static_action_response_with_executor(response_text, &executor, &detector).await
+    }
+
+    fn assert_agent_run_completed(
+        state: &ConversationState,
+        run_id: &str,
+        output_message_id: &MessageId,
+    ) {
+        let run = state.agent_runs.get(run_id).unwrap();
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.output_message_id.as_ref(), Some(output_message_id));
     }
 
     #[tokio::test]
     async fn agent_runtime_executes_read_only_action_from_fake_proposal() {
-        let (outcome, kernel, conv_id, audit) = process_static_action_response(
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_action_response(
             "I will search. ACTION knowledge.search {\"query\":\"agent os\"}",
         )
         .await;
 
-        match outcome {
+        let output_message_id = match outcome {
             AgentRunWithActionsOutcome::CompletedWithAction {
                 action_outcome,
                 response_text,
+                output_message_id,
                 ..
             } => {
                 assert!(matches!(
@@ -1366,11 +1407,13 @@ mod tests {
                     action_runtime::ActionRuntimeOutcome::Completed { .. }
                 ));
                 assert!(response_text.contains("[Action outcome]"));
+                output_message_id
             }
             _ => panic!("expected completed with action"),
-        }
+        };
 
         let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
         assert_eq!(state.actions.len(), 1);
         let action = state.actions.values().next().unwrap();
         assert_eq!(action.status, ConversationActionStatus::Completed);
@@ -1383,20 +1426,22 @@ mod tests {
 
     #[tokio::test]
     async fn agent_runtime_reports_approval_required_for_write_action() {
-        let (outcome, kernel, conv_id, audit) = process_static_action_response(
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_action_response(
             "I will save. ACTION knowledge.save_entry {\"title\":\"AgentOS\"}",
         )
         .await;
 
-        assert!(matches!(
-            outcome,
+        let output_message_id = match outcome {
             AgentRunWithActionsOutcome::CompletedWithAction {
                 action_outcome: action_runtime::ActionRuntimeOutcome::ApprovalRequired { .. },
+                output_message_id,
                 ..
-            }
-        ));
+            } => output_message_id,
+            _ => panic!("expected approval required action outcome"),
+        };
 
         let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
         let action = state.actions.values().next().unwrap();
         assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
         assert_eq!(
@@ -1407,19 +1452,21 @@ mod tests {
 
     #[tokio::test]
     async fn agent_runtime_reports_denied_action_without_execution() {
-        let (outcome, kernel, conv_id, audit) =
+        let (outcome, kernel, conv_id, run_id, audit) =
             process_static_action_response("I will send. ACTION mail.send {\"to\":\"x@y.z\"}")
                 .await;
 
-        assert!(matches!(
-            outcome,
+        let output_message_id = match outcome {
             AgentRunWithActionsOutcome::CompletedWithAction {
                 action_outcome: action_runtime::ActionRuntimeOutcome::Denied { .. },
+                output_message_id,
                 ..
-            }
-        ));
+            } => output_message_id,
+            _ => panic!("expected denied action outcome"),
+        };
 
         let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
         let action = state.actions.values().next().unwrap();
         assert_eq!(action.status, ConversationActionStatus::Denied);
         assert_eq!(audit.list().await.unwrap()[0].result_status, "denied");
@@ -1462,18 +1509,43 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(matches!(
-            outcome,
-            AgentRunWithActionsOutcome::CompletedText { .. }
-        ));
-        assert!(
-            kernel
-                .load_state(&conv_id)
-                .await
-                .unwrap()
-                .actions
-                .is_empty()
-        );
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedText {
+                output_message_id, ..
+            } => output_message_id,
+            _ => panic!("expected text-only outcome"),
+        };
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        assert!(state.actions.is_empty());
         assert!(audit.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_failed_action_and_completes_run() {
+        let executor = FailingActionExecutor;
+        let detector = KeywordActionProposalDetector;
+        let (outcome, kernel, conv_id, run_id, audit) =
+            process_static_action_response_with_executor(
+                "I will search. ACTION knowledge.search {\"query\":\"agent os\"}",
+                &executor,
+                &detector,
+            )
+            .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::Failed { .. },
+                output_message_id,
+                ..
+            } => output_message_id,
+            _ => panic!("expected failed action outcome"),
+        };
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Failed);
+        assert_eq!(audit.list().await.unwrap()[0].result_status, "failed");
     }
 }
