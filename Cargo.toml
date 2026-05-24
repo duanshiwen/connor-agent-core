@@ -9,6 +9,7 @@ members = [
     "crates/model-adapter",
     "crates/agent-runtime",
     "crates/action-core",
+    "crates/capability-policy",
 ]
 resolver = "2"
 
