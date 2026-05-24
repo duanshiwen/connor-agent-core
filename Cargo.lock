@@ -684,6 +684,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "surface-core"
+version = "0.1.0"
+dependencies = [
+ "artifact-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
