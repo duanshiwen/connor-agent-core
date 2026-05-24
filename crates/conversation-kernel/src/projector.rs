@@ -2,10 +2,12 @@
 
 use crate::state::ConversationState;
 use anyhow::Result;
+use asset_core::AssetProcessingStatus;
 use conversation_core::{
     AgentRunState, AgentRunStatus, ConversationActionState, ConversationActionStatus,
     ConversationEvent, ConversationEventEnvelope,
 };
+use surface_core::{SurfaceLifecycleStatus, SurfaceState};
 
 /// Replays a sequence of events into a `ConversationState`.
 ///
@@ -111,6 +113,56 @@ impl ConversationProjector {
 
             ConversationEvent::ArtifactUnlinkedFromConversation { artifact_id, .. } => {
                 state.linked_artifacts.remove(artifact_id);
+            }
+
+            ConversationEvent::SurfaceAttachedToConversation { surface } => {
+                state.attached_surfaces.insert(
+                    surface.id.clone(),
+                    SurfaceState::attached(surface.clone(), surface.created_at),
+                );
+            }
+
+            ConversationEvent::SurfaceUpdatedInConversation { surface } => {
+                state.attached_surfaces.insert(
+                    surface.id.clone(),
+                    SurfaceState {
+                        descriptor: surface.clone(),
+                        status: SurfaceLifecycleStatus::Updated,
+                        updated_at: surface.created_at,
+                    },
+                );
+            }
+
+            ConversationEvent::SurfaceClosedInConversation { surface_id, .. } => {
+                if let Some(surface) = state.attached_surfaces.get_mut(surface_id) {
+                    surface.status = SurfaceLifecycleStatus::Closed;
+                }
+            }
+
+            ConversationEvent::AssetObservedInConversation { asset } => {
+                state
+                    .observed_assets
+                    .insert(asset.id.clone(), asset.clone());
+                state
+                    .asset_statuses
+                    .insert(asset.id.clone(), AssetProcessingStatus::Observed);
+            }
+
+            ConversationEvent::AssetCapturedInConversation { asset } => {
+                state
+                    .observed_assets
+                    .insert(asset.id.clone(), asset.clone());
+                state
+                    .asset_statuses
+                    .insert(asset.id.clone(), AssetProcessingStatus::Captured);
+            }
+
+            ConversationEvent::AssetProcessedInConversation { asset_id, status } => {
+                if state.observed_assets.contains_key(asset_id) {
+                    state
+                        .asset_statuses
+                        .insert(asset_id.clone(), status.clone());
+                }
             }
 
             ConversationEvent::EntityLinkedToConversation { entity, .. } => {

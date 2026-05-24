@@ -5,9 +5,11 @@
 
 use action_core::ActionId;
 use artifact_core::{ArtifactDescriptor, ArtifactId};
+use asset_core::{AssetId, AssetMetadata, AssetProcessingStatus};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId};
 use std::collections::HashMap;
+use surface_core::{SurfaceId, SurfaceState};
 
 /// The projected state of a conversation, rebuilt from its event journal.
 #[derive(Debug, Clone, Default)]
@@ -32,6 +34,15 @@ pub struct ConversationState {
 
     /// Linked artifacts keyed by artifact ID.
     pub linked_artifacts: HashMap<ArtifactId, ArtifactDescriptor>,
+
+    /// Attached surfaces keyed by surface ID.
+    pub attached_surfaces: HashMap<SurfaceId, SurfaceState>,
+
+    /// Observed assets keyed by asset ID.
+    pub observed_assets: HashMap<AssetId, AssetMetadata>,
+
+    /// Asset processing statuses keyed by asset ID.
+    pub asset_statuses: HashMap<AssetId, AssetProcessingStatus>,
 
     /// Actions keyed by action ID.
     pub actions: HashMap<ActionId, ConversationActionState>,

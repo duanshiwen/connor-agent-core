@@ -12,6 +12,8 @@ artifact-core = { path = "../artifact-core" }
 conversation-core = { path = "../conversation-core" }
 conversation-journal = { path = "../conversation-journal" }
 entity-core = { path = "../entity-core" }
+surface-core = { path = "../surface-core" }
+asset-core = { path = "../asset-core" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

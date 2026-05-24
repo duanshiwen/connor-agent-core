@@ -399,6 +399,146 @@ impl ConversationKernel {
         .await
     }
 
+    /// Attach a surface to a conversation.
+    ///
+    /// Validates: conversation exists and optional actor is a participant.
+    /// Produces: `SurfaceAttachedToConversation`.
+    pub async fn attach_surface(&self, cmd: AttachSurfaceCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.attached_by.as_ref(), "attached_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.attached_by,
+            now,
+            ConversationEvent::SurfaceAttachedToConversation {
+                surface: cmd.surface,
+            },
+        )
+        .await
+    }
+
+    /// Update a surface attached to a conversation.
+    ///
+    /// Validates: conversation exists, surface is attached, optional actor is a participant.
+    /// Produces: `SurfaceUpdatedInConversation`.
+    pub async fn update_surface(&self, cmd: UpdateSurfaceCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.updated_by.as_ref(), "updated_by")?;
+
+        if !state.attached_surfaces.contains_key(&cmd.surface.id) {
+            bail!("surface not attached: {}", cmd.surface.id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.updated_by,
+            now,
+            ConversationEvent::SurfaceUpdatedInConversation {
+                surface: cmd.surface,
+            },
+        )
+        .await
+    }
+
+    /// Close a surface attached to a conversation.
+    ///
+    /// Validates: conversation exists, surface is attached, optional actor is a participant.
+    /// Produces: `SurfaceClosedInConversation`.
+    pub async fn close_surface(&self, cmd: CloseSurfaceCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.closed_by.as_ref(), "closed_by")?;
+
+        if !state.attached_surfaces.contains_key(&cmd.surface_id) {
+            bail!("surface not attached: {}", cmd.surface_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.closed_by,
+            now,
+            ConversationEvent::SurfaceClosedInConversation {
+                surface_id: cmd.surface_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Observe an asset in a conversation.
+    ///
+    /// Validates: conversation exists and optional actor is a participant.
+    /// Produces: `AssetObservedInConversation`.
+    pub async fn observe_asset(&self, cmd: ObserveAssetCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.observed_by.as_ref(), "observed_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.observed_by,
+            now,
+            ConversationEvent::AssetObservedInConversation { asset: cmd.asset },
+        )
+        .await
+    }
+
+    /// Capture an observed asset in a conversation.
+    ///
+    /// Validates: conversation exists, asset is observed, optional actor is a participant.
+    /// Produces: `AssetCapturedInConversation`.
+    pub async fn capture_asset(&self, cmd: CaptureAssetCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.captured_by.as_ref(), "captured_by")?;
+
+        if !state.observed_assets.contains_key(&cmd.asset.id) {
+            bail!("asset not observed: {}", cmd.asset.id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.captured_by,
+            now,
+            ConversationEvent::AssetCapturedInConversation { asset: cmd.asset },
+        )
+        .await
+    }
+
+    /// Record asset processing status.
+    ///
+    /// Validates: conversation exists, asset is observed, optional actor is a participant.
+    /// Produces: `AssetProcessedInConversation`.
+    pub async fn process_asset(&self, cmd: ProcessAssetCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.processed_by.as_ref(), "processed_by")?;
+
+        if !state.observed_assets.contains_key(&cmd.asset_id) {
+            bail!("asset not observed: {}", cmd.asset_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.processed_by,
+            now,
+            ConversationEvent::AssetProcessedInConversation {
+                asset_id: cmd.asset_id,
+                status: cmd.status,
+            },
+        )
+        .await
+    }
+
     /// Record metadata about an entity state observation.
     ///
     /// Validates: conversation exists, entity is linked, optional actor is a participant.

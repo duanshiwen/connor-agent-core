@@ -9,9 +9,11 @@ use crate::participant::Participant;
 use crate::session::ConversationSession;
 use action_core::{ActionId, ActionRequest, ActionResult};
 use artifact_core::{ArtifactDescriptor, ArtifactId};
+use asset_core::{AssetId, AssetMetadata, AssetProcessingStatus};
 use chrono::{DateTime, Utc};
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
 use serde::{Deserialize, Serialize};
+use surface_core::{SurfaceDescriptor, SurfaceId};
 
 /// Current persisted event envelope schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -164,6 +166,30 @@ pub enum ConversationEvent {
         reason: String,
     },
 
+    /// A surface was attached to the conversation.
+    SurfaceAttachedToConversation { surface: SurfaceDescriptor },
+
+    /// A surface attached to the conversation was updated.
+    SurfaceUpdatedInConversation { surface: SurfaceDescriptor },
+
+    /// A surface attached to the conversation was closed.
+    SurfaceClosedInConversation {
+        surface_id: SurfaceId,
+        reason: String,
+    },
+
+    /// An asset was observed in the conversation context.
+    AssetObservedInConversation { asset: AssetMetadata },
+
+    /// An observed asset was captured in the conversation context.
+    AssetCapturedInConversation { asset: AssetMetadata },
+
+    /// An observed asset's processing status changed.
+    AssetProcessedInConversation {
+        asset_id: AssetId,
+        status: AssetProcessingStatus,
+    },
+
     /// An entity was linked to the conversation.
     EntityLinkedToConversation {
         entity: EntityDescriptor,
@@ -199,7 +225,9 @@ mod tests {
     use crate::visibility::Visibility;
     use action_core::{ActionKind, ActionResultPayload, ActionStatus};
     use artifact_core::ArtifactKind;
+    use asset_core::{AssetKind, AssetRelevance, AssetSource};
     use entity_core::{EntityCapability, EntityKind};
+    use surface_core::{SurfaceKind, SurfaceRendererHint};
 
     fn now() -> DateTime<Utc> {
         Utc::now()
@@ -365,6 +393,27 @@ mod tests {
             metadata: serde_json::json!({"captured_by":"browser-entity"}),
             created_at: now(),
         }
+    }
+
+    fn make_surface() -> SurfaceDescriptor {
+        SurfaceDescriptor::new(
+            "surface-web-1",
+            SurfaceKind::WebSurface,
+            SurfaceRendererHint::Html,
+            now(),
+        )
+        .with_title("Agent OS Roadmap")
+    }
+
+    fn make_asset() -> AssetMetadata {
+        AssetMetadata::new(
+            "asset-image-1",
+            AssetKind::Image,
+            AssetSource::new(now()).with_uri("https://example.com/photo.jpg"),
+            AssetRelevance::High,
+            now(),
+        )
+        .with_title("Example Photo")
     }
 
     fn make_browser_entity() -> EntityDescriptor {
@@ -623,6 +672,68 @@ mod tests {
         let envelope = wrap_event(ConversationEvent::ArtifactUnlinkedFromConversation {
             artifact_id: ArtifactId::from("artifact-web-1"),
             reason: "user removed artifact".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn surface_attached_to_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::SurfaceAttachedToConversation {
+            surface: make_surface(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn surface_updated_in_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::SurfaceUpdatedInConversation {
+            surface: make_surface(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn surface_closed_in_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::SurfaceClosedInConversation {
+            surface_id: SurfaceId::from("surface-web-1"),
+            reason: "user closed preview".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn asset_observed_in_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::AssetObservedInConversation {
+            asset: make_asset(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn asset_captured_in_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::AssetCapturedInConversation {
+            asset: make_asset(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn asset_processed_in_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::AssetProcessedInConversation {
+            asset_id: AssetId::from("asset-image-1"),
+            status: AssetProcessingStatus::Processed,
         });
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();

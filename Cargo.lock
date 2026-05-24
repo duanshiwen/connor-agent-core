@@ -211,10 +211,12 @@ version = "0.1.0"
 dependencies = [
  "action-core",
  "artifact-core",
+ "asset-core",
  "chrono",
  "entity-core",
  "serde",
  "serde_json",
+ "surface-core",
  "thiserror",
  "uuid",
 ]
@@ -240,6 +242,7 @@ dependencies = [
  "action-core",
  "anyhow",
  "artifact-core",
+ "asset-core",
  "async-trait",
  "chrono",
  "conversation-core",
@@ -247,6 +250,7 @@ dependencies = [
  "entity-core",
  "serde",
  "serde_json",
+ "surface-core",
  "tempfile",
  "thiserror",
  "tokio",

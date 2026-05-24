@@ -5,8 +5,10 @@
 
 use action_core::{ActionId, ActionRequest, ActionResult};
 use artifact_core::{ArtifactDescriptor, ArtifactId};
+use asset_core::{AssetId, AssetMetadata, AssetProcessingStatus};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
+use surface_core::{SurfaceDescriptor, SurfaceId};
 
 /// Command to create a new conversation.
 #[derive(Debug, Clone)]
@@ -80,6 +82,56 @@ pub struct UnlinkArtifactCommand {
     pub artifact_id: ArtifactId,
     pub reason: String,
     pub unlinked_by: Option<ParticipantId>,
+}
+
+/// Command to attach a surface to a conversation.
+#[derive(Debug, Clone)]
+pub struct AttachSurfaceCommand {
+    pub conversation_id: ConversationId,
+    pub surface: SurfaceDescriptor,
+    pub attached_by: Option<ParticipantId>,
+}
+
+/// Command to update a surface attached to a conversation.
+#[derive(Debug, Clone)]
+pub struct UpdateSurfaceCommand {
+    pub conversation_id: ConversationId,
+    pub surface: SurfaceDescriptor,
+    pub updated_by: Option<ParticipantId>,
+}
+
+/// Command to close a surface attached to a conversation.
+#[derive(Debug, Clone)]
+pub struct CloseSurfaceCommand {
+    pub conversation_id: ConversationId,
+    pub surface_id: SurfaceId,
+    pub reason: String,
+    pub closed_by: Option<ParticipantId>,
+}
+
+/// Command to observe an asset in a conversation.
+#[derive(Debug, Clone)]
+pub struct ObserveAssetCommand {
+    pub conversation_id: ConversationId,
+    pub asset: AssetMetadata,
+    pub observed_by: Option<ParticipantId>,
+}
+
+/// Command to capture an observed asset in a conversation.
+#[derive(Debug, Clone)]
+pub struct CaptureAssetCommand {
+    pub conversation_id: ConversationId,
+    pub asset: AssetMetadata,
+    pub captured_by: Option<ParticipantId>,
+}
+
+/// Command to record asset processing status.
+#[derive(Debug, Clone)]
+pub struct ProcessAssetCommand {
+    pub conversation_id: ConversationId,
+    pub asset_id: AssetId,
+    pub status: AssetProcessingStatus,
+    pub processed_by: Option<ParticipantId>,
 }
 
 /// Command to record metadata about an entity state observation.
