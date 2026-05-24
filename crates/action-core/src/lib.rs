@@ -13,6 +13,7 @@
 //!   Deny  → ActionDenied (never executes)
 //! ```
 
+use artifact_core::ArtifactId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -138,7 +139,7 @@ pub enum ActionResultPayload {
     /// Structured JSON result.
     Json(serde_json::Value),
     /// Reference to an artifact created by this action.
-    ArtifactRef(String),
+    ArtifactRef(ArtifactId),
     /// Empty result (action had side effects but no data return).
     Empty,
 }
@@ -373,7 +374,7 @@ mod tests {
         let payloads = vec![
             ActionResultPayload::Text("hello".to_string()),
             ActionResultPayload::Json(serde_json::json!({"key": "value"})),
-            ActionResultPayload::ArtifactRef("artifact-001".to_string()),
+            ActionResultPayload::ArtifactRef(ArtifactId::from("artifact-001")),
             ActionResultPayload::Empty,
         ];
         for payload in payloads {
@@ -384,6 +385,19 @@ mod tests {
                 serde_json::to_string(&payload).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn artifact_ref_payload_uses_stable_json_shape() {
+        let payload = ActionResultPayload::ArtifactRef(ArtifactId::from("artifact-001"));
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type":"ArtifactRef","value":"artifact-001"})
+        );
+
+        let decoded: ActionResultPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, payload);
     }
 
     #[test]

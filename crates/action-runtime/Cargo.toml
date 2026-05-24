@@ -21,5 +21,6 @@ async-trait.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+artifact-core = { path = "../artifact-core" }
 conversation-journal = { path = "../conversation-journal" }
 tempfile.workspace = true

@@ -3,6 +3,7 @@ use action_core::{
     ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
 };
 use action_runtime::{ActionRuntime, ActionRuntimeOutcome, ProcessActionRequest};
+use artifact_core::ArtifactId;
 use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
@@ -48,10 +49,23 @@ impl Clock for FixedClock {
     }
 }
 
+#[derive(Debug)]
+enum TestPayload {
+    Text,
+    ArtifactRef(ArtifactId),
+}
+
+impl Default for TestPayload {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 #[derive(Debug, Default)]
 struct CountingExecutor {
     calls: Mutex<u64>,
     fail: bool,
+    payload: TestPayload,
 }
 
 impl CountingExecutor {
@@ -63,6 +77,15 @@ impl CountingExecutor {
         Self {
             calls: Mutex::new(0),
             fail: true,
+            payload: TestPayload::Text,
+        }
+    }
+
+    fn returning_artifact_ref(artifact_id: impl Into<ArtifactId>) -> Self {
+        Self {
+            calls: Mutex::new(0),
+            fail: false,
+            payload: TestPayload::ArtifactRef(artifact_id.into()),
         }
     }
 }
@@ -74,9 +97,15 @@ impl ActionExecutor for CountingExecutor {
         if self.fail {
             return Err(ActionExecutorError::ExecutionFailed("boom".to_string()));
         }
+        let payload = match &self.payload {
+            TestPayload::Text => ActionResultPayload::Text(format!("{} ok", request.action_kind)),
+            TestPayload::ArtifactRef(artifact_id) => {
+                ActionResultPayload::ArtifactRef(artifact_id.clone())
+            }
+        };
         Ok(ActionResult {
             status: ActionStatus::Completed,
-            payload: ActionResultPayload::Text(format!("{} ok", request.action_kind)),
+            payload,
             summary: format!("{} completed", request.action_kind),
             completed_at: Utc::now(),
         })
@@ -210,6 +239,43 @@ async fn read_only_action_auto_executes_and_records_audit() {
 
     let events = audit.list().await.unwrap();
     assert_eq!(events.len(), 1);
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn completed_action_can_record_artifact_ref_payload() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let artifact_id = ArtifactId::from("artifact-action-1");
+    let executor = CountingExecutor::returning_artifact_ref(artifact_id.clone());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+
+    assert!(matches!(outcome, ActionRuntimeOutcome::Completed { .. }));
+    assert_eq!(executor.calls(), 1);
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&ActionId::from("action-1")).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+    let result = action.result.as_ref().unwrap();
+    assert_eq!(
+        result.payload,
+        ActionResultPayload::ArtifactRef(artifact_id)
+    );
+
+    let events = audit.list().await.unwrap();
     assert_eq!(events[0].policy_decision, "allow");
     assert_eq!(events[0].result_status, "completed");
 }

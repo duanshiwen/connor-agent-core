@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Action execution model — all external side effects go through ActionCore."
 
 [dependencies]
+artifact-core = { path = "../artifact-core" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
