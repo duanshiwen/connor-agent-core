@@ -1,18 +1,18 @@
 # Connor Agent Core
 
-`connor-agent-core` is the Rust workspace for the first version of the **Conversation Kernel** in Agent OS.
+`connor-agent-core` 是 Agent OS 中**对话内核 (Conversation Kernel)** 第一版的 Rust 工作区。
 
-The kernel is designed as an append-only, replayable, testable conversation subsystem. It records conversation changes as events, projects those events into queryable state, and builds context slices for future agent runs without directly calling an LLM, browser, plugin system, or long-term memory layer.
+内核设计为一个**仅追加 (append-only)、可重放 (replayable)、可测试 (testable)** 的对话子系统。它将对话状态变化记录为事件，通过投影器将事件转换为可查询的状态，并为未来的 Agent 运行构建上下文切片——整个过程不直接调用 LLM、浏览器、插件系统或长期记忆层。
 
-## Design Goals
+## 设计目标
 
-- **Append-only event log**: every state change is represented by a `ConversationEvent`.
-- **Deterministic replay**: `ConversationState` is rebuilt from events by `ConversationProjector`.
-- **Separation of concerns**: the kernel manages conversations, not model inference or external tools.
-- **Test-first implementation**: core behavior is covered by unit and integration tests.
-- **Extensible surface**: future browser, plugin, memory, or multi-agent features can be layered on top via events and policies.
+- **仅追加事件日志**：每个状态变化都由一个 `ConversationEvent` 表示。
+- **确定性重放**：`ConversationState` 通过 `ConversationProjector` 从事件重建。
+- **关注点分离**：内核管理对话，不涉及模型推理或外部工具。
+- **测试优先实现**：核心行为通过单元测试和集成测试覆盖。
+- **可扩展接口**：未来的浏览器、插件、记忆或多 Agent 功能可以作为事件和策略层叠加在内核之上。
 
-## Workspace Layout
+## 工作区结构
 
 ```text
 .
@@ -63,38 +63,38 @@ The kernel is designed as an append-only, replayable, testable conversation subs
     ├── action-runtime
     ├── capability-policy
     ├── audit-log
+    ├── artifact-core
+    ├── surface-core
+    ├── asset-core
+    ├── asset-index
     └── conversation-runtime
         └── src
             └── lib.rs
 ```
 
-## Crates
+## Crate 说明
 
 ### `conversation-core`
 
-Domain types shared by the whole conversation subsystem.
+对话子系统共享的领域类型，包括：
 
-Includes:
-
-- ID newtypes: `ConversationId`, `EventId`, `MessageId`, `ParticipantId`, `ThreadId`
-- Session model: `ConversationSession`, `ConversationKind`, `ConversationStatus`
-- Participant model: `Participant`, `ParticipantKind`
-- Message model: `Message`, `MessageContent`, `SuggestedAction`
-- Visibility model: `Visibility`
-- Event model: `ConversationEvent`, `ConversationEventEnvelope`
-- Context slice model: `ConversationSlice`, `SliceBuildReason`
+- **ID 新类型**：`ConversationId`、`EventId`、`MessageId`、`ParticipantId`、`ThreadId`
+- **会话模型**：`ConversationSession`、`ConversationKind`、`ConversationStatus`
+- **参与者模型**：`Participant`、`ParticipantKind`
+- **消息模型**：`Message`、`MessageContent`、`SuggestedAction`
+- **可见性模型**：`Visibility`
+- **事件模型**：`ConversationEvent`、`ConversationEventEnvelope`
+- **上下文切片模型**：`ConversationSlice`、`SliceBuildReason`
 
 ### `conversation-journal`
 
-Append-only event storage abstraction.
-
-Includes:
+仅追加的事件存储抽象，包括：
 
 - `ConversationJournal` trait
-- `MemoryConversationJournal` for tests and in-memory workflows
-- `JsonlConversationJournal` for local durable JSONL storage
+- `MemoryConversationJournal`：用于测试和内存工作流
+- `JsonlConversationJournal`：用于本地持久化 JSONL 存储
 
-The segmented JSONL layout is:
+分段 JSONL 布局如下：
 
 ```text
 {root_dir}/{conversation_id}/
@@ -105,13 +105,11 @@ The segmented JSONL layout is:
     └── ...
 ```
 
-Each line in a segment file is one serialized `ConversationEventEnvelope`. Every envelope includes `schema_version`, currently `1`, so persisted event formats can evolve intentionally. `manifest.json` tracks the active segment and segment metadata, avoiding a single ever-growing journal file for long conversations.
+每个分段文件中的每一行都是一个序列化的 `ConversationEventEnvelope`。每个 envelope 包含 `schema_version`（当前为 `1`），以便持久化的事件格式可以有意识地演进。`manifest.json` 跟踪活跃分段和分段元数据，避免长对话产生单个不断增长的日志文件。
 
 ### `conversation-kernel`
 
-Command handling, projection, context slicing, and local triage policy.
-
-Includes:
+命令处理、投影、上下文切片和本地分诊策略，包括：
 
 - `ConversationKernel`
 - `ConversationProjector`
@@ -120,27 +118,27 @@ Includes:
 - `ConversationPolicy`
 - `RuleBasedPolicy`
 
-Supported commands:
+支持的命令：
 
-- `CreateConversationCommand`
-- `AppendMessageCommand`
-- `CreateAssistantSuggestionCommand`
-- `RequestAgentRunCommand`
-- `CompleteAgentRunCommand`
+- `CreateConversationCommand` — 创建对话
+- `AppendMessageCommand` — 追加消息
+- `CreateAssistantSuggestionCommand` — 创建助手建议
+- `RequestAgentRunCommand` — 请求 Agent 运行
+- `CompleteAgentRunCommand` — 完成 Agent 运行
 
 ### `agent-runtime`
 
-Current runtime boundary for text-only agent runs and deterministic fake action proposals. It bridges the conversation kernel with `model-adapter`, builds context, calls a model adapter, optionally detects an action proposal, routes it through `action-runtime`, appends assistant output, and records agent run lifecycle events.
+当前的运行时边界，用于纯文本 Agent 运行和确定性假动作提议。它桥接对话内核与 `model-adapter`，构建上下文，调用模型适配器，可选地检测动作提议，通过 `action-runtime` 路由动作，追加助手输出，并记录 Agent 运行生命周期事件。
 
-### `action-core`, `action-runtime`, `capability-policy`, and `audit-log`
+### `action-core`、`action-runtime`、`capability-policy` 和 `audit-log`
 
-Foundation crates for the action execution pipeline. The conversation kernel records action lifecycle events and projects action state. `action-runtime` now orchestrates `ActionRequest → ActionRegistry → CapabilityPolicy → ActionExecutor → AuditLog` for Allow / Ask / Deny / failure paths. Concrete Browser / Knowledge / Mail executors are intentionally still future work.
+动作执行管道的基础 crate。对话内核记录动作生命周期事件并投影动作状态。`action-runtime` 现在协调 `ActionRequest → ActionRegistry → CapabilityPolicy → ActionExecutor → AuditLog`，处理 Allow / Ask / Deny / 失败路径。具体的 Browser / Knowledge / Mail 执行器仍属于未来工作。
 
 ### `conversation-runtime`
 
-Deprecated runtime boundary for consuming `AgentRunRequested` events and writing agent outputs back into the conversation. It has been replaced by `agent-runtime` for current development.
+已废弃的运行时边界，用于消费 `AgentRunRequested` 事件并将 Agent 输出写回对话。它已被 `agent-runtime` 取代。
 
-Includes:
+包括：
 
 - `AgentRunRequest`
 - `AgentRunOutput`
@@ -149,13 +147,41 @@ Includes:
 - `PendingAgentRun`
 - `ConversationRuntime`
 
-The runtime can list pending runs, process a run idempotently, append assistant output, and mark the run as completed. It currently uses a fake deterministic executor for testability. Real local or remote LLMs should be added later as additional `AgentRunExecutor` implementations, not inside the kernel.
+运行时可以列出待处理的运行、幂等处理运行、追加助手输出并标记运行完成。当前使用假的确定性执行器以确保可测试性。真实的本地或远程 LLM 应作为额外的 `AgentRunExecutor` 实现添加，而非在内核内部实现。
 
-## Event-Sourced Flow
+### `entity-core`
+
+实体系统核心，定义可由对话引用的实体（如文件、URL、数据对象等）的领域类型。
+
+### `assistant-core`
+
+助手核心，定义助手角色、能力、配置等相关领域类型。
+
+### `model-adapter`
+
+模型适配器抽象层，为对话内核提供统一的 LLM 调用接口。支持不同的模型提供商通过适配器模式集成。
+
+### `artifact-core`
+
+产物核心，定义对话过程中产生的结构化产物（如代码片段、图表、文件等）的领域类型。
+
+### `surface-core`
+
+界面核心，定义对话在不同界面上的展示方式和交互模型。
+
+### `asset-core`
+
+资产核心，定义可被对话引用的资产（如图片、文档、媒体等）的领域类型。
+
+### `asset-index`
+
+资产索引，提供资产的索引和检索能力。
+
+## 事件溯源流程
 
 ```mermaid
 graph LR
-    Command[Command] --> Kernel[ConversationKernel]
+    Command[命令] --> Kernel[ConversationKernel]
     Kernel --> Event[ConversationEventEnvelope]
     Event --> Journal[ConversationJournal]
     Journal --> Projector[ConversationProjector]
@@ -166,50 +192,50 @@ graph LR
     BoundaryEvent --> Runtime[ConversationRuntime]
     Runtime --> Executor[AgentRunExecutor]
     Executor --> Output[AgentRunOutput]
-    Runtime --> AssistantMessage[Assistant Message]
+    Runtime --> AssistantMessage[助手消息]
     Runtime --> Completed[AgentRunCompleted]
 ```
 
-The kernel does not call a model directly. Instead, when an agent run is needed, it records boundary events such as:
+内核不直接调用模型。当需要 Agent 运行时，内核记录边界事件，如：
 
 - `ContextSliceBuilt`
 - `AgentRunRequested`
 
-`conversation-runtime` consumes those events through an `AgentRunExecutor`, appends an assistant output message, and records `AgentRunCompleted`.
+`conversation-runtime` 通过 `AgentRunExecutor` 消费这些事件，追加助手输出消息，并记录 `AgentRunCompleted`。
 
-## Quick Start
+## 快速开始
 
-### Build
+### 构建
 
 ```bash
 cargo build --workspace
 ```
 
-### Test
+### 测试
 
 ```bash
 cargo test --workspace
 ```
 
-Current status:
+当前状态：
 
 ```text
-242 tests passed
+242 个测试全部通过
 ```
 
-### Format
+### 格式化
 
 ```bash
 cargo fmt --all
 ```
 
-### Lint
+### 代码检查
 
 ```bash
 cargo clippy --workspace -- -D warnings
 ```
 
-## Minimal Example
+## 最小示例
 
 ```rust
 use conversation_core::*;
@@ -266,48 +292,48 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Local Policy
+## 本地策略
 
-`RuleBasedPolicy` is a lightweight local triage policy. It can detect messages that should request an agent run, such as:
+`RuleBasedPolicy` 是一个轻量级的本地分诊策略，可以检测应请求 Agent 运行的消息，例如：
 
-- explicit mentions
-- help requests
-- summary requests
-- analysis requests
-- explanation requests
+- 明确的提及
+- 帮助请求
+- 摘要请求
+- 分析请求
+- 解释请求
 
-This policy only decides whether an agent run should be requested. It does not execute model inference.
+此策略仅决定是否应请求 Agent 运行，不执行模型推理。
 
-## Testing Strategy
+## 测试策略
 
-The project follows a layered testing approach:
+项目采用分层测试方法：
 
-1. **Core type tests**: serialization roundtrips and domain invariants.
-2. **Journal tests**: append/load order, JSONL persistence, reopen behavior.
-3. **Projector tests**: deterministic replay from event streams.
-4. **Kernel tests**: command validation and emitted event sequences.
-5. **Slice builder tests**: recent-window, thread, trigger-centered, and user-visibility filtering.
-6. **Integration tests**: full lifecycle flows across kernel, journal, projector, policy, and slice builder.
+1. **核心类型测试**：序列化往返和领域不变量。
+2. **日志测试**：追加/加载顺序、JSONL 持久化、重新打开行为。
+3. **投影器测试**：从事件流进行确定性重放。
+4. **内核测试**：命令验证和发出的事件序列。
+5. **切片构建器测试**：近期窗口、线程、触发器中心和用户可见性过滤。
+6. **集成测试**：跨内核、日志、投影器、策略和切片构建器的完整生命周期流程。
 
-## Architecture Decisions
+## 架构决策
 
-- [ADR 0001: Defer Per-Conversation Event Sequence](./docs/adr/0001-defer-event-sequence.md)
+- [ADR 0001: 延迟实现每对话事件序列](./docs/adr/0001-defer-event-sequence.md)
 
-`sequence` is intentionally not part of `ConversationEventEnvelope` yet. It will be added only after journal append ownership and concurrency semantics are specified.
+`sequence` 当前有意不包含在 `ConversationEventEnvelope` 中。只有在日志追加所有权和并发语义被明确后才会添加。
 
-## Non-Goals for v0.1
+## v0.1 非目标
 
-The first version intentionally does **not** implement:
+第一版有意**不**实现：
 
-- Production LLM/model inference
-- Browser control
-- Plugin execution
-- Long-term memory writes
-- Complex summarization
-- Remote sync
+- 生产级 LLM/模型推理
+- 浏览器控制
+- 插件执行
+- 长期记忆写入
+- 复杂摘要
+- 远程同步
 
-These should be implemented as layers around the event stream, not inside the kernel itself.
+这些功能应作为事件流之上的层实现，而非内核内部。
 
-## License
+## 许可证
 
-Apache-2.0. See [LICENSE](./LICENSE).
+Apache-2.0。详见 [LICENSE](./LICENSE)。
