@@ -197,6 +197,7 @@ name = "conversation-core"
 version = "0.1.0"
 dependencies = [
  "action-core",
+ "artifact-core",
  "chrono",
  "entity-core",
  "serde",
@@ -225,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "action-core",
  "anyhow",
+ "artifact-core",
  "async-trait",
  "chrono",
  "conversation-core",

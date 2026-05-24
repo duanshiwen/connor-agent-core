@@ -103,6 +103,16 @@ impl ConversationProjector {
                     .push(root_message_id.clone());
             }
 
+            ConversationEvent::ArtifactLinkedToConversation { artifact } => {
+                state
+                    .linked_artifacts
+                    .insert(artifact.id.clone(), artifact.clone());
+            }
+
+            ConversationEvent::ArtifactUnlinkedFromConversation { artifact_id, .. } => {
+                state.linked_artifacts.remove(artifact_id);
+            }
+
             ConversationEvent::EntityLinkedToConversation { entity, .. } => {
                 state
                     .linked_entities

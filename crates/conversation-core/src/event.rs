@@ -8,6 +8,7 @@ use crate::message::{Message, MessageContent};
 use crate::participant::Participant;
 use crate::session::ConversationSession;
 use action_core::{ActionId, ActionRequest, ActionResult};
+use artifact_core::{ArtifactDescriptor, ArtifactId};
 use chrono::{DateTime, Utc};
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
 use serde::{Deserialize, Serialize};
@@ -154,6 +155,15 @@ pub enum ConversationEvent {
         error_message: String,
     },
 
+    /// An artifact was linked to the conversation.
+    ArtifactLinkedToConversation { artifact: ArtifactDescriptor },
+
+    /// An artifact was unlinked from the conversation.
+    ArtifactUnlinkedFromConversation {
+        artifact_id: ArtifactId,
+        reason: String,
+    },
+
     /// An entity was linked to the conversation.
     EntityLinkedToConversation {
         entity: EntityDescriptor,
@@ -188,6 +198,7 @@ mod tests {
     use crate::session::{ConversationKind, ConversationStatus};
     use crate::visibility::Visibility;
     use action_core::{ActionKind, ActionResultPayload, ActionStatus};
+    use artifact_core::ArtifactKind;
     use entity_core::{EntityCapability, EntityKind};
 
     fn now() -> DateTime<Utc> {
@@ -341,6 +352,18 @@ mod tests {
             payload: ActionResultPayload::Text("search complete".to_string()),
             summary: "Search completed".to_string(),
             completed_at: now(),
+        }
+    }
+
+    fn make_artifact() -> ArtifactDescriptor {
+        ArtifactDescriptor {
+            id: ArtifactId::from("artifact-web-1"),
+            kind: ArtifactKind::WebPage,
+            title: Some("Agent OS Roadmap".to_string()),
+            source_uri: Some("https://example.com/agent-os".to_string()),
+            mime_type: Some("text/html".to_string()),
+            metadata: serde_json::json!({"captured_by":"browser-entity"}),
+            created_at: now(),
         }
     }
 
@@ -579,6 +602,27 @@ mod tests {
         let envelope = wrap_event(ConversationEvent::ActionFailed {
             action_id: ActionId::from("action-001"),
             error_message: "executor failed".to_string(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn artifact_linked_to_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ArtifactLinkedToConversation {
+            artifact: make_artifact(),
+        });
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn artifact_unlinked_from_conversation_roundtrip() {
+        let envelope = wrap_event(ConversationEvent::ArtifactUnlinkedFromConversation {
+            artifact_id: ArtifactId::from("artifact-web-1"),
+            reason: "user removed artifact".to_string(),
         });
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();

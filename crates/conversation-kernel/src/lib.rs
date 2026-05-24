@@ -15,9 +15,9 @@ pub use commands::{
     AppendMessageCommand, ApproveActionCommand, CancelAgentRunCommand, CompleteActionCommand,
     CompleteAgentRunCommand, CreateAssistantSuggestionCommand, CreateConversationCommand,
     DenyActionCommand, EditMessageCommand, FailActionCommand, FailAgentRunCommand,
-    LinkEntityCommand, ObserveEntityStateCommand, QueryEntityCommand, RequestActionCommand,
-    RequestAgentRunCommand, RequireActionApprovalCommand, StartActionCommand, StartAgentRunCommand,
-    TimeoutAgentRunCommand, UnlinkEntityCommand,
+    LinkArtifactCommand, LinkEntityCommand, ObserveEntityStateCommand, QueryEntityCommand,
+    RequestActionCommand, RequestAgentRunCommand, RequireActionApprovalCommand, StartActionCommand,
+    StartAgentRunCommand, TimeoutAgentRunCommand, UnlinkArtifactCommand, UnlinkEntityCommand,
 };
 pub use kernel::{Clock, ConversationKernel, IdGenerator, UtcClock, UuidGenerator};
 pub use policy::{AgentRunReason, ConversationPolicy, RuleBasedPolicy};

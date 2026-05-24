@@ -4,6 +4,7 @@
 //! the data needed to produce one or more `ConversationEvent`s.
 
 use action_core::{ActionId, ActionRequest, ActionResult};
+use artifact_core::{ArtifactDescriptor, ArtifactId};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId, LinkReason};
 
@@ -60,6 +61,23 @@ pub struct LinkEntityCommand {
 pub struct UnlinkEntityCommand {
     pub conversation_id: ConversationId,
     pub entity_id: EntityId,
+    pub reason: String,
+    pub unlinked_by: Option<ParticipantId>,
+}
+
+/// Command to link an artifact to a conversation.
+#[derive(Debug, Clone)]
+pub struct LinkArtifactCommand {
+    pub conversation_id: ConversationId,
+    pub artifact: ArtifactDescriptor,
+    pub linked_by: Option<ParticipantId>,
+}
+
+/// Command to unlink an artifact from a conversation.
+#[derive(Debug, Clone)]
+pub struct UnlinkArtifactCommand {
+    pub conversation_id: ConversationId,
+    pub artifact_id: ArtifactId,
     pub reason: String,
     pub unlinked_by: Option<ParticipantId>,
 }

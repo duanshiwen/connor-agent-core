@@ -4,6 +4,7 @@
 //! It is never mutated directly — always rebuilt from the event journal.
 
 use action_core::ActionId;
+use artifact_core::{ArtifactDescriptor, ArtifactId};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId};
 use std::collections::HashMap;
@@ -28,6 +29,9 @@ pub struct ConversationState {
 
     /// Linked entities keyed by entity ID.
     pub linked_entities: HashMap<EntityId, EntityDescriptor>,
+
+    /// Linked artifacts keyed by artifact ID.
+    pub linked_artifacts: HashMap<ArtifactId, ArtifactDescriptor>,
 
     /// Actions keyed by action ID.
     pub actions: HashMap<ActionId, ConversationActionState>,

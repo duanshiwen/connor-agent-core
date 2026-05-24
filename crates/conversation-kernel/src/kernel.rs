@@ -352,6 +352,53 @@ impl ConversationKernel {
         .await
     }
 
+    /// Link an artifact to a conversation.
+    ///
+    /// Validates: conversation exists and optional actor is a participant.
+    /// Produces: `ArtifactLinkedToConversation`.
+    pub async fn link_artifact(&self, cmd: LinkArtifactCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.linked_by.as_ref(), "linked_by")?;
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.linked_by,
+            now,
+            ConversationEvent::ArtifactLinkedToConversation {
+                artifact: cmd.artifact,
+            },
+        )
+        .await
+    }
+
+    /// Unlink an artifact from a conversation.
+    ///
+    /// Validates: conversation exists, artifact is linked, optional actor is a participant.
+    /// Produces: `ArtifactUnlinkedFromConversation`.
+    pub async fn unlink_artifact(&self, cmd: UnlinkArtifactCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_conversation_exists(&state, &cmd.conversation_id)?;
+        Self::validate_optional_actor(&state, cmd.unlinked_by.as_ref(), "unlinked_by")?;
+
+        if !state.linked_artifacts.contains_key(&cmd.artifact_id) {
+            bail!("linked artifact not found: {}", cmd.artifact_id);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.unlinked_by,
+            now,
+            ConversationEvent::ArtifactUnlinkedFromConversation {
+                artifact_id: cmd.artifact_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
     /// Record metadata about an entity state observation.
     ///
     /// Validates: conversation exists, entity is linked, optional actor is a participant.

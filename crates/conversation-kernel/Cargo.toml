@@ -8,6 +8,7 @@ description = "The Conversation Kernel — commands, projector, and slice builde
 
 [dependencies]
 action-core = { path = "../action-core" }
+artifact-core = { path = "../artifact-core" }
 conversation-core = { path = "../conversation-core" }
 conversation-journal = { path = "../conversation-journal" }
 entity-core = { path = "../entity-core" }
