@@ -352,4 +352,161 @@ mod tests {
         assert!(runtime.verify_challenge("nonce-123", "signed:nonce-123"));
         assert!(!runtime.verify_challenge("nonce-123", "wrong"));
     }
+
+    // ---- PR 46: E2E identity lifecycle tests ----
+
+    #[tokio::test]
+    async fn e2e_create_local_identity_and_bind_personal_server() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+
+        // Create local identity
+        let identity = runtime.create_identity("Test User").await.unwrap();
+        assert!(!identity.agentos_id.0.is_empty());
+        assert!(!identity.device_id.0.is_empty());
+        assert_eq!(identity.display_name, "Test User");
+
+        // Register personal server
+        let server_id = runtime
+            .register_server(
+                "https://my-home.example.com",
+                ServerKind::PersonalSelfHosted,
+                ConnectionPolicy::AllowAll,
+                "Home Server",
+            )
+            .await
+            .unwrap();
+
+        // Bind identity to server
+        let binding = runtime
+            .bind_account(&identity.agentos_id.0, &server_id)
+            .await
+            .unwrap();
+        assert_eq!(binding.agentos_id, identity.agentos_id.0);
+        assert_eq!(binding.server_id, server_id);
+
+        // Verify binding exists
+        let bindings = runtime.list_bindings(&identity.agentos_id.0).await.unwrap();
+        assert_eq!(bindings.len(), 1);
+
+        // Disconnect server keeps local identity
+        runtime.disconnect_server(&server_id).await.unwrap();
+        let servers = runtime.list_servers().await.unwrap();
+        assert!(servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn e2e_one_identity_binds_multiple_servers() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+
+        // Create identity
+        let identity = runtime.create_identity("Multi-Server User").await.unwrap();
+
+        // Register 3 servers of different kinds
+        let personal = runtime
+            .register_server(
+                "https://personal.example.com",
+                ServerKind::PersonalSelfHosted,
+                ConnectionPolicy::AllowAll,
+                "Personal",
+            )
+            .await
+            .unwrap();
+        let enterprise = runtime
+            .register_server(
+                "https://corp.example.com",
+                ServerKind::EnterpriseManaged,
+                ConnectionPolicy::RequireOwnershipNotice,
+                "Corporate",
+            )
+            .await
+            .unwrap();
+        let relay = runtime
+            .register_server(
+                "https://relay.example.com",
+                ServerKind::OpenSourceRelay,
+                ConnectionPolicy::RequireInviteCode,
+                "Community Relay",
+            )
+            .await
+            .unwrap();
+
+        // Bind identity to all three
+        runtime
+            .bind_account(&identity.agentos_id.0, &personal)
+            .await
+            .unwrap();
+        runtime
+            .bind_account(&identity.agentos_id.0, &enterprise)
+            .await
+            .unwrap();
+        runtime
+            .bind_account(&identity.agentos_id.0, &relay)
+            .await
+            .unwrap();
+
+        let bindings = runtime.list_bindings(&identity.agentos_id.0).await.unwrap();
+        assert_eq!(bindings.len(), 3);
+
+        // Verify each binding points to the correct server
+        let server_ids: Vec<_> = bindings.iter().map(|b| &b.server_id).collect();
+        assert!(server_ids.contains(&&personal));
+        assert!(server_ids.contains(&&enterprise));
+        assert!(server_ids.contains(&&relay));
+    }
+
+    #[tokio::test]
+    async fn e2e_enterprise_server_requires_ownership_notice_acknowledgment() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+
+        // Create identity
+        let identity = runtime.create_identity("Enterprise User").await.unwrap();
+
+        // Register enterprise server with ownership notice requirement
+        let enterprise_server = runtime
+            .register_server(
+                "https://enterprise.example.com",
+                ServerKind::EnterpriseManaged,
+                ConnectionPolicy::RequireOwnershipNotice,
+                "Enterprise Server",
+            )
+            .await
+            .unwrap();
+
+        // Check that ownership notice is required
+        let required = runtime
+            .check_enterprise_notice_required(&enterprise_server)
+            .await
+            .unwrap();
+        assert!(required);
+
+        // Register personal server (no notice required)
+        let personal_server = runtime
+            .register_server(
+                "https://personal.example.com",
+                ServerKind::PersonalSelfHosted,
+                ConnectionPolicy::AllowAll,
+                "Personal",
+            )
+            .await
+            .unwrap();
+
+        let not_required = runtime
+            .check_enterprise_notice_required(&personal_server)
+            .await
+            .unwrap();
+        assert!(!not_required);
+
+        // Bind to both servers
+        runtime
+            .bind_account(&identity.agentos_id.0, &enterprise_server)
+            .await
+            .unwrap();
+        runtime
+            .bind_account(&identity.agentos_id.0, &personal_server)
+            .await
+            .unwrap();
+
+        let bindings = runtime.list_bindings(&identity.agentos_id.0).await.unwrap();
+        assert_eq!(bindings.len(), 2);
+    }
 }
