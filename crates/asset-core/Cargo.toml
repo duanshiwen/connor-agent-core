@@ -1,0 +1,16 @@
+[package]
+name = "asset-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Asset domain model for AgentOS binary and metadata assets such as images, documents, and media references."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

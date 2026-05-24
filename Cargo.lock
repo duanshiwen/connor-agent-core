@@ -87,6 +87,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asset-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "assistant-core"
 version = "0.1.0"
 dependencies = [

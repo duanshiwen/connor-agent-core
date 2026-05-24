@@ -14,6 +14,7 @@ members = [
     "crates/audit-log",
     "crates/artifact-core",
     "crates/surface-core",
+    "crates/asset-core",
 ]
 resolver = "2"
 
