@@ -22,6 +22,7 @@ members = [
     "crates/notification-core",
     "crates/scheduler",
     "crates/identity-core",
+    "crates/server-account-core",
 ]
 resolver = "2"
 
