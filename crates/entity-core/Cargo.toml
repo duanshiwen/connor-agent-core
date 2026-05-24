@@ -1,0 +1,14 @@
+[package]
+name = "entity-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core entity types for AgentOS linked entities — descriptors, capabilities, registry, and conversation bindings."
+
+[dependencies]
+conversation-core = { path = "../conversation-core" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true

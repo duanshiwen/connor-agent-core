@@ -4,6 +4,7 @@ members = [
     "crates/conversation-journal",
     "crates/conversation-kernel",
     "crates/conversation-runtime",
+    "crates/entity-core",
 ]
 resolver = "2"
 
