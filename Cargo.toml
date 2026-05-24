@@ -8,6 +8,7 @@ members = [
     "crates/assistant-core",
     "crates/model-adapter",
     "crates/agent-runtime",
+    "crates/action-core",
 ]
 resolver = "2"
 
