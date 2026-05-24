@@ -22,6 +22,7 @@ use conversation_kernel::{ConversationKernel, ConversationState};
 use entity_core::EntityDescriptor;
 use model_adapter::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -63,6 +64,8 @@ pub struct AgentContext {
     pub trigger_message: Message,
     /// Ordered messages to include in the prompt (may be truncated).
     pub messages: Vec<Message>,
+    /// Participants indexed by ID for deterministic role resolution.
+    pub participants: HashMap<ParticipantId, Participant>,
     /// Linked entity descriptors available for this conversation.
     pub linked_entities: Vec<EntityDescriptor>,
     /// The model to use for this run.
@@ -122,6 +125,7 @@ impl AgentContextBuilder {
             run_id: run_id.to_string(),
             trigger_message,
             messages,
+            participants: state.participants.clone().into_iter().collect(),
             linked_entities,
             model_id: config.default_model_id.clone(),
             system_prompt: config.system_prompt.clone(),
@@ -148,14 +152,16 @@ impl PromptRenderer {
 
         // Convert conversation messages to model messages.
         for msg in &context.messages {
-            let role = match &msg.sender_id {
-                id if id.0.starts_with("agent") || id.0.starts_with("a") => {
-                    // Heuristic: sender IDs starting with "agent" or "a" are assistant.
-                    // In production, this should be resolved via participant lookup.
-                    ModelRole::Assistant
-                }
-                _ => ModelRole::User,
-            };
+            let role = context
+                .participants
+                .get(&msg.sender_id)
+                .map(|participant| match participant.kind {
+                    ParticipantKind::Agent => ModelRole::Assistant,
+                    ParticipantKind::Human
+                    | ParticipantKind::System
+                    | ParticipantKind::Integration => ModelRole::User,
+                })
+                .unwrap_or(ModelRole::User);
 
             let text = match &msg.content {
                 MessageContent::Text { text } => text.clone(),
@@ -223,7 +229,7 @@ pub struct KeywordActionProposalDetector;
 impl ActionProposalDetector for KeywordActionProposalDetector {
     fn detect(
         &self,
-        _context: &AgentContext,
+        context: &AgentContext,
         model_response: &ModelResponse,
     ) -> Option<AgentActionProposal> {
         let marker = "ACTION ";
@@ -244,8 +250,14 @@ impl ActionProposalDetector for KeywordActionProposalDetector {
                 })
             })
         };
+        let kind_slug = kind
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
         Some(AgentActionProposal {
-            action_id: ActionId::from(format!("action-{}", uuid::Uuid::new_v4())),
+            action_id: ActionId::from(format!("action-{}-{kind_slug}", context.run_id)),
             action_kind: ActionKind::from(kind),
             input,
             summary: format!("Proposed action {kind}"),
@@ -727,7 +739,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -775,7 +790,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -821,7 +839,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::Direct,
                 title: None,
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -883,6 +904,13 @@ mod tests {
                     edited_at: None,
                 },
             ],
+            participants: HashMap::from([
+                (ParticipantId::from("u1"), human("u1", "Test User")),
+                (
+                    ParticipantId::from("a1"),
+                    agent_participant("a1", "Assistant"),
+                ),
+            ]),
             linked_entities: vec![],
             model_id: ModelId::from("test-model"),
             system_prompt: Some("You are helpful.".to_string()),
@@ -932,6 +960,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 edited_at: None,
             }],
+            participants: HashMap::from([(ParticipantId::from("u1"), human("u1", "Test User"))]),
             linked_entities: vec![],
             model_id: ModelId::from("test-model"),
             system_prompt: None,
@@ -955,7 +984,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: Some("Test Task".to_string()),
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -1039,7 +1071,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -1141,7 +1176,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: None,
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await
@@ -1232,7 +1270,10 @@ mod tests {
             .create_conversation(conversation_kernel::CreateConversationCommand {
                 kind: ConversationKind::AgentTask,
                 title: Some("Action integration".to_string()),
-                participants: vec![human("u1", "Test User"), agent_participant("a1", "小助理")],
+                participants: vec![
+                    human("u1", "Test User"),
+                    agent_participant("a1", "Assistant"),
+                ],
                 actor_id: Some(ParticipantId::from("u1")),
             })
             .await

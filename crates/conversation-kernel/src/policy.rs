@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunReason {
-    /// The user explicitly mentioned the assistant (e.g. "@小助理").
+    /// The user explicitly mentioned the assistant (e.g. "@assistant").
     ExplicitMention,
     /// The user made a help request (e.g. "帮我", "请").
     HelpRequest,
@@ -54,10 +54,7 @@ impl ConversationPolicy for RuleBasedPolicy {
                 let text_lower = text.to_lowercase();
 
                 // Explicit mention takes priority.
-                if text_lower.contains("@小助理")
-                    || text_lower.contains("@assistant")
-                    || text_lower.contains("@ai")
-                {
+                if text_lower.contains("@assistant") || text_lower.contains("@ai") {
                     return Some(AgentRunReason::ExplicitMention);
                 }
 
@@ -115,10 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mention_chinese() {
+    fn explicit_mention_assistant_alias() {
         let policy = RuleBasedPolicy;
         let state = ConversationState::default();
-        let msg = make_text_message("@小助理 帮我总结一下");
+        let msg = make_text_message("@assistant 帮我总结一下");
 
         let reason = policy.should_request_agent_run(&state, &msg);
         assert_eq!(reason, Some(AgentRunReason::ExplicitMention));

@@ -53,7 +53,7 @@ mod tests {
         Participant {
             id: ParticipantId::from("assistant-001"),
             kind: ParticipantKind::Agent,
-            display_name: "小助理".to_string(),
+            display_name: "Assistant".to_string(),
         }
     }
 
@@ -91,7 +91,7 @@ mod tests {
     fn participant_display_name_preserved() {
         let p = sample_agent();
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("小助理"));
+        assert!(json.contains("Assistant"));
     }
 
     #[test]

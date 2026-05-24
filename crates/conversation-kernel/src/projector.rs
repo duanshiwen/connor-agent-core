@@ -360,7 +360,7 @@ mod tests {
         let events = vec![
             envelope(conversation_created_event()),
             envelope(participant_added_event("u1", "Test User")),
-            envelope(participant_added_event("a1", "小助理")),
+            envelope(participant_added_event("a1", "Assistant")),
         ];
         let state = ConversationProjector::project(&events).unwrap();
 
