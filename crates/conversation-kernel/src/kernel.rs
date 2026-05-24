@@ -1527,7 +1527,7 @@ mod tests {
             .await
             .unwrap();
 
-        let msg2 = kernel
+        let _msg2 = kernel
             .append_message(AppendMessageCommand {
                 conversation_id: conv_id.clone(),
                 sender_id: ParticipantId::from("a1"),

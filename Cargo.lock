@@ -98,6 +98,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asset-index"
+version = "0.1.0"
+dependencies = [
+ "asset-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "assistant-core"
 version = "0.1.0"
 dependencies = [

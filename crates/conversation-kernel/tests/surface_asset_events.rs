@@ -6,9 +6,7 @@ use conversation_core::*;
 use conversation_journal::MemoryConversationJournal;
 use conversation_kernel::*;
 use std::sync::{Arc, Mutex};
-use surface_core::{
-    SurfaceDescriptor, SurfaceId, SurfaceKind, SurfaceLifecycleStatus, SurfaceRendererHint,
-};
+use surface_core::{SurfaceDescriptor, SurfaceKind, SurfaceLifecycleStatus, SurfaceRendererHint};
 
 struct SequentialIdGenerator {
     counter: Mutex<u64>,

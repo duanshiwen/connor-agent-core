@@ -237,7 +237,7 @@ async fn group_chat_with_private_suggestion() {
     // Define participant IDs explicitly so we can reference them later.
     let u1_id = ParticipantId::from("u1");
     let u2_id = ParticipantId::from("u2");
-    let a1_id = ParticipantId::from("a1");
+    let _a1_id = ParticipantId::from("a1");
 
     // Create a group chat
     let conv_id = kernel
