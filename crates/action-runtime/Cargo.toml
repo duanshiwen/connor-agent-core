@@ -25,4 +25,5 @@ tokio.workspace = true
 browser-entity = { path = "../browser-entity" }
 conversation-journal = { path = "../conversation-journal" }
 knowledge-entity = { path = "../knowledge-entity" }
+reminder-core = { path = "../reminder-core" }
 tempfile.workspace = true

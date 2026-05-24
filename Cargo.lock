@@ -32,6 +32,7 @@ dependencies = [
  "conversation-journal",
  "conversation-kernel",
  "knowledge-entity",
+ "reminder-core",
  "serde",
  "serde_json",
  "tempfile",
