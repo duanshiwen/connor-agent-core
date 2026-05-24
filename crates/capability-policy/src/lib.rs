@@ -199,7 +199,7 @@ pub enum PolicyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use action_core::ActionId;
+    use action_core::{ActionId, ActionKind};
     use chrono::Utc;
 
     fn test_request(kind: &str) -> ActionRequest {

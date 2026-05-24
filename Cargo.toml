@@ -10,6 +10,7 @@ members = [
     "crates/agent-runtime",
     "crates/action-core",
     "crates/capability-policy",
+    "crates/audit-log",
 ]
 resolver = "2"
 
