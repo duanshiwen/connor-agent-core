@@ -453,9 +453,11 @@ dependencies = [
 name = "knowledge-entity"
 version = "0.1.0"
 dependencies = [
+ "action-core",
  "artifact-core",
  "asset-core",
  "async-trait",
+ "capability-policy",
  "chrono",
  "entity-core",
  "serde",

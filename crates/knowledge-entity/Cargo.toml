@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Knowledge entity domain model and deterministic in-memory repository for AgentOS."
 
 [dependencies]
+action-core = { path = "../action-core" }
 artifact-core = { path = "../artifact-core" }
 asset-core = { path = "../asset-core" }
 entity-core = { path = "../entity-core" }
@@ -17,4 +18,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+capability-policy = { path = "../capability-policy" }
 tokio.workspace = true

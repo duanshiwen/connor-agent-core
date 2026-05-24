@@ -1,11 +1,16 @@
 //! # Knowledge Entity
 //!
-//! Domain types and deterministic in-memory repository for AgentOS knowledge entries.
+//! Domain types, deterministic in-memory repository, and action-level seams for
+//! AgentOS knowledge entries.
 //!
 //! This crate intentionally does not write to a real Markdown/frontmatter knowledge base.
-//! It provides the pure Knowledge Entity seam that later action executors can use through
-//! `ActionRuntime` and `CapabilityPolicy`.
+//! It provides pure Knowledge Entity abstractions that later action/runtime integrations
+//! can use through `ActionRuntime` and `CapabilityPolicy`.
 
+use action_core::{
+    ActionExecutor, ActionExecutorError, ActionKind, ActionRegistry, ActionRegistryError,
+    ActionRequest, ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
+};
 use artifact_core::ArtifactId;
 use asset_core::AssetId;
 use async_trait::async_trait;
@@ -14,6 +19,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+
+pub const KNOWLEDGE_SEARCH_ACTION_KIND: &str = "knowledge.search";
+pub const KNOWLEDGE_GET_ENTRY_ACTION_KIND: &str = "knowledge.get_entry";
+pub const KNOWLEDGE_CREATE_DRAFT_ACTION_KIND: &str = "knowledge.create_draft";
+pub const KNOWLEDGE_SAVE_ENTRY_ACTION_KIND: &str = "knowledge.save_entry";
+
+pub fn knowledge_search_action_kind() -> ActionKind {
+    ActionKind::from(KNOWLEDGE_SEARCH_ACTION_KIND)
+}
+
+pub fn knowledge_get_entry_action_kind() -> ActionKind {
+    ActionKind::from(KNOWLEDGE_GET_ENTRY_ACTION_KIND)
+}
+
+pub fn knowledge_create_draft_action_kind() -> ActionKind {
+    ActionKind::from(KNOWLEDGE_CREATE_DRAFT_ACTION_KIND)
+}
+
+pub fn knowledge_save_entry_action_kind() -> ActionKind {
+    ActionKind::from(KNOWLEDGE_SAVE_ENTRY_ACTION_KIND)
+}
 
 /// Unique identifier for a knowledge entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,6 +129,10 @@ impl KnowledgeEntryDraft {
         self.metadata = metadata;
         self
     }
+
+    pub fn validate_for_write(&self) -> Result<(), KnowledgeValidationError> {
+        validate_draft_fields(&self.title, &self.content_markdown)
+    }
 }
 
 /// Search query for knowledge entries.
@@ -139,6 +169,113 @@ pub struct KnowledgeSearchResult {
     pub entry: KnowledgeEntryRef,
     pub score: f32,
     pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KnowledgeValidationError {
+    #[error("knowledge draft title cannot be blank")]
+    BlankTitle,
+    #[error("knowledge draft content cannot be blank")]
+    BlankContent,
+}
+
+/// Input for `knowledge.search`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeSearchActionInput {
+    pub query: KnowledgeSearchQuery,
+}
+
+/// Input for `knowledge.get_entry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeGetEntryActionInput {
+    pub id: KnowledgeEntryId,
+}
+
+/// Input for `knowledge.create_draft`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeCreateDraftActionInput {
+    pub title: String,
+    pub content_markdown: String,
+    pub source_uri: Option<String>,
+    pub source_artifact_id: Option<ArtifactId>,
+    pub source_asset_id: Option<AssetId>,
+    pub tags: Vec<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+impl KnowledgeCreateDraftActionInput {
+    pub fn into_draft(self) -> Result<KnowledgeEntryDraft, KnowledgeValidationError> {
+        validate_draft_fields(&self.title, &self.content_markdown)?;
+        Ok(KnowledgeEntryDraft {
+            title: self.title,
+            content_markdown: self.content_markdown,
+            source_uri: self.source_uri,
+            source_artifact_id: self.source_artifact_id,
+            source_asset_id: self.source_asset_id,
+            tags: self.tags,
+            metadata: self.metadata,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// Input for `knowledge.save_entry`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeSaveEntryActionInput {
+    pub draft: KnowledgeEntryDraft,
+}
+
+fn validate_draft_fields(
+    title: &str,
+    content_markdown: &str,
+) -> Result<(), KnowledgeValidationError> {
+    if title.trim().is_empty() {
+        return Err(KnowledgeValidationError::BlankTitle);
+    }
+    if content_markdown.trim().is_empty() {
+        return Err(KnowledgeValidationError::BlankContent);
+    }
+    Ok(())
+}
+
+/// Register the first stable knowledge action schemas.
+pub fn register_knowledge_action_schemas(
+    registry: &mut ActionRegistry,
+) -> Result<(), ActionRegistryError> {
+    registry.register(ActionSchema {
+        kind: knowledge_search_action_kind(),
+        display_name: "Search Knowledge".to_string(),
+        description: "Search known knowledge entries without mutating state.".to_string(),
+        side_effect: SideEffectKind::ReadOnly,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: knowledge_get_entry_action_kind(),
+        display_name: "Get Knowledge Entry".to_string(),
+        description: "Get a knowledge entry reference by id without mutating state.".to_string(),
+        side_effect: SideEffectKind::ReadOnly,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: knowledge_create_draft_action_kind(),
+        display_name: "Create Knowledge Draft".to_string(),
+        description: "Create a session-local knowledge draft payload.".to_string(),
+        side_effect: SideEffectKind::RuntimeStateMutation,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: knowledge_save_entry_action_kind(),
+        display_name: "Save Knowledge Entry".to_string(),
+        description: "Persist a knowledge draft through the configured repository.".to_string(),
+        side_effect: SideEffectKind::FileSystemMutation,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    Ok(())
 }
 
 /// Errors from knowledge repository operations.
@@ -278,9 +415,98 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
     }
 }
 
+/// Deterministic action executor for the first knowledge action seam.
+pub struct KnowledgeActionExecutor {
+    repository: Arc<dyn KnowledgeRepository>,
+}
+
+impl KnowledgeActionExecutor {
+    pub fn new(repository: Arc<dyn KnowledgeRepository>) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait]
+impl ActionExecutor for KnowledgeActionExecutor {
+    async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
+        let payload = match request.action_kind.0.as_str() {
+            KNOWLEDGE_SEARCH_ACTION_KIND => {
+                let input: KnowledgeSearchActionInput = parse_action_input(&request.input)?;
+                let results = self
+                    .repository
+                    .search(&input.query)
+                    .await
+                    .map_err(repository_error_to_executor_error)?;
+                ActionResultPayload::Json(serde_json::to_value(results).map_err(json_error)?)
+            }
+            KNOWLEDGE_GET_ENTRY_ACTION_KIND => {
+                let input: KnowledgeGetEntryActionInput = parse_action_input(&request.input)?;
+                let entry = self
+                    .repository
+                    .get_entry(&input.id)
+                    .await
+                    .map_err(repository_error_to_executor_error)?;
+                ActionResultPayload::Json(serde_json::to_value(entry).map_err(json_error)?)
+            }
+            KNOWLEDGE_CREATE_DRAFT_ACTION_KIND => {
+                let input: KnowledgeCreateDraftActionInput = parse_action_input(&request.input)?;
+                let draft = input
+                    .into_draft()
+                    .map_err(validation_error_to_executor_error)?;
+                ActionResultPayload::Json(serde_json::to_value(draft).map_err(json_error)?)
+            }
+            KNOWLEDGE_SAVE_ENTRY_ACTION_KIND => {
+                let input: KnowledgeSaveEntryActionInput = parse_action_input(&request.input)?;
+                input
+                    .draft
+                    .validate_for_write()
+                    .map_err(validation_error_to_executor_error)?;
+                let entry = self
+                    .repository
+                    .save_draft(input.draft)
+                    .await
+                    .map_err(repository_error_to_executor_error)?;
+                ActionResultPayload::Json(serde_json::to_value(entry).map_err(json_error)?)
+            }
+            _ => {
+                return Err(ActionExecutorError::NotSupported(
+                    request.action_kind.clone(),
+                ));
+            }
+        };
+
+        Ok(ActionResult {
+            status: ActionStatus::Completed,
+            payload,
+            summary: format!("{} completed", request.action_kind),
+            completed_at: Utc::now(),
+        })
+    }
+}
+
+fn parse_action_input<T: for<'de> Deserialize<'de>>(
+    input: &serde_json::Value,
+) -> Result<T, ActionExecutorError> {
+    serde_json::from_value(input.clone()).map_err(json_error)
+}
+
+fn json_error(err: serde_json::Error) -> ActionExecutorError {
+    ActionExecutorError::InvalidInput(err.to_string())
+}
+
+fn validation_error_to_executor_error(err: KnowledgeValidationError) -> ActionExecutorError {
+    ActionExecutorError::InvalidInput(err.to_string())
+}
+
+fn repository_error_to_executor_error(err: KnowledgeRepositoryError) -> ActionExecutorError {
+    ActionExecutorError::ExecutionFailed(err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use action_core::{ActionId, ActionRequest};
+    use capability_policy::{CapabilityPolicy, PolicyDecision};
 
     fn ts() -> DateTime<Utc> {
         "2026-05-24T12:00:00Z".parse().unwrap()
@@ -293,6 +519,37 @@ mod tests {
             .with_source_asset_id("asset-source-1")
             .with_tags(tags.into_iter().map(str::to_string).collect())
             .with_metadata(serde_json::json!({ "source": "test" }))
+    }
+
+    fn create_draft_input(title: &str, content_markdown: &str) -> KnowledgeCreateDraftActionInput {
+        KnowledgeCreateDraftActionInput {
+            title: title.to_string(),
+            content_markdown: content_markdown.to_string(),
+            source_uri: Some("https://example.com/source".to_string()),
+            source_artifact_id: Some(ArtifactId::from("artifact-source-1")),
+            source_asset_id: Some(AssetId::from("asset-source-1")),
+            tags: vec!["agent-os".to_string()],
+            metadata: serde_json::json!({ "source": "test" }),
+            created_at: ts(),
+        }
+    }
+
+    fn action_request(kind: ActionKind, input: serde_json::Value) -> ActionRequest {
+        ActionRequest {
+            action_id: ActionId::from("action-knowledge-1"),
+            action_kind: kind,
+            input,
+            requested_by: "user-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            message_id: Some("message-1".to_string()),
+            requested_at: ts(),
+        }
+    }
+
+    fn registry_with_knowledge_actions() -> ActionRegistry {
+        let mut registry = ActionRegistry::new();
+        register_knowledge_action_schemas(&mut registry).unwrap();
+        registry
     }
 
     #[test]
@@ -363,6 +620,125 @@ mod tests {
         let json = serde_json::to_string_pretty(&result).unwrap();
         let decoded: KnowledgeSearchResult = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn knowledge_action_inputs_roundtrip() {
+        let search = KnowledgeSearchActionInput {
+            query: KnowledgeSearchQuery::new("agentos"),
+        };
+        let get = KnowledgeGetEntryActionInput {
+            id: KnowledgeEntryId::from("knowledge-entry-1"),
+        };
+        let create = create_draft_input("AgentOS Notes", "content");
+        let save = KnowledgeSaveEntryActionInput {
+            draft: draft("AgentOS Notes", "content", vec!["agent-os"]),
+        };
+
+        assert_eq!(
+            serde_json::from_str::<KnowledgeSearchActionInput>(
+                &serde_json::to_string(&search).unwrap()
+            )
+            .unwrap(),
+            search
+        );
+        assert_eq!(
+            serde_json::from_str::<KnowledgeGetEntryActionInput>(
+                &serde_json::to_string(&get).unwrap()
+            )
+            .unwrap(),
+            get
+        );
+        assert_eq!(
+            serde_json::from_str::<KnowledgeCreateDraftActionInput>(
+                &serde_json::to_string(&create).unwrap()
+            )
+            .unwrap(),
+            create
+        );
+        assert_eq!(
+            serde_json::from_str::<KnowledgeSaveEntryActionInput>(
+                &serde_json::to_string(&save).unwrap()
+            )
+            .unwrap(),
+            save
+        );
+    }
+
+    #[test]
+    fn register_knowledge_action_schemas_adds_expected_actions() {
+        let registry = registry_with_knowledge_actions();
+
+        assert_eq!(registry.len(), 4);
+        assert!(registry.get(&knowledge_search_action_kind()).is_some());
+        assert!(registry.get(&knowledge_get_entry_action_kind()).is_some());
+        assert!(
+            registry
+                .get(&knowledge_create_draft_action_kind())
+                .is_some()
+        );
+        assert!(registry.get(&knowledge_save_entry_action_kind()).is_some());
+    }
+
+    #[test]
+    fn knowledge_action_schema_side_effects_match_policy_contract() {
+        let registry = registry_with_knowledge_actions();
+
+        assert_eq!(
+            registry.side_effect(&knowledge_search_action_kind()),
+            Some(&SideEffectKind::ReadOnly)
+        );
+        assert_eq!(
+            registry.side_effect(&knowledge_get_entry_action_kind()),
+            Some(&SideEffectKind::ReadOnly)
+        );
+        assert_eq!(
+            registry.side_effect(&knowledge_create_draft_action_kind()),
+            Some(&SideEffectKind::RuntimeStateMutation)
+        );
+        assert_eq!(
+            registry.side_effect(&knowledge_save_entry_action_kind()),
+            Some(&SideEffectKind::FileSystemMutation)
+        );
+    }
+
+    #[test]
+    fn knowledge_search_and_get_are_allowed_by_default_safe_policy() {
+        let registry = registry_with_knowledge_actions();
+        let policy = CapabilityPolicy::default_safe();
+
+        for kind in [
+            knowledge_search_action_kind(),
+            knowledge_get_entry_action_kind(),
+        ] {
+            let request = action_request(kind, serde_json::json!({}));
+            assert_eq!(
+                policy.evaluate_with_registry(&request, &registry),
+                PolicyDecision::Allow
+            );
+        }
+    }
+
+    #[test]
+    fn knowledge_create_draft_requires_approval_by_default_safe_policy() {
+        let registry = registry_with_knowledge_actions();
+        let policy = CapabilityPolicy::default_safe();
+        let request = action_request(knowledge_create_draft_action_kind(), serde_json::json!({}));
+
+        assert!(policy.evaluate_with_registry(&request, &registry).is_ask());
+    }
+
+    #[test]
+    fn knowledge_save_entry_is_denied_by_default_safe_policy() {
+        let registry = registry_with_knowledge_actions();
+        let policy = CapabilityPolicy::default_safe();
+        let request = action_request(knowledge_save_entry_action_kind(), serde_json::json!({}));
+
+        assert!(
+            policy
+                .evaluate_with_registry(&request, &registry)
+                .is_denied()
+        );
     }
 
     #[tokio::test]
@@ -464,5 +840,124 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_searches_repository() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        repository
+            .save_draft(draft(
+                "AgentOS Notes",
+                "foundation content",
+                vec!["agent-os"],
+            ))
+            .await
+            .unwrap();
+        let executor = KnowledgeActionExecutor::new(repository);
+        let request = action_request(
+            knowledge_search_action_kind(),
+            serde_json::to_value(KnowledgeSearchActionInput {
+                query: KnowledgeSearchQuery::new("agentos"),
+            })
+            .unwrap(),
+        );
+
+        let result = executor.execute(&request).await.unwrap();
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let results: Vec<KnowledgeSearchResult> = serde_json::from_value(value).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.title, "AgentOS Notes");
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_gets_entry() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        let saved = repository
+            .save_draft(draft(
+                "AgentOS Notes",
+                "foundation content",
+                vec!["agent-os"],
+            ))
+            .await
+            .unwrap();
+        let executor = KnowledgeActionExecutor::new(repository);
+        let request = action_request(
+            knowledge_get_entry_action_kind(),
+            serde_json::to_value(KnowledgeGetEntryActionInput {
+                id: saved.id.clone(),
+            })
+            .unwrap(),
+        );
+
+        let result = executor.execute(&request).await.unwrap();
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let entry: Option<KnowledgeEntryRef> = serde_json::from_value(value).unwrap();
+        assert_eq!(entry, Some(saved));
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_creates_draft_without_saving() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        let executor = KnowledgeActionExecutor::new(repository.clone());
+        let request = action_request(
+            knowledge_create_draft_action_kind(),
+            serde_json::to_value(create_draft_input("AgentOS Notes", "draft content")).unwrap(),
+        );
+
+        let result = executor.execute(&request).await.unwrap();
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let draft: KnowledgeEntryDraft = serde_json::from_value(value).unwrap();
+        assert_eq!(draft.title, "AgentOS Notes");
+        assert!(repository.list_entries().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_saves_entry_when_executed() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        let executor = KnowledgeActionExecutor::new(repository.clone());
+        let request = action_request(
+            knowledge_save_entry_action_kind(),
+            serde_json::to_value(KnowledgeSaveEntryActionInput {
+                draft: draft("AgentOS Notes", "saved content", vec!["agent-os"]),
+            })
+            .unwrap(),
+        );
+
+        let result = executor.execute(&request).await.unwrap();
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let entry: KnowledgeEntryRef = serde_json::from_value(value).unwrap();
+        assert_eq!(entry.id, KnowledgeEntryId::from("knowledge-entry-1"));
+        assert_eq!(repository.list_entries().await.unwrap(), vec![entry]);
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_rejects_blank_draft_title() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        let executor = KnowledgeActionExecutor::new(repository);
+        let request = action_request(
+            knowledge_create_draft_action_kind(),
+            serde_json::to_value(create_draft_input("   ", "draft content")).unwrap(),
+        );
+
+        let err = executor.execute(&request).await.unwrap_err();
+        assert!(matches!(err, ActionExecutorError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn knowledge_action_executor_rejects_unknown_action_kind() {
+        let repository = Arc::new(MemoryKnowledgeRepository::new());
+        let executor = KnowledgeActionExecutor::new(repository);
+        let request = action_request(ActionKind::from("knowledge.unknown"), serde_json::json!({}));
+
+        let err = executor.execute(&request).await.unwrap_err();
+        assert!(matches!(err, ActionExecutorError::NotSupported(_)));
     }
 }
