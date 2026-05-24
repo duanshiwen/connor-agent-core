@@ -23,4 +23,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 conversation-journal = { path = "../conversation-journal" }
+knowledge-entity = { path = "../knowledge-entity" }
 tempfile.workspace = true

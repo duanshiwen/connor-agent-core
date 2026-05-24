@@ -14,6 +14,12 @@ use chrono::{DateTime, Utc};
 use conversation_core::*;
 use conversation_journal::MemoryConversationJournal;
 use conversation_kernel::*;
+use knowledge_entity::{
+    KnowledgeActionExecutor, KnowledgeCreateDraftActionInput, KnowledgeEntryDraft,
+    KnowledgeEntryRef, KnowledgeGetEntryActionInput, KnowledgeSaveEntryActionInput,
+    KnowledgeSearchActionInput, KnowledgeSearchQuery, KnowledgeSearchResult,
+    MemoryKnowledgeRepository, register_knowledge_action_schemas,
+};
 use std::sync::{Arc, Mutex};
 
 struct SequentialIdGenerator {
@@ -217,6 +223,56 @@ async fn process_action_with_artifact_resolver(
     action_id: &str,
     kind: &str,
 ) -> ActionRuntimeOutcome {
+    process_action_with_input_and_artifact_resolver(
+        kernel,
+        registry,
+        executor,
+        audit,
+        artifact_resolver,
+        conversation_id,
+        action_id,
+        kind,
+        serde_json::json!({"query":"agent os"}),
+    )
+    .await
+}
+
+async fn process_action_with_input(
+    kernel: &ConversationKernel,
+    registry: &ActionRegistry,
+    executor: &dyn ActionExecutor,
+    audit: &dyn AuditLog,
+    conversation_id: &ConversationId,
+    action_id: &str,
+    kind: &str,
+    input: serde_json::Value,
+) -> ActionRuntimeOutcome {
+    process_action_with_input_and_artifact_resolver(
+        kernel,
+        registry,
+        executor,
+        audit,
+        None,
+        conversation_id,
+        action_id,
+        kind,
+        input,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_action_with_input_and_artifact_resolver(
+    kernel: &ConversationKernel,
+    registry: &ActionRegistry,
+    executor: &dyn ActionExecutor,
+    audit: &dyn AuditLog,
+    artifact_resolver: Option<&dyn action_runtime::ArtifactResolver>,
+    conversation_id: &ConversationId,
+    action_id: &str,
+    kind: &str,
+    input: serde_json::Value,
+) -> ActionRuntimeOutcome {
     let policy = CapabilityPolicy::default_safe();
     let runtime = ActionRuntime {
         kernel,
@@ -229,7 +285,10 @@ async fn process_action_with_artifact_resolver(
     runtime
         .process(ProcessActionRequest {
             conversation_id,
-            action_request: action_request(conversation_id, action_id, kind),
+            action_request: ActionRequest {
+                input,
+                ..action_request(conversation_id, action_id, kind)
+            },
             requested_by: Some(ParticipantId::from("user-1")),
             runtime_actor: Some(ParticipantId::from("agent-1")),
         })
@@ -619,6 +678,214 @@ async fn missing_registry_entry_denies_safely() {
 
     let events = audit.list().await.unwrap();
     assert_eq!(events[0].side_effect, "unknown");
+    assert_eq!(events[0].result_status, "denied");
+}
+
+fn knowledge_registry() -> ActionRegistry {
+    let mut registry = ActionRegistry::new();
+    register_knowledge_action_schemas(&mut registry).unwrap();
+    registry
+}
+
+fn knowledge_draft(title: &str, content_markdown: &str) -> KnowledgeEntryDraft {
+    KnowledgeEntryDraft::new(title, content_markdown, Utc::now())
+        .with_tags(vec!["agent-os".to_string()])
+}
+
+#[tokio::test]
+async fn knowledge_search_action_executes_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    knowledge_entity::KnowledgeRepository::save_draft(
+        repository.as_ref(),
+        knowledge_draft("AgentOS Notes", "foundation content"),
+    )
+    .await
+    .unwrap();
+    let executor = KnowledgeActionExecutor::new(repository);
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-search",
+        "knowledge.search",
+        serde_json::to_value(KnowledgeSearchActionInput {
+            query: KnowledgeSearchQuery::new("agentos"),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completed outcome");
+    };
+    let ActionResultPayload::Json(value) = result.payload else {
+        panic!("expected json payload");
+    };
+    let results: Vec<KnowledgeSearchResult> = serde_json::from_value(value).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].entry.title, "AgentOS Notes");
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-knowledge-search"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn knowledge_get_entry_action_executes_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    let saved = knowledge_entity::KnowledgeRepository::save_draft(
+        repository.as_ref(),
+        knowledge_draft("AgentOS Notes", "foundation content"),
+    )
+    .await
+    .unwrap();
+    let executor = KnowledgeActionExecutor::new(repository);
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-get",
+        "knowledge.get_entry",
+        serde_json::to_value(KnowledgeGetEntryActionInput {
+            id: saved.id.clone(),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completed outcome");
+    };
+    let ActionResultPayload::Json(value) = result.payload else {
+        panic!("expected json payload");
+    };
+    let entry: Option<KnowledgeEntryRef> = serde_json::from_value(value).unwrap();
+    assert_eq!(entry, Some(saved));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-knowledge-get"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+}
+
+#[tokio::test]
+async fn knowledge_create_draft_requires_approval_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    let executor = KnowledgeActionExecutor::new(repository.clone());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-create-draft",
+        "knowledge.create_draft",
+        serde_json::to_value(KnowledgeCreateDraftActionInput {
+            title: "AgentOS Notes".to_string(),
+            content_markdown: "draft content".to_string(),
+            source_uri: None,
+            source_artifact_id: None,
+            source_asset_id: None,
+            tags: vec!["agent-os".to_string()],
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        ActionRuntimeOutcome::ApprovalRequired { .. }
+    ));
+    assert!(
+        knowledge_entity::KnowledgeRepository::list_entries(repository.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-knowledge-create-draft"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "ask");
+    assert_eq!(events[0].result_status, "approval_required");
+}
+
+#[tokio::test]
+async fn knowledge_save_entry_denied_by_default_safe_policy_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    let executor = KnowledgeActionExecutor::new(repository.clone());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-save",
+        "knowledge.save_entry",
+        serde_json::to_value(KnowledgeSaveEntryActionInput {
+            draft: knowledge_draft("AgentOS Notes", "saved content"),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(outcome, ActionRuntimeOutcome::Denied { .. }));
+    assert!(
+        knowledge_entity::KnowledgeRepository::list_entries(repository.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-knowledge-save"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Denied);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "deny");
     assert_eq!(events[0].result_status, "denied");
 }
 
