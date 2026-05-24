@@ -189,13 +189,22 @@ impl JsonlConversationJournal {
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
         let mut events = Vec::new();
+        let mut line_number: u64 = 0;
 
         while let Some(line) = lines.next_line().await? {
+            line_number += 1;
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            let event: ConversationEventEnvelope = serde_json::from_str(line)?;
+            let event: ConversationEventEnvelope = serde_json::from_str(line).map_err(|e| {
+                anyhow::anyhow!(
+                    "journal integrity: corrupted event at line {} in {}: {}",
+                    line_number,
+                    path.display(),
+                    e
+                )
+            })?;
             events.push(event);
         }
 
@@ -255,9 +264,33 @@ impl ConversationJournal for JsonlConversationJournal {
         manifest.segments.sort_by_key(|segment| segment.index);
 
         let mut events = Vec::new();
-        for segment in manifest.segments {
+        for segment in &manifest.segments {
             let path = self.segment_path(conversation_id, &segment.file_name);
+
+            // Verify segment file integrity if it exists.
+            if path.exists() {
+                let file_bytes = fs::read(&path).await?;
+                let actual_bytes = file_bytes.len() as u64;
+                if actual_bytes != segment.bytes {
+                    anyhow::bail!(
+                        "journal integrity: segment {} byte count mismatch: manifest={}, actual={}",
+                        segment.file_name,
+                        segment.bytes,
+                        actual_bytes
+                    );
+                }
+            }
+
             events.extend(Self::load_events_from_file(&path).await?);
+        }
+
+        // Verify manifest total_events matches actual loaded count.
+        if events.len() as u64 != manifest.total_events {
+            anyhow::bail!(
+                "journal integrity: total_events mismatch: manifest={}, actual={}",
+                manifest.total_events,
+                events.len()
+            );
         }
 
         Ok(events)
@@ -403,6 +436,96 @@ mod tests {
         assert!(segments_dir.join("00000000000000000000.jsonl").exists());
         assert!(segments_dir.join("00000000000000000001.jsonl").exists());
         assert!(segments_dir.join("00000000000000000002.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn manifest_total_events_matches_actual_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-3")).await.unwrap();
+
+        // Verify manifest total matches actual loaded events.
+        let manifest_path = dir.path().join("conv-1").join(MANIFEST_FILE);
+        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
+        let manifest: JournalManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.total_events, 3);
+
+        // Verify each segment metadata matches actual file.
+        for segment in &manifest.segments {
+            let seg_path = dir
+                .path()
+                .join("conv-1")
+                .join(SEGMENTS_DIR)
+                .join(&segment.file_name);
+            if seg_path.exists() {
+                let content = fs::read(&seg_path).await.unwrap();
+                let line_count = content
+                    .split(|b| *b == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .count() as u64;
+                assert_eq!(segment.event_count, line_count);
+                assert_eq!(segment.bytes, content.len() as u64);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupted_segment_detected_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        // Corrupt the segment file by appending garbage.
+        let seg_path = dir
+            .path()
+            .join("conv-1")
+            .join(SEGMENTS_DIR)
+            .join("00000000000000000000.jsonl");
+        let mut content = fs::read(&seg_path).await.unwrap();
+        content.extend_from_slice(b"{corrupted garbage}\n");
+        fs::write(&seg_path, &content).await.unwrap();
+
+        // Load should detect corruption (byte count mismatch).
+        let result = journal.load(&ConversationId::from("conv-1")).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("integrity")
+                || err_msg.contains("corrupt")
+                || err_msg.contains("mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_count_mismatch_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        // Tamper with manifest to have wrong total_events.
+        let manifest_path = dir.path().join("conv-1").join(MANIFEST_FILE);
+        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
+        let mut manifest: JournalManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        manifest.total_events = 999; // Wrong!
+        let tampered = serde_json::to_vec_pretty(&manifest).unwrap();
+        fs::write(&manifest_path, &tampered).await.unwrap();
+
+        // Load should detect the mismatch.
+        let result = journal.load(&ConversationId::from("conv-1")).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("integrity")
+                || err_msg.contains("mismatch")
+                || err_msg.contains("total_events")
+        );
     }
 
     #[tokio::test]
