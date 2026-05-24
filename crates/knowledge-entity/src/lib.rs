@@ -3,9 +3,13 @@
 //! Domain types, deterministic in-memory repository, and action-level seams for
 //! AgentOS knowledge entries.
 //!
-//! This crate intentionally does not write to a real Markdown/frontmatter knowledge base.
-//! It provides pure Knowledge Entity abstractions that later action/runtime integrations
-//! can use through `ActionRuntime` and `CapabilityPolicy`.
+//! This crate provides pure Knowledge Entity abstractions that later action/runtime
+//! integrations can use through `ActionRuntime` and `CapabilityPolicy`.
+//!
+//! It includes both a `MemoryKnowledgeRepository` for tests and a
+//! `MarkdownKnowledgeRepository` for real filesystem-backed knowledge bases.
+
+pub mod markdown_repo;
 
 use action_core::{
     ActionExecutor, ActionExecutorError, ActionKind, ActionRegistry, ActionRegistryError,
@@ -283,6 +287,14 @@ pub fn register_knowledge_action_schemas(
 pub enum KnowledgeRepositoryError {
     #[error("knowledge repository lock poisoned")]
     LockPoisoned,
+    #[error("io error: {0}")]
+    Io(String),
+    #[error("frontmatter parse error in {path}: {reason}")]
+    FrontmatterParse { path: String, reason: String },
+    #[error("entry already exists: {0}")]
+    EntryExists(String),
+    #[error("invalid entry id: {0}")]
+    InvalidId(String),
 }
 
 /// Storage abstraction for knowledge entry metadata.

@@ -15,8 +15,10 @@ async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yml.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 capability-policy = { path = "../capability-policy" }
-tokio.workspace = true
