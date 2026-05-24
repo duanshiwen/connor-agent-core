@@ -9,6 +9,12 @@ use action_runtime::{
 use artifact_core::{ArtifactId, ArtifactKind, ArtifactStore, MemoryArtifactStore};
 use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
+use browser_entity::{
+    BrowserExtractContentActionInput, BrowserOpenUrlActionInput, FakeBrowserExecutor,
+    WebExtractedContent, WebPageSnapshot, browser_extract_content_action_kind,
+    browser_open_url_action_kind, browser_summarize_page_action_kind,
+    register_browser_action_schemas,
+};
 use capability_policy::CapabilityPolicy;
 use chrono::{DateTime, Utc};
 use conversation_core::*;
@@ -1366,6 +1372,178 @@ async fn knowledge_create_draft_via_markdown_repo_produces_draft_only() {
     let action = state
         .actions
         .get(&ActionId::from("action-md-create-draft"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "ask");
+    assert_eq!(events[0].result_status, "approval_required");
+}
+
+// ---- PR 36: Browser ActionRuntime integration regression ----
+
+fn browser_registry() -> ActionRegistry {
+    let mut registry = ActionRegistry::new();
+    register_browser_action_schemas(&mut registry).unwrap();
+    registry
+}
+
+#[tokio::test]
+async fn browser_extract_content_auto_executes_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = browser_registry();
+    let executor = FakeBrowserExecutor::new(Utc::now());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-browser-extract",
+        "browser.extract_content",
+        serde_json::to_value(BrowserExtractContentActionInput {
+            url: "https://example.com/article".to_string(),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completed outcome");
+    };
+    let ActionResultPayload::Json(value) = result.payload else {
+        panic!("expected json payload");
+    };
+    let content: WebExtractedContent = serde_json::from_value(value).unwrap();
+    assert_eq!(content.source_url.as_str(), "https://example.com/article");
+    assert!(!content.text.is_empty());
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-browser-extract"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn browser_open_url_requires_approval_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = browser_registry();
+    let executor = FakeBrowserExecutor::new(Utc::now());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-browser-open",
+        "browser.open_url",
+        serde_json::to_value(BrowserOpenUrlActionInput {
+            url: "https://example.com".to_string(),
+            take_snapshot: true,
+        })
+        .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        ActionRuntimeOutcome::ApprovalRequired { .. }
+    ));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-browser-open"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "ask");
+    assert_eq!(events[0].result_status, "approval_required");
+}
+
+#[tokio::test]
+async fn browser_summarize_auto_executes_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = browser_registry();
+    let executor = FakeBrowserExecutor::new(Utc::now());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-browser-summarize",
+        "browser.summarize_page",
+        serde_json::json!({"url": "https://example.com", "max_length": 200}),
+    )
+    .await;
+
+    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completed outcome");
+    };
+    if let ActionResultPayload::Text(text) = result.payload {
+        assert!(text.contains("fake summary"));
+    } else {
+        panic!("expected text payload");
+    }
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-browser-summarize"))
+        .unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn browser_capture_snapshot_requires_approval_through_action_runtime() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = browser_registry();
+    let executor = FakeBrowserExecutor::new(Utc::now());
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-browser-capture",
+        "browser.capture_snapshot",
+        serde_json::json!({"url": "https://example.com", "include_html": false}),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        ActionRuntimeOutcome::ApprovalRequired { .. }
+    ));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state
+        .actions
+        .get(&ActionId::from("action-browser-capture"))
         .unwrap();
     assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
 

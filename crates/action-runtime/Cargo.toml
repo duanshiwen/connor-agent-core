@@ -22,6 +22,7 @@ async-trait.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+browser-entity = { path = "../browser-entity" }
 conversation-journal = { path = "../conversation-journal" }
 knowledge-entity = { path = "../knowledge-entity" }
 tempfile.workspace = true
