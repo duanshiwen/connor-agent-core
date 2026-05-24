@@ -6,6 +6,7 @@ members = [
     "crates/conversation-runtime",
     "crates/entity-core",
     "crates/assistant-core",
+    "crates/model-adapter",
 ]
 resolver = "2"
 
