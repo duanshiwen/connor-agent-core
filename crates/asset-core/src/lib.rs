@@ -33,6 +33,78 @@ impl From<&str> for AssetId {
     }
 }
 
+/// Unique identifier for a durable work object an asset can be linked to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkObjectId(pub String);
+
+impl fmt::Display for WorkObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for WorkObjectId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for WorkObjectId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Durable object categories assets can be linked to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkObjectType {
+    Conversation,
+    KnowledgeEntry,
+    KnowledgeDraft,
+    Project,
+    Person,
+    MailThread,
+    BrowserSession,
+    External,
+}
+
+/// Why an asset is linked to a work object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetWorkObjectLinkReason {
+    Source,
+    DerivedFrom,
+    Evidence,
+    Attachment,
+    Related,
+}
+
+/// Link from an asset to a durable work object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetWorkObjectLink {
+    pub work_object_type: WorkObjectType,
+    pub work_object_id: WorkObjectId,
+    pub reason: AssetWorkObjectLinkReason,
+    pub linked_at: DateTime<Utc>,
+}
+
+impl AssetWorkObjectLink {
+    pub fn new(
+        work_object_type: WorkObjectType,
+        work_object_id: impl Into<WorkObjectId>,
+        reason: AssetWorkObjectLinkReason,
+        linked_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            work_object_type,
+            work_object_id: work_object_id.into(),
+            reason,
+            linked_at,
+        }
+    }
+}
+
 /// The broad category of asset.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -302,6 +374,48 @@ mod tests {
 
         let decoded: AssetKind = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, AssetKind::VideoReference);
+    }
+
+    #[test]
+    fn work_object_id_roundtrips() {
+        let id = WorkObjectId::from("knowledge-entry-1");
+        assert_eq!(id.to_string(), "knowledge-entry-1");
+
+        let json = serde_json::to_string(&id).unwrap();
+        let decoded: WorkObjectId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn work_object_type_serializes_as_snake_case() {
+        let json = serde_json::to_string(&WorkObjectType::KnowledgeEntry).unwrap();
+        assert_eq!(json, "\"knowledge_entry\"");
+
+        let decoded: WorkObjectType = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, WorkObjectType::KnowledgeEntry);
+    }
+
+    #[test]
+    fn asset_work_object_link_reason_serializes_as_snake_case() {
+        let json = serde_json::to_string(&AssetWorkObjectLinkReason::DerivedFrom).unwrap();
+        assert_eq!(json, "\"derived_from\"");
+
+        let decoded: AssetWorkObjectLinkReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, AssetWorkObjectLinkReason::DerivedFrom);
+    }
+
+    #[test]
+    fn asset_work_object_link_roundtrips() {
+        let link = AssetWorkObjectLink::new(
+            WorkObjectType::KnowledgeEntry,
+            "knowledge-entry-1",
+            AssetWorkObjectLinkReason::Evidence,
+            "2026-05-24T12:00:00Z".parse().unwrap(),
+        );
+
+        let json = serde_json::to_string_pretty(&link).unwrap();
+        let decoded: AssetWorkObjectLink = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, link);
     }
 
     #[test]

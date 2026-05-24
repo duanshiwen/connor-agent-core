@@ -2,7 +2,10 @@
 //!
 //! Deterministic in-memory index for AgentOS asset metadata.
 
-use asset_core::{AssetId, AssetKind, AssetMetadata, AssetProcessingStatus, AssetRelevance};
+use asset_core::{
+    AssetId, AssetKind, AssetMetadata, AssetProcessingStatus, AssetRelevance, AssetWorkObjectLink,
+    WorkObjectId, WorkObjectType,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +16,7 @@ pub struct AssetIndexEntry {
     pub metadata: AssetMetadata,
     pub status: AssetProcessingStatus,
     pub indexed_at: DateTime<Utc>,
+    pub linked_work_objects: Vec<AssetWorkObjectLink>,
 }
 
 impl AssetIndexEntry {
@@ -25,7 +29,13 @@ impl AssetIndexEntry {
             metadata,
             status,
             indexed_at,
+            linked_work_objects: vec![],
         }
+    }
+
+    pub fn with_linked_work_objects(mut self, links: Vec<AssetWorkObjectLink>) -> Self {
+        self.linked_work_objects = links;
+        self
     }
 }
 
@@ -37,6 +47,8 @@ pub struct AssetIndexQuery {
     pub min_relevance: Option<AssetRelevance>,
     pub tag: Option<String>,
     pub source_uri_prefix: Option<String>,
+    pub work_object_type: Option<WorkObjectType>,
+    pub work_object_id: Option<WorkObjectId>,
 }
 
 /// Errors from asset index operations.
@@ -46,6 +58,14 @@ pub enum AssetIndexError {
     DuplicateAssetId(AssetId),
     #[error("asset not found: {0}")]
     AssetNotFound(AssetId),
+    #[error(
+        "duplicate work object link for asset {asset_id}: {work_object_type:?}/{work_object_id}"
+    )]
+    DuplicateWorkObjectLink {
+        asset_id: AssetId,
+        work_object_type: WorkObjectType,
+        work_object_id: WorkObjectId,
+    },
 }
 
 /// Deterministic in-memory asset index.
@@ -85,6 +105,31 @@ impl AssetIndex {
             .get_mut(id)
             .ok_or_else(|| AssetIndexError::AssetNotFound(id.clone()))?;
         entry.status = status;
+        Ok(())
+    }
+
+    pub fn link_work_object(
+        &mut self,
+        asset_id: &AssetId,
+        link: AssetWorkObjectLink,
+    ) -> Result<(), AssetIndexError> {
+        let entry = self
+            .entries
+            .get_mut(asset_id)
+            .ok_or_else(|| AssetIndexError::AssetNotFound(asset_id.clone()))?;
+
+        if entry.linked_work_objects.iter().any(|candidate| {
+            candidate.work_object_type == link.work_object_type
+                && candidate.work_object_id == link.work_object_id
+        }) {
+            return Err(AssetIndexError::DuplicateWorkObjectLink {
+                asset_id: asset_id.clone(),
+                work_object_type: link.work_object_type,
+                work_object_id: link.work_object_id,
+            });
+        }
+
+        entry.linked_work_objects.push(link);
         Ok(())
     }
 
@@ -132,6 +177,22 @@ impl AssetIndex {
             }
         }
 
+        if query.work_object_type.is_some() || query.work_object_id.is_some() {
+            let matches_work_object = entry.linked_work_objects.iter().any(|link| {
+                query
+                    .work_object_type
+                    .as_ref()
+                    .is_none_or(|expected_type| link.work_object_type == *expected_type)
+                    && query
+                        .work_object_id
+                        .as_ref()
+                        .is_none_or(|expected_id| link.work_object_id == *expected_id)
+            });
+            if !matches_work_object {
+                return false;
+            }
+        }
+
         true
     }
 }
@@ -141,6 +202,7 @@ mod tests {
     use super::*;
     use asset_core::{
         AssetId, AssetKind, AssetMetadata, AssetProcessingStatus, AssetRelevance, AssetSource,
+        AssetWorkObjectLink, AssetWorkObjectLinkReason, WorkObjectId, WorkObjectType,
     };
     use chrono::{TimeZone, Utc};
 
@@ -359,6 +421,128 @@ mod tests {
     }
 
     #[test]
+    fn asset_index_entry_defaults_to_no_work_object_links() {
+        let entry = entry(
+            "asset-image-1",
+            AssetKind::Image,
+            AssetProcessingStatus::Observed,
+            AssetRelevance::High,
+            None,
+            vec![],
+        );
+
+        assert!(entry.linked_work_objects.is_empty());
+    }
+
+    #[test]
+    fn asset_index_entry_can_include_work_object_links() {
+        let link = work_object_link(
+            WorkObjectType::KnowledgeEntry,
+            "knowledge-entry-1",
+            AssetWorkObjectLinkReason::Evidence,
+        );
+        let entry = entry(
+            "asset-image-1",
+            AssetKind::Image,
+            AssetProcessingStatus::Observed,
+            AssetRelevance::High,
+            None,
+            vec![],
+        )
+        .with_linked_work_objects(vec![link.clone()]);
+
+        assert_eq!(entry.linked_work_objects, vec![link]);
+    }
+
+    #[test]
+    fn asset_index_can_link_asset_to_work_object() {
+        let mut index = AssetIndex::new();
+        index
+            .insert(entry(
+                "asset-image-1",
+                AssetKind::Image,
+                AssetProcessingStatus::Observed,
+                AssetRelevance::High,
+                None,
+                vec![],
+            ))
+            .unwrap();
+        let link = work_object_link(
+            WorkObjectType::KnowledgeEntry,
+            "knowledge-entry-1",
+            AssetWorkObjectLinkReason::Evidence,
+        );
+
+        index
+            .link_work_object(&AssetId::from("asset-image-1"), link.clone())
+            .unwrap();
+
+        assert_eq!(
+            index
+                .get(&AssetId::from("asset-image-1"))
+                .unwrap()
+                .linked_work_objects,
+            vec![link]
+        );
+    }
+
+    #[test]
+    fn asset_index_rejects_duplicate_work_object_link() {
+        let mut index = AssetIndex::new();
+        index
+            .insert(entry(
+                "asset-image-1",
+                AssetKind::Image,
+                AssetProcessingStatus::Observed,
+                AssetRelevance::High,
+                None,
+                vec![],
+            ))
+            .unwrap();
+        let link = work_object_link(
+            WorkObjectType::KnowledgeEntry,
+            "knowledge-entry-1",
+            AssetWorkObjectLinkReason::Evidence,
+        );
+
+        index
+            .link_work_object(&AssetId::from("asset-image-1"), link.clone())
+            .unwrap();
+        let err = index
+            .link_work_object(&AssetId::from("asset-image-1"), link)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            AssetIndexError::DuplicateWorkObjectLink {
+                asset_id: AssetId::from("asset-image-1"),
+                work_object_type: WorkObjectType::KnowledgeEntry,
+                work_object_id: WorkObjectId::from("knowledge-entry-1"),
+            }
+        );
+    }
+
+    #[test]
+    fn link_work_object_missing_asset_fails() {
+        let mut index = AssetIndex::new();
+        let err = index
+            .link_work_object(
+                &AssetId::from("missing"),
+                work_object_link(
+                    WorkObjectType::KnowledgeEntry,
+                    "knowledge-entry-1",
+                    AssetWorkObjectLinkReason::Evidence,
+                ),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            AssetIndexError::AssetNotFound(AssetId::from("missing"))
+        );
+    }
+
+    #[test]
     fn query_filters_by_tag() {
         let index = sample_index();
         let results = index.query(&AssetIndexQuery {
@@ -378,6 +562,51 @@ mod tests {
         });
 
         assert_eq!(ids(results), vec!["asset-image-1"]);
+    }
+
+    #[test]
+    fn query_filters_by_work_object_type() {
+        let index = sample_index_with_work_object_links();
+        let results = index.query(&AssetIndexQuery {
+            work_object_type: Some(WorkObjectType::KnowledgeEntry),
+            ..Default::default()
+        });
+
+        assert_eq!(ids(results), vec!["asset-image-1", "asset-pdf-1"]);
+    }
+
+    #[test]
+    fn query_filters_by_work_object_id() {
+        let index = sample_index_with_work_object_links();
+        let results = index.query(&AssetIndexQuery {
+            work_object_id: Some(WorkObjectId::from("project-agent-os")),
+            ..Default::default()
+        });
+
+        assert_eq!(ids(results), vec!["asset-audio-1", "asset-image-1"]);
+    }
+
+    #[test]
+    fn query_filters_by_work_object_type_and_id() {
+        let index = sample_index_with_work_object_links();
+        let results = index.query(&AssetIndexQuery {
+            work_object_type: Some(WorkObjectType::KnowledgeEntry),
+            work_object_id: Some(WorkObjectId::from("knowledge-entry-1")),
+            ..Default::default()
+        });
+
+        assert_eq!(ids(results), vec!["asset-image-1"]);
+    }
+
+    #[test]
+    fn query_results_remain_sorted_by_asset_id_with_work_object_filter() {
+        let index = sample_index_with_work_object_links();
+        let results = index.query(&AssetIndexQuery {
+            work_object_type: Some(WorkObjectType::Project),
+            ..Default::default()
+        });
+
+        assert_eq!(ids(results), vec!["asset-audio-1", "asset-image-1"]);
     }
 
     #[test]
@@ -408,6 +637,59 @@ mod tests {
             ids(index.query(&AssetIndexQuery::default())),
             vec!["asset-a", "asset-z"]
         );
+    }
+
+    fn sample_index_with_work_object_links() -> AssetIndex {
+        let mut index = sample_index();
+        index
+            .link_work_object(
+                &AssetId::from("asset-image-1"),
+                work_object_link(
+                    WorkObjectType::KnowledgeEntry,
+                    "knowledge-entry-1",
+                    AssetWorkObjectLinkReason::Evidence,
+                ),
+            )
+            .unwrap();
+        index
+            .link_work_object(
+                &AssetId::from("asset-image-1"),
+                work_object_link(
+                    WorkObjectType::Project,
+                    "project-agent-os",
+                    AssetWorkObjectLinkReason::Related,
+                ),
+            )
+            .unwrap();
+        index
+            .link_work_object(
+                &AssetId::from("asset-pdf-1"),
+                work_object_link(
+                    WorkObjectType::KnowledgeEntry,
+                    "knowledge-entry-2",
+                    AssetWorkObjectLinkReason::Source,
+                ),
+            )
+            .unwrap();
+        index
+            .link_work_object(
+                &AssetId::from("asset-audio-1"),
+                work_object_link(
+                    WorkObjectType::Project,
+                    "project-agent-os",
+                    AssetWorkObjectLinkReason::Attachment,
+                ),
+            )
+            .unwrap();
+        index
+    }
+
+    fn work_object_link(
+        work_object_type: WorkObjectType,
+        work_object_id: &str,
+        reason: AssetWorkObjectLinkReason,
+    ) -> AssetWorkObjectLink {
+        AssetWorkObjectLink::new(work_object_type, work_object_id, reason, ts(4))
     }
 
     fn sample_index() -> AssetIndex {
