@@ -19,6 +19,7 @@ members = [
     "crates/knowledge-entity",
     "crates/browser-entity",
     "crates/reminder-core",
+    "crates/notification-core",
 ]
 resolver = "2"
 
