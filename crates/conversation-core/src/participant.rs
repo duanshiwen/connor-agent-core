@@ -25,6 +25,18 @@ pub struct Participant {
     pub display_name: String,
 }
 
+impl ParticipantKind {
+    /// Returns `true` for participants that can appear as foreground actors
+    /// in a conversation (send messages, initiate actions).
+    ///
+    /// Only `Human` and `Agent` are foreground participants.
+    /// `System` and `Integration` are background-only — they can emit
+    /// system notices but cannot send regular messages.
+    pub fn is_foreground(&self) -> bool {
+        matches!(self, ParticipantKind::Human | ParticipantKind::Agent)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +92,13 @@ mod tests {
         let p = sample_agent();
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("小助理"));
+    }
+
+    #[test]
+    fn foreground_participant_classification() {
+        assert!(ParticipantKind::Human.is_foreground());
+        assert!(ParticipantKind::Agent.is_foreground());
+        assert!(!ParticipantKind::System.is_foreground());
+        assert!(!ParticipantKind::Integration.is_foreground());
     }
 }

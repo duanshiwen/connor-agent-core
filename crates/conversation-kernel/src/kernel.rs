@@ -149,8 +149,17 @@ impl ConversationKernel {
             bail!("conversation is not active: {}", cmd.conversation_id);
         }
 
-        if !state.participants.contains_key(&cmd.sender_id) {
-            bail!("sender is not a participant: {}", cmd.sender_id);
+        let sender = state
+            .participants
+            .get(&cmd.sender_id)
+            .with_context(|| format!("sender is not a participant: {}", cmd.sender_id))?;
+
+        if !sender.kind.is_foreground() {
+            bail!(
+                "sender is not a foreground participant: {} (kind: {:?})",
+                cmd.sender_id,
+                sender.kind
+            );
         }
 
         if let Some(reply_to) = &cmd.reply_to {
@@ -988,6 +997,52 @@ mod tests {
             MessageContent::Text { text } => assert_eq!(text, "third"),
             _ => panic!(),
         }
+    }
+
+    #[tokio::test]
+    async fn append_message_rejects_system_sender() {
+        let kernel = test_kernel();
+
+        // Create conversation with Human + Agent + System.
+        let conv_id = kernel
+            .create_conversation(CreateConversationCommand {
+                kind: ConversationKind::Group,
+                title: None,
+                participants: vec![
+                    human("u1", "诗闻"),
+                    agent("a1", "小助理"),
+                    Participant {
+                        id: ParticipantId::from("sys1"),
+                        kind: ParticipantKind::System,
+                        display_name: "System".to_string(),
+                    },
+                ],
+                actor_id: Some(ParticipantId::from("u1")),
+            })
+            .await
+            .unwrap();
+
+        // System participant tries to send a regular message.
+        let result = kernel
+            .append_message(AppendMessageCommand {
+                conversation_id: conv_id,
+                sender_id: ParticipantId::from("sys1"),
+                content: MessageContent::Text {
+                    text: "I am system".to_string(),
+                },
+                reply_to: None,
+                thread_id: None,
+                visibility: Visibility::Conversation,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a foreground participant")
+        );
     }
 
     // --- create_assistant_suggestion tests ---
