@@ -174,6 +174,39 @@ impl ConversationKernel {
         Ok(message_id)
     }
 
+    /// Edit an existing message.
+    ///
+    /// Validates: conversation exists, message exists, editor is a participant.
+    /// Produces: `MessageEdited` with a deterministic edit timestamp.
+    pub async fn edit_message(&self, cmd: EditMessageCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+
+        if state.session.is_none() {
+            bail!("conversation not found: {}", cmd.conversation_id);
+        }
+
+        if !state.messages_by_id.contains_key(&cmd.message_id) {
+            bail!("message not found: {}", cmd.message_id);
+        }
+
+        if !state.participants.contains_key(&cmd.edited_by) {
+            bail!("edited_by is not a participant: {}", cmd.edited_by);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.edited_by),
+            now,
+            ConversationEvent::MessageEdited {
+                message_id: cmd.message_id,
+                new_content: cmd.new_content,
+                edited_at: now,
+            },
+        )
+        .await
+    }
+
     /// Create a private assistant suggestion for a specific user.
     ///
     /// Validates: conversation exists, target user is a participant.
@@ -290,20 +323,35 @@ impl ConversationKernel {
         Ok(run_id)
     }
 
+    /// Mark an agent run as started.
+    ///
+    /// Validates: conversation exists, run exists, run is not terminal.
+    /// Produces: `AgentRunStarted`.
+    pub async fn start_agent_run(&self, cmd: StartAgentRunCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_agent_run_transition(&state, &cmd.conversation_id, &cmd.run_id)?;
+
+        if !state.participants.contains_key(&cmd.started_by) {
+            bail!("started_by is not a participant: {}", cmd.started_by);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.started_by),
+            now,
+            ConversationEvent::AgentRunStarted { run_id: cmd.run_id },
+        )
+        .await
+    }
+
     /// Mark an agent run as completed.
     ///
-    /// Validates: conversation exists, output message exists, run not already completed.
+    /// Validates: conversation exists, output message exists, run not already terminal.
     /// Produces: `AgentRunCompleted`.
     pub async fn complete_agent_run(&self, cmd: CompleteAgentRunCommand) -> Result<()> {
         let state = self.load_state(&cmd.conversation_id).await?;
-
-        if state.session.is_none() {
-            bail!("conversation not found: {}", cmd.conversation_id);
-        }
-
-        if state.completed_agent_runs.contains_key(&cmd.run_id) {
-            bail!("agent run already completed: {}", cmd.run_id);
-        }
+        self.validate_agent_run_transition(&state, &cmd.conversation_id, &cmd.run_id)?;
 
         if !state.messages_by_id.contains_key(&cmd.output_message_id) {
             bail!("output message not found: {}", cmd.output_message_id);
@@ -324,6 +372,107 @@ impl ConversationKernel {
             },
         )
         .await
+    }
+
+    /// Mark an agent run as failed.
+    ///
+    /// Validates: conversation exists, run exists, run is not terminal.
+    /// Produces: `AgentRunFailed`.
+    pub async fn fail_agent_run(&self, cmd: FailAgentRunCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_agent_run_transition(&state, &cmd.conversation_id, &cmd.run_id)?;
+
+        if !state.participants.contains_key(&cmd.failed_by) {
+            bail!("failed_by is not a participant: {}", cmd.failed_by);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.failed_by),
+            now,
+            ConversationEvent::AgentRunFailed {
+                run_id: cmd.run_id,
+                error_code: cmd.error_code,
+                error_message: cmd.error_message,
+            },
+        )
+        .await
+    }
+
+    /// Mark an agent run as cancelled.
+    ///
+    /// Validates: conversation exists, run exists, run is not terminal.
+    /// Produces: `AgentRunCancelled`.
+    pub async fn cancel_agent_run(&self, cmd: CancelAgentRunCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_agent_run_transition(&state, &cmd.conversation_id, &cmd.run_id)?;
+
+        if !state.participants.contains_key(&cmd.cancelled_by) {
+            bail!("cancelled_by is not a participant: {}", cmd.cancelled_by);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            Some(cmd.cancelled_by),
+            now,
+            ConversationEvent::AgentRunCancelled {
+                run_id: cmd.run_id,
+                reason: cmd.reason,
+            },
+        )
+        .await
+    }
+
+    /// Mark an agent run as timed out.
+    ///
+    /// Validates: conversation exists, run exists, run is not terminal.
+    /// Produces: `AgentRunTimedOut`.
+    pub async fn timeout_agent_run(&self, cmd: TimeoutAgentRunCommand) -> Result<()> {
+        let state = self.load_state(&cmd.conversation_id).await?;
+        self.validate_agent_run_transition(&state, &cmd.conversation_id, &cmd.run_id)?;
+
+        if let Some(actor) = &cmd.timed_out_by
+            && !state.participants.contains_key(actor)
+        {
+            bail!("timed_out_by is not a participant: {}", actor);
+        }
+
+        let now = self.clock.now();
+        self.append_envelope(
+            &cmd.conversation_id,
+            cmd.timed_out_by,
+            now,
+            ConversationEvent::AgentRunTimedOut { run_id: cmd.run_id },
+        )
+        .await
+    }
+
+    fn validate_agent_run_transition(
+        &self,
+        state: &ConversationState,
+        conversation_id: &ConversationId,
+        run_id: &str,
+    ) -> Result<()> {
+        if state.session.is_none() {
+            bail!("conversation not found: {}", conversation_id);
+        }
+
+        let run = state
+            .agent_runs
+            .get(run_id)
+            .with_context(|| format!("agent run not found: {run_id}"))?;
+
+        match run.status {
+            AgentRunStatus::Completed
+            | AgentRunStatus::Failed
+            | AgentRunStatus::Cancelled
+            | AgentRunStatus::TimedOut => {
+                bail!("agent run already terminal: {run_id}");
+            }
+            AgentRunStatus::Requested | AgentRunStatus::Started => Ok(()),
+        }
     }
 
     /// Helper to create and append an event envelope.

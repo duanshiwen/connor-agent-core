@@ -2,7 +2,9 @@
 
 use crate::state::ConversationState;
 use anyhow::Result;
-use conversation_core::{ConversationEvent, ConversationEventEnvelope};
+use conversation_core::{
+    AgentRunState, AgentRunStatus, ConversationEvent, ConversationEventEnvelope,
+};
 
 /// Replays a sequence of events into a `ConversationState`.
 ///
@@ -54,14 +56,15 @@ impl ConversationProjector {
             ConversationEvent::MessageEdited {
                 message_id,
                 new_content,
+                edited_at,
             } => {
                 if let Some(msg) = state.messages_by_id.get_mut(message_id) {
                     msg.content = new_content.clone();
-                    msg.edited_at = Some(chrono::Utc::now());
+                    msg.edited_at = Some(*edited_at);
                     // Also update in the ordered messages list.
                     if let Some(ordered) = state.messages.iter_mut().find(|m| m.id == *message_id) {
                         ordered.content = new_content.clone();
-                        ordered.edited_at = Some(chrono::Utc::now());
+                        ordered.edited_at = Some(*edited_at);
                     }
                 }
             }
@@ -99,13 +102,79 @@ impl ConversationProjector {
                     .push(root_message_id.clone());
             }
 
+            ConversationEvent::AgentRunRequested {
+                run_id,
+                trigger_message_id,
+                context_slice_id,
+            } => {
+                state.agent_runs.insert(
+                    run_id.clone(),
+                    AgentRunState::requested(
+                        run_id.clone(),
+                        trigger_message_id.clone(),
+                        context_slice_id.clone(),
+                    ),
+                );
+            }
+
+            ConversationEvent::AgentRunStarted { run_id } => {
+                if let Some(run) = state.agent_runs.get_mut(run_id) {
+                    run.status = AgentRunStatus::Started;
+                    run.output_message_id = None;
+                    run.error_code = None;
+                    run.error_message = None;
+                    run.cancel_reason = None;
+                }
+            }
+
             ConversationEvent::AgentRunCompleted {
                 run_id,
                 output_message_id,
             } => {
+                if let Some(run) = state.agent_runs.get_mut(run_id) {
+                    run.status = AgentRunStatus::Completed;
+                    run.output_message_id = Some(output_message_id.clone());
+                    run.error_code = None;
+                    run.error_message = None;
+                    run.cancel_reason = None;
+                }
                 state
                     .completed_agent_runs
                     .insert(run_id.clone(), output_message_id.clone());
+            }
+
+            ConversationEvent::AgentRunFailed {
+                run_id,
+                error_code,
+                error_message,
+            } => {
+                if let Some(run) = state.agent_runs.get_mut(run_id) {
+                    run.status = AgentRunStatus::Failed;
+                    run.output_message_id = None;
+                    run.error_code = Some(error_code.clone());
+                    run.error_message = Some(error_message.clone());
+                    run.cancel_reason = None;
+                }
+            }
+
+            ConversationEvent::AgentRunCancelled { run_id, reason } => {
+                if let Some(run) = state.agent_runs.get_mut(run_id) {
+                    run.status = AgentRunStatus::Cancelled;
+                    run.output_message_id = None;
+                    run.error_code = None;
+                    run.error_message = None;
+                    run.cancel_reason = Some(reason.clone());
+                }
+            }
+
+            ConversationEvent::AgentRunTimedOut { run_id } => {
+                if let Some(run) = state.agent_runs.get_mut(run_id) {
+                    run.status = AgentRunStatus::TimedOut;
+                    run.output_message_id = None;
+                    run.error_code = None;
+                    run.error_message = None;
+                    run.cancel_reason = None;
+                }
             }
 
             // Other events don't affect the projected state.
@@ -301,6 +370,7 @@ mod tests {
                 new_content: MessageContent::Text {
                     text: "edited".to_string(),
                 },
+                edited_at: "2026-05-24T08:30:00Z".parse().unwrap(),
             }),
         ];
         let state = ConversationProjector::project(&events).unwrap();
@@ -310,7 +380,7 @@ mod tests {
             MessageContent::Text { text } => assert_eq!(text, "edited"),
             _ => panic!("wrong content type"),
         }
-        assert!(msg.edited_at.is_some());
+        assert_eq!(msg.edited_at, Some("2026-05-24T08:30:00Z".parse().unwrap()));
     }
 
     #[test]

@@ -12,8 +12,9 @@ pub mod slice_builder;
 pub mod state;
 
 pub use commands::{
-    AppendMessageCommand, CompleteAgentRunCommand, CreateAssistantSuggestionCommand,
-    CreateConversationCommand, RequestAgentRunCommand,
+    AppendMessageCommand, CancelAgentRunCommand, CompleteAgentRunCommand,
+    CreateAssistantSuggestionCommand, CreateConversationCommand, EditMessageCommand,
+    FailAgentRunCommand, RequestAgentRunCommand, StartAgentRunCommand, TimeoutAgentRunCommand,
 };
 pub use kernel::{Clock, ConversationKernel, IdGenerator, UtcClock, UuidGenerator};
 pub use policy::{AgentRunReason, ConversationPolicy, RuleBasedPolicy};

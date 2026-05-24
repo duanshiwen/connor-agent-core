@@ -62,6 +62,7 @@ pub enum ConversationEvent {
     MessageEdited {
         message_id: MessageId,
         new_content: MessageContent,
+        edited_at: DateTime<Utc>,
     },
 
     /// A message was tombstoned (soft-deleted).
@@ -102,11 +103,27 @@ pub enum ConversationEvent {
         context_slice_id: String,
     },
 
+    /// An agent run started processing.
+    AgentRunStarted { run_id: String },
+
     /// An agent run completed and produced an output message.
     AgentRunCompleted {
         run_id: String,
         output_message_id: MessageId,
     },
+
+    /// An agent run failed while processing.
+    AgentRunFailed {
+        run_id: String,
+        error_code: String,
+        error_message: String,
+    },
+
+    /// An agent run was cancelled before completion.
+    AgentRunCancelled { run_id: String, reason: String },
+
+    /// An agent run timed out before completion.
+    AgentRunTimedOut { run_id: String },
 }
 
 #[cfg(test)]
@@ -216,10 +233,37 @@ mod tests {
         }
     }
 
+    fn make_agent_run_started() -> ConversationEvent {
+        ConversationEvent::AgentRunStarted {
+            run_id: "run-001".to_string(),
+        }
+    }
+
     fn make_agent_run_completed() -> ConversationEvent {
         ConversationEvent::AgentRunCompleted {
             run_id: "run-001".to_string(),
             output_message_id: MessageId::from("msg-output-001"),
+        }
+    }
+
+    fn make_agent_run_failed() -> ConversationEvent {
+        ConversationEvent::AgentRunFailed {
+            run_id: "run-001".to_string(),
+            error_code: "model_error".to_string(),
+            error_message: "model call failed".to_string(),
+        }
+    }
+
+    fn make_agent_run_cancelled() -> ConversationEvent {
+        ConversationEvent::AgentRunCancelled {
+            run_id: "run-001".to_string(),
+            reason: "user cancelled".to_string(),
+        }
+    }
+
+    fn make_agent_run_timed_out() -> ConversationEvent {
+        ConversationEvent::AgentRunTimedOut {
+            run_id: "run-001".to_string(),
         }
     }
 
@@ -272,11 +316,13 @@ mod tests {
 
     #[test]
     fn message_edited_roundtrip() {
+        let edited_at = now();
         let envelope = wrap_event(ConversationEvent::MessageEdited {
             message_id: MessageId::from("msg-001"),
             new_content: MessageContent::Text {
                 text: "Edited text".to_string(),
             },
+            edited_at,
         });
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
@@ -338,8 +384,40 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_started_roundtrip() {
+        let envelope = wrap_event(make_agent_run_started());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
     fn agent_run_completed_roundtrip() {
         let envelope = wrap_event(make_agent_run_completed());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn agent_run_failed_roundtrip() {
+        let envelope = wrap_event(make_agent_run_failed());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn agent_run_cancelled_roundtrip() {
+        let envelope = wrap_event(make_agent_run_cancelled());
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.event, envelope.event);
+    }
+
+    #[test]
+    fn agent_run_timed_out_roundtrip() {
+        let envelope = wrap_event(make_agent_run_timed_out());
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ConversationEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.event, envelope.event);

@@ -25,6 +25,15 @@ pub struct AppendMessageCommand {
     pub visibility: Visibility,
 }
 
+/// Command to edit an existing message.
+#[derive(Debug, Clone)]
+pub struct EditMessageCommand {
+    pub conversation_id: ConversationId,
+    pub message_id: MessageId,
+    pub new_content: MessageContent,
+    pub edited_by: ParticipantId,
+}
+
 /// Command to create a private assistant suggestion.
 #[derive(Debug, Clone)]
 pub struct CreateAssistantSuggestionCommand {
@@ -43,6 +52,14 @@ pub struct RequestAgentRunCommand {
     pub requested_by: ParticipantId,
 }
 
+/// Command to mark an agent run as started.
+#[derive(Debug, Clone)]
+pub struct StartAgentRunCommand {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub started_by: ParticipantId,
+}
+
 /// Command to mark an agent run as completed.
 #[derive(Debug, Clone)]
 pub struct CompleteAgentRunCommand {
@@ -50,4 +67,31 @@ pub struct CompleteAgentRunCommand {
     pub run_id: String,
     pub output_message_id: MessageId,
     pub completed_by: ParticipantId,
+}
+
+/// Command to mark an agent run as failed.
+#[derive(Debug, Clone)]
+pub struct FailAgentRunCommand {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub error_code: String,
+    pub error_message: String,
+    pub failed_by: ParticipantId,
+}
+
+/// Command to mark an agent run as cancelled.
+#[derive(Debug, Clone)]
+pub struct CancelAgentRunCommand {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub reason: String,
+    pub cancelled_by: ParticipantId,
+}
+
+/// Command to mark an agent run as timed out.
+#[derive(Debug, Clone)]
+pub struct TimeoutAgentRunCommand {
+    pub conversation_id: ConversationId,
+    pub run_id: String,
+    pub timed_out_by: Option<ParticipantId>,
 }

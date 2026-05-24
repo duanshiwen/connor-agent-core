@@ -24,6 +24,12 @@ pub struct ConversationState {
     /// Thread index: thread_id → message IDs in that thread.
     pub threads: HashMap<ThreadId, Vec<MessageId>>,
 
+    /// Agent runs keyed by run ID.
+    pub agent_runs: HashMap<String, AgentRunState>,
+
     /// Completed agent runs, keyed by run ID, pointing to their output message.
+    ///
+    /// Kept as a convenience index for existing runtime code; `agent_runs` is
+    /// the canonical lifecycle projection.
     pub completed_agent_runs: HashMap<String, MessageId>,
 }

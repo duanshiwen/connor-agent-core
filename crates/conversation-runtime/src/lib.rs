@@ -13,7 +13,10 @@ use conversation_core::{
     ConversationEvent, ConversationId, Message, MessageContent, MessageId, ParticipantKind,
     Visibility,
 };
-use conversation_kernel::{AppendMessageCommand, CompleteAgentRunCommand, ConversationKernel};
+use conversation_kernel::{
+    AppendMessageCommand, CompleteAgentRunCommand, ConversationKernel, FailAgentRunCommand,
+    StartAgentRunCommand,
+};
 
 /// Input passed from the runtime to an agent executor.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,7 +103,9 @@ where
                 context_slice_id,
             } = &envelope.event
             {
-                if state.completed_agent_runs.contains_key(run_id) {
+                if let Some(run) = state.agent_runs.get(run_id)
+                    && matches!(run.status, conversation_core::AgentRunStatus::Completed)
+                {
                     continue;
                 }
 
@@ -125,7 +130,10 @@ where
     ) -> Result<MessageId> {
         let state = self.kernel.load_state(conversation_id).await?;
 
-        if let Some(output_message_id) = state.completed_agent_runs.get(run_id) {
+        if let Some(run) = state.agent_runs.get(run_id)
+            && matches!(run.status, conversation_core::AgentRunStatus::Completed)
+            && let Some(output_message_id) = &run.output_message_id
+        {
             return Ok(output_message_id.clone());
         }
 
@@ -152,13 +160,36 @@ where
             context_messages,
         };
 
-        let output = self.executor.execute(request).await?;
         let agent_sender_id = state
             .participants
             .values()
             .find(|participant| participant.kind == ParticipantKind::Agent)
             .map(|participant| participant.id.clone())
             .context("no agent participant found in conversation")?;
+
+        self.kernel
+            .start_agent_run(StartAgentRunCommand {
+                conversation_id: conversation_id.clone(),
+                run_id: run_id.to_string(),
+                started_by: agent_sender_id.clone(),
+            })
+            .await?;
+
+        let output = match self.executor.execute(request).await {
+            Ok(output) => output,
+            Err(error) => {
+                self.kernel
+                    .fail_agent_run(FailAgentRunCommand {
+                        conversation_id: conversation_id.clone(),
+                        run_id: run_id.to_string(),
+                        error_code: "executor_error".to_string(),
+                        error_message: error.to_string(),
+                        failed_by: agent_sender_id,
+                    })
+                    .await?;
+                return Err(error);
+            }
+        };
 
         let output_message_id = self
             .kernel
