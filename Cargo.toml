@@ -12,6 +12,7 @@ members = [
     "crates/action-runtime",
     "crates/capability-policy",
     "crates/audit-log",
+    "crates/artifact-core",
 ]
 resolver = "2"
 
