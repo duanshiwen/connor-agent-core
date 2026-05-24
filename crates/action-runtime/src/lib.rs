@@ -15,7 +15,7 @@ use artifact_core::{ArtifactDescriptor, ArtifactId, ArtifactKind, ArtifactStore}
 use audit_log::{AuditEvent, AuditLog};
 use capability_policy::{CapabilityPolicy, PolicyDecision};
 use chrono::Utc;
-use conversation_core::{ConversationId, ParticipantId};
+use conversation_core::{ConversationActionStatus, ConversationId, ParticipantId};
 use conversation_kernel::{
     CompleteActionCommand, ConversationKernel, DenyActionCommand, FailActionCommand,
     LinkArtifactCommand, RequestActionCommand, RequireActionApprovalCommand, StartActionCommand,
@@ -47,6 +47,13 @@ pub struct ProcessActionRequest<'a> {
     pub conversation_id: &'a ConversationId,
     pub action_request: ActionRequest,
     pub requested_by: Option<ParticipantId>,
+    pub runtime_actor: Option<ParticipantId>,
+}
+
+/// Request to execute an action that was previously approved in the conversation.
+pub struct ExecuteApprovedActionRequest<'a> {
+    pub conversation_id: &'a ConversationId,
+    pub action_id: &'a ActionId,
     pub runtime_actor: Option<ParticipantId>,
 }
 
@@ -313,6 +320,99 @@ impl<'a> ActionRuntime<'a> {
                 })
                 .await?;
                 Ok(ActionRuntimeOutcome::Denied { action_id, reason })
+            }
+        }
+    }
+
+    /// Execute an action that has already been approved in the conversation.
+    ///
+    /// This resumes an existing action request after human approval. It does not
+    /// create a new action request and does not re-run policy evaluation.
+    pub async fn execute_approved(
+        &self,
+        req: ExecuteApprovedActionRequest<'_>,
+    ) -> Result<ActionRuntimeOutcome> {
+        let ExecuteApprovedActionRequest {
+            conversation_id,
+            action_id,
+            runtime_actor,
+        } = req;
+
+        let state = self.kernel.load_state(conversation_id).await?;
+        let action = state
+            .actions
+            .get(action_id)
+            .ok_or_else(|| anyhow::anyhow!("action not found: {action_id}"))?;
+        if action.status != ConversationActionStatus::Approved {
+            anyhow::bail!("action is not approved: {action_id}");
+        }
+        let action_request = action
+            .request
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("action is missing original request: {action_id}"))?;
+        let approved_by = action.approved_by.clone();
+        let Some(schema) = self.registry.get(&action_request.action_kind) else {
+            anyhow::bail!("action kind not registered: {}", action_request.action_kind);
+        };
+        let side_effect = schema.side_effect.clone();
+
+        self.kernel
+            .start_action(StartActionCommand {
+                conversation_id: conversation_id.clone(),
+                action_id: action_id.clone(),
+                started_by: runtime_actor.clone(),
+            })
+            .await?;
+
+        match self.executor.execute(&action_request).await {
+            Ok(result) => {
+                self.kernel
+                    .complete_action(CompleteActionCommand {
+                        conversation_id: conversation_id.clone(),
+                        action_id: action_id.clone(),
+                        result: result.clone(),
+                        completed_by: runtime_actor.clone(),
+                    })
+                    .await?;
+                self.link_artifact_result_if_available(conversation_id, &result, runtime_actor)
+                    .await?;
+                self.record_audit(AuditRecordInput {
+                    request: &action_request,
+                    side_effect: Some(&side_effect),
+                    policy_decision: "approved",
+                    result_status: "completed",
+                    result_summary: Some(&result.summary),
+                    approved_by: approved_by.as_ref(),
+                })
+                .await?;
+                Ok(ActionRuntimeOutcome::Completed {
+                    action_id: action_id.clone(),
+                    result,
+                })
+            }
+            Err(err) => {
+                let error_message = action_executor_error_message(&err);
+                self.kernel
+                    .fail_action(FailActionCommand {
+                        conversation_id: conversation_id.clone(),
+                        action_id: action_id.clone(),
+                        error_message: error_message.clone(),
+                        failed_by: runtime_actor,
+                    })
+                    .await?;
+                self.record_audit(AuditRecordInput {
+                    request: &action_request,
+                    side_effect: Some(&side_effect),
+                    policy_decision: "approved",
+                    result_status: "failed",
+                    result_summary: Some(&error_message),
+                    approved_by: approved_by.as_ref(),
+                })
+                .await?;
+                Ok(ActionRuntimeOutcome::Failed {
+                    action_id: action_id.clone(),
+                    error_message,
+                })
             }
         }
     }

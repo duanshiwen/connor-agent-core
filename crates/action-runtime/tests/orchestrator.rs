@@ -4,7 +4,7 @@ use action_core::{
 };
 use action_runtime::{
     ActionRuntime, ActionRuntimeOutcome, ArtifactProducingExecutor, ArtifactStoreResolver,
-    DeterministicArtifactDescriptorFactory, ProcessActionRequest,
+    DeterministicArtifactDescriptorFactory, ExecuteApprovedActionRequest, ProcessActionRequest,
 };
 use artifact_core::{ArtifactId, ArtifactKind, ArtifactStore, MemoryArtifactStore};
 use async_trait::async_trait;
@@ -919,4 +919,232 @@ async fn executor_failure_records_action_failed_and_audit() {
     let events = audit.list().await.unwrap();
     assert_eq!(events[0].policy_decision, "allow");
     assert_eq!(events[0].result_status, "failed");
+}
+
+#[tokio::test]
+async fn approved_knowledge_create_draft_executes_after_approval() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    let executor = KnowledgeActionExecutor::new(repository.clone());
+    let audit = MemoryAuditSink::new();
+    let action_id = ActionId::from("action-knowledge-approved-create-draft");
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-approved-create-draft",
+        "knowledge.create_draft",
+        serde_json::to_value(KnowledgeCreateDraftActionInput {
+            title: "AgentOS Approved Notes".to_string(),
+            content_markdown: "approved draft content".to_string(),
+            source_uri: None,
+            source_artifact_id: None,
+            source_asset_id: None,
+            tags: vec!["agent-os".to_string()],
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+        })
+        .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        ActionRuntimeOutcome::ApprovalRequired { .. }
+    ));
+    assert!(
+        knowledge_entity::KnowledgeRepository::list_entries(repository.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    kernel
+        .approve_action(ApproveActionCommand {
+            conversation_id: conversation_id.clone(),
+            action_id: action_id.clone(),
+            approved_by: ParticipantId::from("user-1"),
+        })
+        .await
+        .unwrap();
+
+    let policy = CapabilityPolicy::default_safe();
+    let runtime = ActionRuntime {
+        kernel: &kernel,
+        registry: &registry,
+        policy: &policy,
+        executor: &executor,
+        audit_log: &audit,
+        artifact_resolver: None,
+    };
+
+    let outcome = runtime
+        .execute_approved(ExecuteApprovedActionRequest {
+            conversation_id: &conversation_id,
+            action_id: &action_id,
+            runtime_actor: Some(ParticipantId::from("agent-1")),
+        })
+        .await
+        .unwrap();
+
+    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completed outcome");
+    };
+    let ActionResultPayload::Json(value) = result.payload else {
+        panic!("expected json payload");
+    };
+    let draft: KnowledgeEntryDraft = serde_json::from_value(value).unwrap();
+    assert_eq!(draft.title, "AgentOS Approved Notes");
+
+    assert!(
+        knowledge_entity::KnowledgeRepository::list_entries(repository.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&action_id).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+    assert_eq!(action.approved_by, Some(ParticipantId::from("user-1")));
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].policy_decision, "ask");
+    assert_eq!(events[0].result_status, "approval_required");
+    assert_eq!(events[1].policy_decision, "approved");
+    assert_eq!(events[1].result_status, "completed");
+    assert_eq!(events[1].approved_by.as_deref(), Some("user-1"));
+}
+
+#[tokio::test]
+async fn execute_approved_rejects_action_that_is_not_approved() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = knowledge_registry();
+    let repository = Arc::new(MemoryKnowledgeRepository::new());
+    let executor = KnowledgeActionExecutor::new(repository);
+    let audit = MemoryAuditSink::new();
+    let action_id = ActionId::from("action-knowledge-search-not-approved");
+
+    let outcome = process_action_with_input(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-knowledge-search-not-approved",
+        "knowledge.search",
+        serde_json::to_value(KnowledgeSearchActionInput {
+            query: KnowledgeSearchQuery::new("agentos"),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert!(matches!(outcome, ActionRuntimeOutcome::Completed { .. }));
+
+    let policy = CapabilityPolicy::default_safe();
+    let runtime = ActionRuntime {
+        kernel: &kernel,
+        registry: &registry,
+        policy: &policy,
+        executor: &executor,
+        audit_log: &audit,
+        artifact_resolver: None,
+    };
+
+    let err = runtime
+        .execute_approved(ExecuteApprovedActionRequest {
+            conversation_id: &conversation_id,
+            action_id: &action_id,
+            runtime_actor: Some(ParticipantId::from("agent-1")),
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("action is not approved"));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&action_id).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+    let events = audit.list().await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn execute_approved_records_failure_for_executor_error() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let approval_executor = CountingExecutor::default();
+    let audit = MemoryAuditSink::new();
+    let action_id = ActionId::from("action-approved-failing-save");
+
+    let outcome = process_action(
+        &kernel,
+        &registry,
+        &approval_executor,
+        &audit,
+        &conversation_id,
+        "action-approved-failing-save",
+        "knowledge.save_entry",
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        ActionRuntimeOutcome::ApprovalRequired { .. }
+    ));
+    assert_eq!(approval_executor.calls(), 0);
+
+    kernel
+        .approve_action(ApproveActionCommand {
+            conversation_id: conversation_id.clone(),
+            action_id: action_id.clone(),
+            approved_by: ParticipantId::from("user-1"),
+        })
+        .await
+        .unwrap();
+
+    let failing_executor = CountingExecutor::failing();
+    let policy = CapabilityPolicy::default_safe();
+    let runtime = ActionRuntime {
+        kernel: &kernel,
+        registry: &registry,
+        policy: &policy,
+        executor: &failing_executor,
+        audit_log: &audit,
+        artifact_resolver: None,
+    };
+
+    let outcome = runtime
+        .execute_approved(ExecuteApprovedActionRequest {
+            conversation_id: &conversation_id,
+            action_id: &action_id,
+            runtime_actor: Some(ParticipantId::from("agent-1")),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, ActionRuntimeOutcome::Failed { .. }));
+    assert_eq!(failing_executor.calls(), 1);
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&action_id).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Failed);
+    assert_eq!(action.approved_by, Some(ParticipantId::from("user-1")));
+    assert!(action.error_message.as_deref().unwrap().contains("boom"));
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].policy_decision, "ask");
+    assert_eq!(events[0].result_status, "approval_required");
+    assert_eq!(events[1].policy_decision, "approved");
+    assert_eq!(events[1].result_status, "failed");
+    assert_eq!(events[1].approved_by.as_deref(), Some("user-1"));
 }
