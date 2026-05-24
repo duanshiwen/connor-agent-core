@@ -24,4 +24,5 @@ tokio.workspace = true
 audit-log = { path = "../audit-log" }
 capability-policy = { path = "../capability-policy" }
 conversation-journal = { path = "../conversation-journal" }
+knowledge-entity = { path = "../knowledge-entity" }
 tempfile.workspace = true

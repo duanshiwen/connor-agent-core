@@ -53,6 +53,7 @@ dependencies = [
  "conversation-journal",
  "conversation-kernel",
  "entity-core",
+ "knowledge-entity",
  "model-adapter",
  "serde",
  "serde_json",

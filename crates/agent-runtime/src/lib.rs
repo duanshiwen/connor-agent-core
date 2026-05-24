@@ -1389,6 +1389,64 @@ mod tests {
         assert_eq!(run.output_message_id.as_ref(), Some(output_message_id));
     }
 
+    fn knowledge_draft(
+        title: &str,
+        content_markdown: &str,
+    ) -> knowledge_entity::KnowledgeEntryDraft {
+        knowledge_entity::KnowledgeEntryDraft::new(title, content_markdown, chrono::Utc::now())
+            .with_tags(vec!["agent-os".to_string()])
+    }
+
+    async fn process_static_knowledge_action_response(
+        response_text: &str,
+        repository: std::sync::Arc<knowledge_entity::MemoryKnowledgeRepository>,
+    ) -> (
+        AgentRunWithActionsOutcome,
+        ConversationKernel,
+        ConversationId,
+        String,
+        audit_log::MemoryAuditSink,
+    ) {
+        let kernel = test_kernel();
+        let (conv_id, user_msg, run_id) = setup_run(&kernel).await;
+        let adapter = StaticAdapter {
+            text: response_text.to_string(),
+        };
+        let context_builder = AgentContextBuilder::new(50);
+        let config = AgentRuntimeConfig::default();
+        let mut registry = action_core::ActionRegistry::new();
+        knowledge_entity::register_knowledge_action_schemas(&mut registry).unwrap();
+        let policy = capability_policy::CapabilityPolicy::default_safe();
+        let executor = knowledge_entity::KnowledgeActionExecutor::new(repository);
+        let audit = audit_log::MemoryAuditSink::new();
+        let action_runtime = action_runtime::ActionRuntime {
+            kernel: &kernel,
+            registry: &registry,
+            policy: &policy,
+            executor: &executor,
+            audit_log: &audit,
+            artifact_resolver: None,
+        };
+        let detector = KeywordActionProposalDetector;
+
+        let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
+            kernel: &kernel,
+            adapter: &adapter,
+            context_builder: &context_builder,
+            config: &config,
+            conversation_id: &conv_id,
+            run_id: &run_id,
+            trigger_message_id: &user_msg,
+            agent_participant_id: &ParticipantId::from("a1"),
+            detector: &detector,
+            action_runtime: &action_runtime,
+        })
+        .await
+        .unwrap();
+
+        (outcome, kernel, conv_id, run_id, audit)
+    }
+
     #[tokio::test]
     async fn agent_runtime_executes_read_only_action_from_fake_proposal() {
         let (outcome, kernel, conv_id, run_id, audit) = process_static_action_response(
@@ -1471,6 +1529,130 @@ mod tests {
         let action = state.actions.values().next().unwrap();
         assert_eq!(action.status, ConversationActionStatus::Denied);
         assert_eq!(audit.list().await.unwrap()[0].result_status, "denied");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_executes_real_knowledge_search_proposal() {
+        let repository = std::sync::Arc::new(knowledge_entity::MemoryKnowledgeRepository::new());
+        knowledge_entity::KnowledgeRepository::save_draft(
+            repository.as_ref(),
+            knowledge_draft("AgentOS Notes", "foundation content"),
+        )
+        .await
+        .unwrap();
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_knowledge_action_response(
+            "I will search. ACTION knowledge.search {\"query\":{\"text\":\"agentos\",\"tags\":[],\"limit\":10}}",
+            repository,
+        )
+        .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::Completed { result, .. },
+                response_text,
+                output_message_id,
+                ..
+            } => {
+                assert!(response_text.contains("[Action outcome]"));
+                let action_core::ActionResultPayload::Json(value) = result.payload else {
+                    panic!("expected json payload");
+                };
+                let results: Vec<knowledge_entity::KnowledgeSearchResult> =
+                    serde_json::from_value(value).unwrap();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].entry.title, "AgentOS Notes");
+                output_message_id
+            }
+            _ => panic!("expected completed knowledge action outcome"),
+        };
+
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Completed);
+        assert_eq!(
+            action.action_kind,
+            action_core::ActionKind::from("knowledge.search")
+        );
+        let events = audit.list().await.unwrap();
+        assert_eq!(events[0].policy_decision, "allow");
+        assert_eq!(events[0].result_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_reports_real_knowledge_create_draft_approval_required() {
+        let repository = std::sync::Arc::new(knowledge_entity::MemoryKnowledgeRepository::new());
+        let repository_for_assert = repository.clone();
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_knowledge_action_response(
+            "I will draft. ACTION knowledge.create_draft {\"title\":\"AgentOS Notes\",\"content_markdown\":\"draft content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}",
+            repository,
+        )
+        .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::ApprovalRequired { .. },
+                response_text,
+                output_message_id,
+                ..
+            } => {
+                assert!(response_text.contains("[Action outcome]"));
+                output_message_id
+            }
+            _ => panic!("expected approval required knowledge action outcome"),
+        };
+
+        assert!(
+            knowledge_entity::KnowledgeRepository::list_entries(repository_for_assert.as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+        let events = audit.list().await.unwrap();
+        assert_eq!(events[0].policy_decision, "ask");
+        assert_eq!(events[0].result_status, "approval_required");
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_denies_real_knowledge_save_entry_by_default_safe_policy() {
+        let repository = std::sync::Arc::new(knowledge_entity::MemoryKnowledgeRepository::new());
+        let repository_for_assert = repository.clone();
+        let (outcome, kernel, conv_id, run_id, audit) = process_static_knowledge_action_response(
+            "I will save. ACTION knowledge.save_entry {\"draft\":{\"title\":\"AgentOS Notes\",\"content_markdown\":\"saved content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}}",
+            repository,
+        )
+        .await;
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedWithAction {
+                action_outcome: action_runtime::ActionRuntimeOutcome::Denied { .. },
+                response_text,
+                output_message_id,
+                ..
+            } => {
+                assert!(response_text.contains("[Action outcome]"));
+                output_message_id
+            }
+            _ => panic!("expected denied knowledge action outcome"),
+        };
+
+        assert!(
+            knowledge_entity::KnowledgeRepository::list_entries(repository_for_assert.as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        let action = state.actions.values().next().unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Denied);
+        let events = audit.list().await.unwrap();
+        assert_eq!(events[0].policy_decision, "deny");
+        assert_eq!(events[0].result_status, "denied");
     }
 
     #[tokio::test]
