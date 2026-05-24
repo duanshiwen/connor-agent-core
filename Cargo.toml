@@ -23,6 +23,7 @@ members = [
     "crates/scheduler",
     "crates/identity-core",
     "crates/server-account-core",
+    "crates/connector-runtime",
 ]
 resolver = "2"
 

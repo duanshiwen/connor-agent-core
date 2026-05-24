@@ -237,6 +237,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "identity-core",
+ "serde",
+ "serde_json",
+ "server-account-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "conversation-core"
 version = "0.1.0"
 dependencies = [
