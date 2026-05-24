@@ -214,6 +214,45 @@ impl ActionProposalDetector for NoopActionProposalDetector {
     }
 }
 
+struct ParsedActionMarker<'a> {
+    kind: &'a str,
+    input_text: &'a str,
+}
+
+fn parse_action_marker(text: &str) -> Option<ParsedActionMarker<'_>> {
+    let marker = "ACTION ";
+    let start = text.find(marker)? + marker.len();
+    let rest = text[start..].trim();
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let kind = parts.next()?.trim();
+    if kind.is_empty() {
+        return None;
+    }
+    Some(ParsedActionMarker {
+        kind,
+        input_text: parts.next().unwrap_or("{}").trim(),
+    })
+}
+
+fn action_id_for_detected_action(run_id: &str, kind: &str) -> ActionId {
+    let kind_slug = kind
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    ActionId::from(format!("action-{run_id}-{kind_slug}"))
+}
+
+fn proposal_from_parts(run_id: &str, kind: &str, input: serde_json::Value) -> AgentActionProposal {
+    AgentActionProposal {
+        action_id: action_id_for_detected_action(run_id, kind),
+        action_kind: ActionKind::from(kind),
+        input,
+        summary: format!("Proposed action {kind}"),
+    }
+}
+
 /// Deterministic fake detector for tests and early action integration.
 ///
 /// It recognizes response markers like:
@@ -232,35 +271,54 @@ impl ActionProposalDetector for KeywordActionProposalDetector {
         context: &AgentContext,
         model_response: &ModelResponse,
     ) -> Option<AgentActionProposal> {
-        let marker = "ACTION ";
-        let start = model_response.text.find(marker)? + marker.len();
-        let rest = model_response.text[start..].trim();
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let kind = parts.next()?.trim();
-        if kind.is_empty() {
-            return None;
-        }
-        let input_text = parts.next().unwrap_or("{}").trim();
-        let input = if input_text.is_empty() {
+        let parsed = parse_action_marker(&model_response.text)?;
+        let input = if parsed.input_text.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(input_text).unwrap_or_else(|_| {
+            serde_json::from_str(parsed.input_text).unwrap_or_else(|_| {
                 serde_json::json!({
-                    "raw": input_text,
+                    "raw": parsed.input_text,
                 })
             })
         };
-        let kind_slug = kind
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string();
+        Some(proposal_from_parts(&context.run_id, parsed.kind, input))
+    }
+}
+
+/// Registry-gated detector for deterministic structured action proposal tests.
+///
+/// Unlike `KeywordActionProposalDetector`, this detector only accepts registered
+/// action kinds and rejects malformed JSON input.
+#[derive(Debug)]
+pub struct RegistryActionProposalDetector<'a> {
+    registry: &'a action_core::ActionRegistry,
+}
+
+impl<'a> RegistryActionProposalDetector<'a> {
+    pub fn new(registry: &'a action_core::ActionRegistry) -> Self {
+        Self { registry }
+    }
+}
+
+impl ActionProposalDetector for RegistryActionProposalDetector<'_> {
+    fn detect(
+        &self,
+        context: &AgentContext,
+        model_response: &ModelResponse,
+    ) -> Option<AgentActionProposal> {
+        let parsed = parse_action_marker(&model_response.text)?;
+        let action_kind = ActionKind::from(parsed.kind);
+        self.registry.get(&action_kind)?;
+        let input = if parsed.input_text.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(parsed.input_text).ok()?
+        };
         Some(AgentActionProposal {
-            action_id: ActionId::from(format!("action-{}-{kind_slug}", context.run_id)),
-            action_kind: ActionKind::from(kind),
+            action_id: action_id_for_detected_action(&context.run_id, parsed.kind),
+            action_kind,
             input,
-            summary: format!("Proposed action {kind}"),
+            summary: format!("Proposed action {}", parsed.kind),
         })
     }
 }
@@ -1703,6 +1761,170 @@ mod tests {
         assert_agent_run_completed(&state, &run_id, &output_message_id);
         assert!(state.actions.is_empty());
         assert!(audit.list().await.unwrap().is_empty());
+    }
+
+    fn detector_context(run_id: &str) -> AgentContext {
+        let trigger_message = Message {
+            id: MessageId::from("msg-detector"),
+            conversation_id: ConversationId::from("conv-detector"),
+            sender_id: ParticipantId::from("u1"),
+            content: MessageContent::Text {
+                text: "detect".to_string(),
+            },
+            reply_to: None,
+            thread_id: None,
+            visibility: Visibility::Conversation,
+            created_at: chrono::Utc::now(),
+            edited_at: None,
+        };
+        AgentContext {
+            conversation_id: ConversationId::from("conv-detector"),
+            run_id: run_id.to_string(),
+            trigger_message: trigger_message.clone(),
+            messages: vec![trigger_message],
+            participants: HashMap::from([(ParticipantId::from("u1"), human("u1", "Test User"))]),
+            linked_entities: Vec::new(),
+            model_id: ModelId::from("test-model"),
+            system_prompt: None,
+        }
+    }
+
+    fn detector_response(text: &str) -> ModelResponse {
+        ModelResponse {
+            text: text.to_string(),
+            usage: None,
+            model_id: ModelId::from("test-model"),
+        }
+    }
+
+    #[test]
+    fn registry_detector_accepts_registered_action_with_json_input() {
+        let registry = action_registry();
+        let detector = RegistryActionProposalDetector::new(&registry);
+        let proposal = detector
+            .detect(
+                &detector_context("run-typed"),
+                &detector_response("Ready. ACTION knowledge.search {\"query\":\"agent os\"}"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            proposal.action_id,
+            action_core::ActionId::from("action-run-typed-knowledge-search")
+        );
+        assert_eq!(
+            proposal.action_kind,
+            action_core::ActionKind::from("knowledge.search")
+        );
+        assert_eq!(proposal.input, serde_json::json!({"query":"agent os"}));
+    }
+
+    #[test]
+    fn registry_detector_rejects_unknown_action_kind() {
+        let registry = action_registry();
+        let detector = RegistryActionProposalDetector::new(&registry);
+        assert!(
+            detector
+                .detect(
+                    &detector_context("run-typed"),
+                    &detector_response("ACTION unknown.action {\"x\":1}"),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn registry_detector_rejects_malformed_json() {
+        let registry = action_registry();
+        let detector = RegistryActionProposalDetector::new(&registry);
+        assert!(
+            detector
+                .detect(
+                    &detector_context("run-typed"),
+                    &detector_response("ACTION knowledge.search not-json"),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn registry_detector_defaults_empty_input_to_empty_object() {
+        let registry = action_registry();
+        let detector = RegistryActionProposalDetector::new(&registry);
+        let proposal = detector
+            .detect(
+                &detector_context("run-typed"),
+                &detector_response("ACTION knowledge.search"),
+            )
+            .unwrap();
+        assert_eq!(proposal.input, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn registry_detector_preserves_text_only_outcome_for_unknown_action() {
+        let kernel = test_kernel();
+        let (conv_id, user_msg, run_id) = setup_run(&kernel).await;
+        let adapter = StaticAdapter {
+            text: "I will act. ACTION unknown.action {\"x\":1}".to_string(),
+        };
+        let context_builder = AgentContextBuilder::new(50);
+        let config = AgentRuntimeConfig::default();
+        let registry = action_registry();
+        let policy = capability_policy::CapabilityPolicy::default_safe();
+        let executor = action_core::FakeActionExecutor::default();
+        let audit = audit_log::MemoryAuditSink::new();
+        let action_runtime = action_runtime::ActionRuntime {
+            kernel: &kernel,
+            registry: &registry,
+            policy: &policy,
+            executor: &executor,
+            audit_log: &audit,
+            artifact_resolver: None,
+        };
+        let detector = RegistryActionProposalDetector::new(&registry);
+
+        let outcome = AgentRunProcessor::process_with_actions(ProcessRunWithActionsRequest {
+            kernel: &kernel,
+            adapter: &adapter,
+            context_builder: &context_builder,
+            config: &config,
+            conversation_id: &conv_id,
+            run_id: &run_id,
+            trigger_message_id: &user_msg,
+            agent_participant_id: &ParticipantId::from("a1"),
+            detector: &detector,
+            action_runtime: &action_runtime,
+        })
+        .await
+        .unwrap();
+
+        let output_message_id = match outcome {
+            AgentRunWithActionsOutcome::CompletedText {
+                output_message_id, ..
+            } => output_message_id,
+            _ => panic!("expected text-only outcome"),
+        };
+        let state = kernel.load_state(&conv_id).await.unwrap();
+        assert_agent_run_completed(&state, &run_id, &output_message_id);
+        assert!(state.actions.is_empty());
+        assert!(audit.list().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn keyword_detector_keeps_raw_fallback_for_malformed_json() {
+        let detector = KeywordActionProposalDetector;
+        let proposal = detector
+            .detect(
+                &detector_context("run-keyword"),
+                &detector_response("ACTION unknown.action not-json"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            proposal.action_kind,
+            action_core::ActionKind::from("unknown.action")
+        );
+        assert_eq!(proposal.input, serde_json::json!({"raw":"not-json"}));
     }
 
     #[tokio::test]
