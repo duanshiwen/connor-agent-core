@@ -2,8 +2,11 @@ use action_core::{
     ActionExecutor, ActionExecutorError, ActionId, ActionKind, ActionRegistry, ActionRequest,
     ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
 };
-use action_runtime::{ActionRuntime, ActionRuntimeOutcome, ProcessActionRequest};
-use artifact_core::ArtifactId;
+use action_runtime::{
+    ActionRuntime, ActionRuntimeOutcome, ArtifactProducingExecutor,
+    DeterministicArtifactDescriptorFactory, ProcessActionRequest,
+};
+use artifact_core::{ArtifactId, ArtifactKind, ArtifactStore, MemoryArtifactStore};
 use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
@@ -278,6 +281,116 @@ async fn completed_action_can_record_artifact_ref_payload() {
     let events = audit.list().await.unwrap();
     assert_eq!(events[0].policy_decision, "allow");
     assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn artifact_producing_executor_stores_artifact_and_records_ref_payload() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let store = Arc::new(MemoryArtifactStore::new());
+    let executor = ArtifactProducingExecutor::new(
+        store.clone(),
+        Arc::new(DeterministicArtifactDescriptorFactory::new(
+            ArtifactKind::ToolResult,
+        )),
+    );
+    let audit = MemoryAuditSink::new();
+
+    let outcome = process_action(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+
+    let artifact_id = ArtifactId::from("artifact-action-1");
+    match outcome {
+        ActionRuntimeOutcome::Completed { result, .. } => {
+            assert_eq!(
+                result.payload,
+                ActionResultPayload::ArtifactRef(artifact_id.clone())
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+
+    let stored = store.get(&artifact_id).await.unwrap().unwrap();
+    assert_eq!(stored.id, artifact_id);
+    assert_eq!(stored.kind, ArtifactKind::ToolResult);
+    assert_eq!(stored.title.as_deref(), Some("knowledge.search result"));
+    assert_eq!(stored.metadata["action_id"], "action-1");
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&ActionId::from("action-1")).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Completed);
+    assert_eq!(
+        action.result.as_ref().unwrap().payload,
+        ActionResultPayload::ArtifactRef(ArtifactId::from("artifact-action-1"))
+    );
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events[0].policy_decision, "allow");
+    assert_eq!(events[0].result_status, "completed");
+}
+
+#[tokio::test]
+async fn artifact_producing_executor_duplicate_artifact_id_fails_action() {
+    let kernel = test_kernel();
+    let conversation_id = create_conversation(&kernel).await;
+    let registry = registry();
+    let store = Arc::new(MemoryArtifactStore::new());
+    let executor = ArtifactProducingExecutor::new(
+        store,
+        Arc::new(DeterministicArtifactDescriptorFactory::new(
+            ArtifactKind::ToolResult,
+        )),
+    );
+    let audit = MemoryAuditSink::new();
+
+    let first = process_action(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+    assert!(matches!(first, ActionRuntimeOutcome::Completed { .. }));
+
+    let second = process_action(
+        &kernel,
+        &registry,
+        &executor,
+        &audit,
+        &conversation_id,
+        "action-1",
+        "knowledge.search",
+    )
+    .await;
+    assert!(matches!(second, ActionRuntimeOutcome::Failed { .. }));
+
+    let state = kernel.load_state(&conversation_id).await.unwrap();
+    let action = state.actions.get(&ActionId::from("action-1")).unwrap();
+    assert_eq!(action.status, ConversationActionStatus::Failed);
+    assert!(
+        action
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("duplicate artifact id")
+    );
+
+    let events = audit.list().await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].policy_decision, "allow");
+    assert_eq!(events[1].result_status, "failed");
 }
 
 #[tokio::test]

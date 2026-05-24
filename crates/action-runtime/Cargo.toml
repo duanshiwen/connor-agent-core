@@ -8,6 +8,7 @@ description = "Action runtime — orchestrates action policy, execution, audit, 
 
 [dependencies]
 action-core = { path = "../action-core" }
+artifact-core = { path = "../artifact-core" }
 audit-log = { path = "../audit-log" }
 capability-policy = { path = "../capability-policy" }
 conversation-core = { path = "../conversation-core" }
@@ -21,6 +22,5 @@ async-trait.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-artifact-core = { path = "../artifact-core" }
 conversation-journal = { path = "../conversation-journal" }
 tempfile.workspace = true

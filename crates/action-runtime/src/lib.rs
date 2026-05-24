@@ -8,9 +8,10 @@
 
 use action_core::{
     ActionExecutor, ActionExecutorError, ActionId, ActionRegistry, ActionRequest, ActionResult,
-    SideEffectKind,
+    ActionResultPayload, ActionStatus, SideEffectKind,
 };
 use anyhow::Result;
+use artifact_core::{ArtifactDescriptor, ArtifactId, ArtifactKind, ArtifactStore};
 use audit_log::{AuditEvent, AuditLog};
 use capability_policy::{CapabilityPolicy, PolicyDecision};
 use chrono::Utc;
@@ -20,6 +21,7 @@ use conversation_kernel::{
     RequestActionCommand, RequireActionApprovalCommand, StartActionCommand,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Result of processing an action request through policy and execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +48,79 @@ pub struct ProcessActionRequest<'a> {
     pub action_request: ActionRequest,
     pub requested_by: Option<ParticipantId>,
     pub runtime_actor: Option<ParticipantId>,
+}
+
+/// Builds deterministic artifact descriptors from action requests.
+pub trait ArtifactDescriptorFactory: Send + Sync {
+    fn descriptor_for(&self, request: &ActionRequest) -> ArtifactDescriptor;
+}
+
+/// Deterministic descriptor factory for early runtime tests and simple read-only actions.
+#[derive(Debug, Clone)]
+pub struct DeterministicArtifactDescriptorFactory {
+    kind: ArtifactKind,
+}
+
+impl DeterministicArtifactDescriptorFactory {
+    pub fn new(kind: ArtifactKind) -> Self {
+        Self { kind }
+    }
+}
+
+impl ArtifactDescriptorFactory for DeterministicArtifactDescriptorFactory {
+    fn descriptor_for(&self, request: &ActionRequest) -> ArtifactDescriptor {
+        ArtifactDescriptor {
+            id: ArtifactId::from(format!("artifact-{}", request.action_id)),
+            kind: self.kind.clone(),
+            title: Some(format!("{} result", request.action_kind)),
+            source_uri: None,
+            mime_type: Some("application/json".to_string()),
+            metadata: serde_json::json!({
+                "action_id": request.action_id.to_string(),
+                "action_kind": request.action_kind.to_string(),
+                "conversation_id": request.conversation_id,
+                "message_id": request.message_id,
+            }),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// Minimal executor skeleton that stores an artifact descriptor and returns its typed ref.
+pub struct ArtifactProducingExecutor {
+    store: Arc<dyn ArtifactStore>,
+    descriptor_factory: Arc<dyn ArtifactDescriptorFactory>,
+}
+
+impl ArtifactProducingExecutor {
+    pub fn new(
+        store: Arc<dyn ArtifactStore>,
+        descriptor_factory: Arc<dyn ArtifactDescriptorFactory>,
+    ) -> Self {
+        Self {
+            store,
+            descriptor_factory,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ActionExecutor for ArtifactProducingExecutor {
+    async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
+        let descriptor = self.descriptor_factory.descriptor_for(request);
+        let artifact_id = descriptor.id.clone();
+        self.store
+            .put(descriptor)
+            .await
+            .map_err(|err| ActionExecutorError::ExecutionFailed(err.to_string()))?;
+
+        Ok(ActionResult {
+            status: ActionStatus::Completed,
+            payload: ActionResultPayload::ArtifactRef(artifact_id),
+            summary: format!("{} produced an artifact", request.action_kind),
+            completed_at: Utc::now(),
+        })
+    }
 }
 
 /// Coordinates action policy, execution, audit, and conversation lifecycle events.
