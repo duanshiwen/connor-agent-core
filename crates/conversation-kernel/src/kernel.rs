@@ -140,13 +140,36 @@ impl ConversationKernel {
         // Load state to validate.
         let state = self.load_state(&cmd.conversation_id).await?;
 
-        if state.session.is_none() {
-            bail!("conversation not found: {}", cmd.conversation_id);
+        let session = state
+            .session
+            .as_ref()
+            .with_context(|| format!("conversation not found: {}", cmd.conversation_id))?;
+
+        if session.status != ConversationStatus::Active {
+            bail!("conversation is not active: {}", cmd.conversation_id);
         }
 
         if !state.participants.contains_key(&cmd.sender_id) {
             bail!("sender is not a participant: {}", cmd.sender_id);
         }
+
+        if let Some(reply_to) = &cmd.reply_to {
+            let replied_message = state
+                .messages_by_id
+                .get(reply_to)
+                .with_context(|| format!("reply_to message not found: {reply_to}"))?;
+            if replied_message.conversation_id != cmd.conversation_id {
+                bail!("reply_to message belongs to a different conversation: {reply_to}");
+            }
+        }
+
+        if let Some(thread_id) = &cmd.thread_id
+            && !state.threads.contains_key(thread_id)
+        {
+            bail!("thread not found: {thread_id}");
+        }
+
+        Self::validate_visibility(&state, &cmd.visibility)?;
 
         let message_id = MessageId(self.id_gen.new_id());
         let now = self.clock.now();
@@ -217,8 +240,13 @@ impl ConversationKernel {
     ) -> Result<MessageId> {
         let state = self.load_state(&cmd.conversation_id).await?;
 
-        if state.session.is_none() {
-            bail!("conversation not found: {}", cmd.conversation_id);
+        let session = state
+            .session
+            .as_ref()
+            .with_context(|| format!("conversation not found: {}", cmd.conversation_id))?;
+
+        if session.status != ConversationStatus::Active {
+            bail!("conversation is not active: {}", cmd.conversation_id);
         }
 
         if !state.participants.contains_key(&cmd.target_user_id) {
@@ -447,6 +475,36 @@ impl ConversationKernel {
             ConversationEvent::AgentRunTimedOut { run_id: cmd.run_id },
         )
         .await
+    }
+
+    fn validate_visibility(state: &ConversationState, visibility: &Visibility) -> Result<()> {
+        match visibility {
+            Visibility::Conversation => Ok(()),
+            Visibility::PrivateToUser { user_id } => {
+                if !state.participants.contains_key(user_id) {
+                    bail!("visibility user is not a participant: {user_id}");
+                }
+                Ok(())
+            }
+            Visibility::AgentOnly => {
+                if !state
+                    .participants
+                    .values()
+                    .any(|participant| participant.kind == ParticipantKind::Agent)
+                {
+                    bail!("agent-only visibility requires an agent participant");
+                }
+                Ok(())
+            }
+            Visibility::Participants { participant_ids } => {
+                for participant_id in participant_ids {
+                    if !state.participants.contains_key(participant_id) {
+                        bail!("visibility participant is not a participant: {participant_id}");
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 
     fn validate_agent_run_transition(
