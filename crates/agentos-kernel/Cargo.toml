@@ -1,0 +1,16 @@
+[package]
+name = "agentos-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AgentOS kernel composition root and runtime container."
+
+[dependencies]
+action-core = { path = "../action-core" }
+audit-log = { path = "../audit-log" }
+capability-policy = { path = "../capability-policy" }
+conversation-journal = { path = "../conversation-journal" }
+conversation-kernel = { path = "../conversation-kernel" }
+model-adapter = { path = "../model-adapter" }
+thiserror.workspace = true

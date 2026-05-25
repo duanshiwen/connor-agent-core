@@ -8,6 +8,7 @@ members = [
     "crates/assistant-core",
     "crates/model-adapter",
     "crates/agent-runtime",
+    "crates/agentos-kernel",
     "crates/action-core",
     "crates/action-runtime",
     "crates/capability-policy",
