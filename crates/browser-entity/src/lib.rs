@@ -35,6 +35,8 @@ pub const BROWSER_EXTRACT_CONTENT_ACTION_KIND: &str = "browser.extract_content";
 pub const BROWSER_SUMMARIZE_PAGE_ACTION_KIND: &str = "browser.summarize_page";
 pub const BROWSER_COMPARE_PAGES_ACTION_KIND: &str = "browser.compare_pages";
 pub const BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND: &str = "browser.capture_snapshot";
+pub const BROWSER_CLICK_ELEMENT_ACTION_KIND: &str = "browser.click_element";
+pub const BROWSER_TYPE_TEXT_ACTION_KIND: &str = "browser.type_text";
 
 pub fn browser_open_url_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_OPEN_URL_ACTION_KIND)
@@ -54,6 +56,14 @@ pub fn browser_compare_pages_action_kind() -> ActionKind {
 
 pub fn browser_capture_snapshot_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND)
+}
+
+pub fn browser_click_element_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_CLICK_ELEMENT_ACTION_KIND)
+}
+
+pub fn browser_type_text_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_TYPE_TEXT_ACTION_KIND)
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +204,42 @@ pub struct BrowserCaptureSnapshotActionInput {
     pub include_html: bool,
 }
 
+/// Input for `browser.click_element`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserClickElementActionInput {
+    /// URL to navigate to before clicking.
+    pub url: String,
+    /// CSS selector of the element to click.
+    pub selector: String,
+}
+
+/// Input for `browser.type_text`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserTypeTextActionInput {
+    /// URL to navigate to before typing.
+    pub url: String,
+    /// CSS selector of the target element (None = currently focused element).
+    pub selector: Option<String>,
+    /// Text to type.
+    pub text: String,
+    /// Whether to clear the field before typing.
+    #[serde(default)]
+    pub clear_first: bool,
+}
+
+/// Result of a browser interaction action (click, type, etc.).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserInteractionResult {
+    /// Whether the interaction succeeded.
+    pub success: bool,
+    /// The URL the page was on after the interaction.
+    pub url: String,
+    /// Optional description of what was interacted with.
+    pub element_description: Option<String>,
+    /// When the interaction happened.
+    pub interacted_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Validation errors
 // ---------------------------------------------------------------------------
@@ -249,6 +295,22 @@ pub fn register_browser_action_schemas(
         display_name: "Capture Snapshot".to_string(),
         description: "Capture a snapshot of a web page.".to_string(),
         side_effect: SideEffectKind::NetworkAccess,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_click_element_action_kind(),
+        display_name: "Click Element".to_string(),
+        description: "Click an element on a web page by CSS selector.".to_string(),
+        side_effect: SideEffectKind::UiSideEffect,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_type_text_action_kind(),
+        display_name: "Type Text".to_string(),
+        description: "Type text into an input element on a web page.".to_string(),
+        side_effect: SideEffectKind::UiSideEffect,
         input_schema: None,
         output_schema: None,
     })?;
@@ -363,6 +425,43 @@ impl ActionExecutor for FakeBrowserExecutor {
                 let snapshot = self.fake_snapshot(&input.url, input.include_html);
                 ActionResultPayload::Json(
                     serde_json::to_value(snapshot)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_CLICK_ELEMENT_ACTION_KIND => {
+                let input: BrowserClickElementActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Clicked element at selector: {}",
+                        input.selector
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_TYPE_TEXT_ACTION_KIND => {
+                let input: BrowserTypeTextActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Typed '{}' into element at selector: {}",
+                        input.text,
+                        input.selector.as_deref().unwrap_or("<focused>")
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
                         .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
                 )
             }
@@ -1300,6 +1399,85 @@ mod tests {
     }
 
     #[test]
+    fn browser_click_element_requires_approval_by_default_safe_policy() {
+        let policy = CapabilityPolicy::default_safe();
+        let req = action_request(
+            browser_click_element_action_kind(),
+            serde_json::json!({"url": "https://example.com", "selector": "button"}),
+        );
+        assert!(matches!(
+            policy.evaluate(&req, &SideEffectKind::UiSideEffect),
+            PolicyDecision::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn browser_type_text_requires_approval_by_default_safe_policy() {
+        let policy = CapabilityPolicy::default_safe();
+        let req = action_request(
+            browser_type_text_action_kind(),
+            serde_json::json!({"url": "https://example.com", "text": "hello"}),
+        );
+        assert!(matches!(
+            policy.evaluate(&req, &SideEffectKind::UiSideEffect),
+            PolicyDecision::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn fake_browser_executor_returns_interaction_result_for_click() {
+        let executor = FakeBrowserExecutor::new(ts());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            executor
+                .execute(&action_request(
+                    browser_click_element_action_kind(),
+                    serde_json::json!({"url": "https://example.com", "selector": "button#submit"}),
+                ))
+                .await
+                .unwrap()
+        });
+
+        assert_eq!(result.status, ActionStatus::Completed);
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let interaction: BrowserInteractionResult = serde_json::from_value(value).unwrap();
+        assert!(interaction.success);
+        assert_eq!(interaction.url, "https://example.com");
+        assert!(
+            interaction
+                .element_description
+                .unwrap()
+                .contains("button#submit")
+        );
+    }
+
+    #[test]
+    fn fake_browser_executor_returns_interaction_result_for_type_text() {
+        let executor = FakeBrowserExecutor::new(ts());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            executor
+                .execute(&action_request(
+                    browser_type_text_action_kind(),
+                    serde_json::json!({"url": "https://example.com", "selector": "input#name", "text": "Alice"}),
+                ))
+                .await
+                .unwrap()
+        });
+
+        assert_eq!(result.status, ActionStatus::Completed);
+        let ActionResultPayload::Json(value) = result.payload else {
+            panic!("expected json payload");
+        };
+        let interaction: BrowserInteractionResult = serde_json::from_value(value).unwrap();
+        assert!(interaction.success);
+        assert_eq!(interaction.url, "https://example.com");
+        assert!(interaction.element_description.unwrap().contains("Alice"));
+    }
+
+    #[test]
     fn web_extracted_content_roundtrips() {
         let content = WebExtractedContent {
             source_url: WebPageUrl::new("https://example.com").unwrap(),
@@ -1353,6 +1531,8 @@ mod tests {
                 .get(&browser_capture_snapshot_action_kind())
                 .is_some()
         );
+        assert!(registry.get(&browser_click_element_action_kind()).is_some());
+        assert!(registry.get(&browser_type_text_action_kind()).is_some());
     }
 
     #[test]
@@ -1395,6 +1575,20 @@ mod tests {
                 .side_effect,
             SideEffectKind::NetworkAccess
         );
+        assert_eq!(
+            registry
+                .get(&browser_click_element_action_kind())
+                .unwrap()
+                .side_effect,
+            SideEffectKind::UiSideEffect
+        );
+        assert_eq!(
+            registry
+                .get(&browser_type_text_action_kind())
+                .unwrap()
+                .side_effect,
+            SideEffectKind::UiSideEffect
+        );
     }
 
     // ---- Policy tests ----
@@ -1426,6 +1620,56 @@ mod tests {
     }
 
     // ---- FakeBrowserExecutor tests ----
+
+    #[test]
+    fn browser_click_element_action_input_roundtrips() {
+        let input = BrowserClickElementActionInput {
+            url: "https://example.com".to_string(),
+            selector: "button#submit".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&input).unwrap();
+        let decoded: BrowserClickElementActionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn browser_type_text_action_input_roundtrips() {
+        let input = BrowserTypeTextActionInput {
+            url: "https://example.com".to_string(),
+            selector: Some("input#name".to_string()),
+            text: "Hello World".to_string(),
+            clear_first: true,
+        };
+        let json = serde_json::to_string_pretty(&input).unwrap();
+        let decoded: BrowserTypeTextActionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn browser_type_text_action_input_defaults_clear_first_false() {
+        let input: BrowserTypeTextActionInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "text": "test"
+        }))
+        .unwrap();
+        assert_eq!(input.url, "https://example.com");
+        assert_eq!(input.text, "test");
+        assert!(input.selector.is_none());
+        assert!(!input.clear_first);
+    }
+
+    #[test]
+    fn browser_interaction_result_roundtrips() {
+        let result = BrowserInteractionResult {
+            success: true,
+            url: "https://example.com".to_string(),
+            element_description: Some("Clicked button".to_string()),
+            interacted_at: ts(),
+        };
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let decoded: BrowserInteractionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, result);
+    }
 
     #[test]
     fn fake_browser_executor_returns_snapshot_for_open_url() {

@@ -792,6 +792,22 @@ struct BrowserInteractiveSnapshotInput {
     url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserClickElementInput {
+    url: String,
+    selector: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserTypeTextInput {
+    url: String,
+    #[serde(default)]
+    selector: Option<String>,
+    text: String,
+    #[serde(default)]
+    clear_first: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RawInteractiveElement {
     id: String,
@@ -947,6 +963,122 @@ impl CdpBrowserExecutor {
             payload: action_core::ActionResultPayload::Json(
                 serde_json::to_value(snapshot).map_err(to_execution_failed)?,
             ),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn click_element(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserClickElementInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let selector = input.selector.trim().to_string();
+        if selector.is_empty() {
+            return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+        }
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        let element = page.find_element(&selector).await.map_err(|e| {
+            to_execution_failed(format!(
+                "Element not found with selector '{}': {}",
+                selector, e
+            ))
+        })?;
+        element.click().await.map_err(to_execution_failed)?;
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Clicked element '{}' on page: {}", selector, current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": format!("Clicked element at selector: {}", selector),
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn type_text(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserTypeTextInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let text = input.text.clone();
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        // Find and focus the target element
+        let element = if let Some(ref selector) = input.selector {
+            let sel = selector.trim();
+            if sel.is_empty() {
+                return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+            }
+            page.find_element(sel).await.map_err(|e| {
+                to_execution_failed(format!("Element not found with selector '{}': {}", sel, e))
+            })?
+        } else {
+            // No selector: use the currently focused element via activeElement
+            // We use evaluate to get a reference to document.activeElement
+            let active_js = "document.activeElement";
+            page.evaluate(active_js)
+                .await
+                .map_err(|e| to_execution_failed(format!("Could not get active element: {}", e)))?;
+            // If no selector and no active element, we still need a target.
+            // For safety, return an error asking for a selector.
+            return Err(to_invalid_input(BrowserKernelError::ActionFailed(
+                "type_text requires a selector when no element is focused".to_string(),
+            )));
+        };
+
+        // Clear existing content if requested
+        if input.clear_first {
+            element.click().await.map_err(to_execution_failed)?;
+            // Select all text and delete it
+            element
+                .press_key("Meta+a")
+                .await
+                .map_err(to_execution_failed)?;
+            element
+                .press_key("Backspace")
+                .await
+                .map_err(to_execution_failed)?;
+        } else {
+            // Focus the element first
+            element.click().await.map_err(to_execution_failed)?;
+        }
+
+        // Type the text
+        element.type_str(&text).await.map_err(to_execution_failed)?;
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Typed text into element on page: {}", current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": format!(
+                    "Typed '{}' into element at selector: {}",
+                    text,
+                    input.selector.as_deref().unwrap_or("<focused>")
+                ),
+                "interacted_at": chrono::Utc::now()
+            })),
             completed_at: chrono::Utc::now(),
         })
     }
@@ -1161,6 +1293,16 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                     })?;
                 self.get_interactive_snapshot(browser, input).await
             }
+            "browser.click_element" => {
+                let input: BrowserClickElementInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.click_element(browser, input).await
+            }
+            "browser.type_text" => {
+                let input: BrowserTypeTextInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.type_text(browser, input).await
+            }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
             )),
@@ -1186,6 +1328,18 @@ mod tests {
             action_id: ActionId::from("action-test-1"),
             action_kind: ActionKind::from(kind_str),
             input: serde_json::json!({}),
+            requested_by: "user-1".to_string(),
+            conversation_id: Some("conv-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            requested_at: ts(),
+        }
+    }
+
+    fn action_request_with_input(kind_str: &str, input: serde_json::Value) -> ActionRequest {
+        ActionRequest {
+            action_id: ActionId::from("action-test-1"),
+            action_kind: ActionKind::from(kind_str),
+            input,
             requested_by: "user-1".to_string(),
             conversation_id: Some("conv-1".to_string()),
             message_id: Some("msg-1".to_string()),
@@ -1492,6 +1646,84 @@ mod tests {
             serde_json::from_value(serde_json::json!({"url": "https://example.com/app"})).unwrap();
 
         assert_eq!(input.url, "https://example.com/app");
+    }
+
+    #[test]
+    fn browser_click_element_input_parses_url_and_selector() {
+        let input: BrowserClickElementInput = serde_json::from_value(
+            serde_json::json!({"url": "https://example.com", "selector": "button#submit"}),
+        )
+        .unwrap();
+
+        assert_eq!(input.url, "https://example.com");
+        assert_eq!(input.selector, "button#submit");
+    }
+
+    #[test]
+    fn browser_type_text_input_parses_with_defaults() {
+        let input: BrowserTypeTextInput = serde_json::from_value(
+            serde_json::json!({"url": "https://example.com", "text": "hello"}),
+        )
+        .unwrap();
+
+        assert_eq!(input.url, "https://example.com");
+        assert_eq!(input.text, "hello");
+        assert!(input.selector.is_none());
+        assert!(!input.clear_first);
+    }
+
+    #[test]
+    fn browser_type_text_input_parses_all_fields() {
+        let input: BrowserTypeTextInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "selector": "input#name",
+            "text": "Alice",
+            "clear_first": true
+        }))
+        .unwrap();
+
+        assert_eq!(input.url, "https://example.com");
+        assert_eq!(input.selector, Some("input#name".to_string()));
+        assert_eq!(input.text, "Alice");
+        assert!(input.clear_first);
+    }
+
+    #[tokio::test]
+    async fn cdp_browser_click_element_returns_chromium_not_available() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+
+        let request = action_request_with_input(
+            "browser.click_element",
+            serde_json::json!({"url": "https://example.com", "selector": "button"}),
+        );
+        let result = executor.execute(&request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActionExecutorError::ExecutionFailed(msg) => {
+                assert!(msg.contains("chromium browser is not available"));
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cdp_browser_type_text_returns_chromium_not_available() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+
+        let request = action_request_with_input(
+            "browser.type_text",
+            serde_json::json!({"url": "https://example.com", "text": "hello"}),
+        );
+        let result = executor.execute(&request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActionExecutorError::ExecutionFailed(msg) => {
+                assert!(msg.contains("chromium browser is not available"));
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
     }
 
     #[test]
