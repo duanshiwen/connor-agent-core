@@ -829,6 +829,50 @@ struct BrowserSelectOptionInput {
     value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScrollDirection {
+    Up,
+    Down,
+    ToElement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserScrollPageInput {
+    url: String,
+    direction: ScrollDirection,
+    #[serde(default)]
+    amount: Option<u32>,
+    #[serde(default)]
+    target_selector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserPressKeyInput {
+    url: String,
+    key: String,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserExecuteJsInput {
+    url: String,
+    script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserWaitForElementInput {
+    url: String,
+    selector: String,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    10_000
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RawInteractiveElement {
     id: String,
@@ -1249,6 +1293,220 @@ impl CdpBrowserExecutor {
             completed_at: chrono::Utc::now(),
         })
     }
+
+    async fn scroll_page(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserScrollPageInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        let js = match &input.direction {
+            ScrollDirection::Down => {
+                let amount = input.amount.unwrap_or(500);
+                format!("window.scrollBy(0, {})", amount)
+            }
+            ScrollDirection::Up => {
+                let amount = input.amount.unwrap_or(500);
+                format!("window.scrollBy(0, -{})", amount)
+            }
+            ScrollDirection::ToElement => {
+                let sel = input.target_selector.as_deref().unwrap_or("");
+                if sel.is_empty() {
+                    return Err(to_invalid_input(BrowserKernelError::ActionFailed(
+                        "scroll_page to_element requires target_selector".to_string(),
+                    )));
+                }
+                format!(
+                    "(() => {{ const el = document.querySelector('{}'); if (el) el.scrollIntoView({{behavior:'smooth'}}); return !!el; }})()",
+                    sel.replace('\\', "\\\\").replace('\'', "\\'")
+                )
+            }
+        };
+
+        page.evaluate(js).await.map_err(to_execution_failed)?;
+
+        let desc = match &input.direction {
+            ScrollDirection::Down => format!("Scrolled down {}px", input.amount.unwrap_or(500)),
+            ScrollDirection::Up => format!("Scrolled up {}px", input.amount.unwrap_or(500)),
+            ScrollDirection::ToElement => format!(
+                "Scrolled to element: {}",
+                input.target_selector.as_deref().unwrap_or("")
+            ),
+        };
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("{} on page: {}", desc, current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": desc,
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn press_key(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserPressKeyInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        if let Some(ref selector) = input.selector {
+            let sel = selector.trim();
+            if sel.is_empty() {
+                return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+            }
+            let element = page.find_element(sel).await.map_err(|e| {
+                to_execution_failed(format!("Element not found with selector '{}': {}", sel, e))
+            })?;
+            element
+                .press_key(&input.key)
+                .await
+                .map_err(to_execution_failed)?;
+        } else {
+            // Press key on the page (keyboard event)
+            let js = format!(
+                "document.dispatchEvent(new KeyboardEvent('keydown', {{key: '{}'}}))",
+                input.key.replace('\\', "\\\\").replace('\'', "\\'")
+            );
+            page.evaluate(js).await.map_err(to_execution_failed)?;
+        }
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Pressed key '{}' on page: {}", input.key, current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": format!("Pressed key '{}' on element", input.key),
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn execute_js(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserExecuteJsInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+
+        if input.script.trim().is_empty() {
+            return Err(to_invalid_input(BrowserKernelError::ActionFailed(
+                "execute_js script cannot be empty".to_string(),
+            )));
+        }
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        let result = page
+            .evaluate(input.script.clone())
+            .await
+            .map_err(|e| to_execution_failed(format!("JavaScript execution failed: {}", e)))?;
+
+        let result_value: serde_json::Value = result
+            .into_value()
+            .map_err(|e| to_execution_failed(format!("Failed to parse JS result: {}", e)))?;
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Executed JavaScript on page: {}", current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "result": result_value,
+                "element_description": "Executed JavaScript".to_string(),
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn wait_for_element(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserWaitForElementInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let selector = input.selector.trim().to_string();
+        if selector.is_empty() {
+            return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+        }
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        // Poll for element with timeout
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(input.timeout_ms);
+        let poll_interval = std::time::Duration::from_millis(200);
+
+        loop {
+            if page.find_element(&*selector).await.is_ok() {
+                return Ok(action_core::ActionResult {
+                    status: action_core::ActionStatus::Completed,
+                    summary: format!(
+                        "Element '{}' found on page: {} (within {}ms)",
+                        selector,
+                        current_url,
+                        start.elapsed().as_millis()
+                    ),
+                    payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                        "success": true,
+                        "url": current_url,
+                        "element_description": format!(
+                            "Element '{}' appeared within {}ms",
+                            selector,
+                            start.elapsed().as_millis()
+                        ),
+                        "interacted_at": chrono::Utc::now()
+                    })),
+                    completed_at: chrono::Utc::now(),
+                });
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(to_execution_failed(format!(
+                    "Timed out waiting for element '{}' after {}ms",
+                    selector, input.timeout_ms
+                )));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
 }
 
 const PAGE_TITLE_JS: &str = "document.title || ''";
@@ -1479,6 +1737,30 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                 let input: BrowserSelectOptionInput = serde_json::from_value(request.input.clone())
                     .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
                 self.select_option(browser, input).await
+            }
+            "browser.scroll_page" => {
+                let input: BrowserScrollPageInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| {
+                    action_core::ActionExecutorError::InvalidInput(e.to_string())
+                })?;
+                self.scroll_page(browser, input).await
+            }
+            "browser.press_key" => {
+                let input: BrowserPressKeyInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.press_key(browser, input).await
+            }
+            "browser.execute_js" => {
+                let input: BrowserExecuteJsInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.execute_js(browser, input).await
+            }
+            "browser.wait_for_element" => {
+                let input: BrowserWaitForElementInput =
+                    serde_json::from_value(request.input.clone()).map_err(|e| {
+                        action_core::ActionExecutorError::InvalidInput(e.to_string())
+                    })?;
+                self.wait_for_element(browser, input).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),

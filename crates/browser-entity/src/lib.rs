@@ -39,6 +39,10 @@ pub const BROWSER_CLICK_ELEMENT_ACTION_KIND: &str = "browser.click_element";
 pub const BROWSER_TYPE_TEXT_ACTION_KIND: &str = "browser.type_text";
 pub const BROWSER_FILL_FORM_ACTION_KIND: &str = "browser.fill_form";
 pub const BROWSER_SELECT_OPTION_ACTION_KIND: &str = "browser.select_option";
+pub const BROWSER_SCROLL_PAGE_ACTION_KIND: &str = "browser.scroll_page";
+pub const BROWSER_PRESS_KEY_ACTION_KIND: &str = "browser.press_key";
+pub const BROWSER_EXECUTE_JS_ACTION_KIND: &str = "browser.execute_js";
+pub const BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND: &str = "browser.wait_for_element";
 
 pub fn browser_open_url_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_OPEN_URL_ACTION_KIND)
@@ -74,6 +78,22 @@ pub fn browser_fill_form_action_kind() -> ActionKind {
 
 pub fn browser_select_option_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_SELECT_OPTION_ACTION_KIND)
+}
+
+pub fn browser_scroll_page_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_SCROLL_PAGE_ACTION_KIND)
+}
+
+pub fn browser_press_key_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_PRESS_KEY_ACTION_KIND)
+}
+
+pub fn browser_execute_js_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_EXECUTE_JS_ACTION_KIND)
+}
+
+pub fn browser_wait_for_element_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND)
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +302,64 @@ pub struct BrowserSelectOptionActionInput {
     pub value: String,
 }
 
+/// Scroll direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollDirection {
+    Up,
+    Down,
+    ToElement,
+}
+
+/// Input for `browser.scroll_page`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserScrollPageActionInput {
+    /// URL to navigate to before scrolling.
+    pub url: String,
+    /// Scroll direction.
+    pub direction: ScrollDirection,
+    /// Scroll amount in pixels (for Up/Down).
+    pub amount: Option<u32>,
+    /// CSS selector of target element (for ToElement).
+    pub target_selector: Option<String>,
+}
+
+/// Input for `browser.press_key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPressKeyActionInput {
+    /// URL to navigate to before pressing.
+    pub url: String,
+    /// Key to press (e.g., "Enter", "Escape", "Tab", "ArrowDown").
+    pub key: String,
+    /// CSS selector of the target element (None = currently focused).
+    pub selector: Option<String>,
+}
+
+/// Input for `browser.execute_js`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserExecuteJsActionInput {
+    /// URL to navigate to before executing.
+    pub url: String,
+    /// JavaScript code to execute.
+    pub script: String,
+}
+
+/// Input for `browser.wait_for_element`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserWaitForElementActionInput {
+    /// URL to navigate to before waiting.
+    pub url: String,
+    /// CSS selector to wait for.
+    pub selector: String,
+    /// Timeout in milliseconds.
+    #[serde(default = "default_wait_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    10_000
+}
+
 // ---------------------------------------------------------------------------
 // Validation errors
 // ---------------------------------------------------------------------------
@@ -369,6 +447,38 @@ pub fn register_browser_action_schemas(
         display_name: "Select Option".to_string(),
         description: "Select an option from a dropdown on a web page.".to_string(),
         side_effect: SideEffectKind::UiSideEffect,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_scroll_page_action_kind(),
+        display_name: "Scroll Page".to_string(),
+        description: "Scroll a web page up, down, or to a specific element.".to_string(),
+        side_effect: SideEffectKind::UiSideEffect,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_press_key_action_kind(),
+        display_name: "Press Key".to_string(),
+        description: "Press a keyboard key on a web page.".to_string(),
+        side_effect: SideEffectKind::UiSideEffect,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_execute_js_action_kind(),
+        display_name: "Execute JavaScript".to_string(),
+        description: "Execute custom JavaScript on a web page.".to_string(),
+        side_effect: SideEffectKind::NetworkAccess,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_wait_for_element_action_kind(),
+        display_name: "Wait For Element".to_string(),
+        description: "Wait for an element to appear on a web page.".to_string(),
+        side_effect: SideEffectKind::ReadOnly,
         input_schema: None,
         output_schema: None,
     })?;
@@ -553,6 +663,79 @@ impl ActionExecutor for FakeBrowserExecutor {
                     element_description: Some(format!(
                         "Selected '{}' in dropdown at selector: {}",
                         input.value, input.selector
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_SCROLL_PAGE_ACTION_KIND => {
+                let input: BrowserScrollPageActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let desc = match &input.direction {
+                    ScrollDirection::Down => {
+                        format!("Scrolled down {}px", input.amount.unwrap_or(500))
+                    }
+                    ScrollDirection::Up => format!("Scrolled up {}px", input.amount.unwrap_or(500)),
+                    ScrollDirection::ToElement => format!(
+                        "Scrolled to element: {}",
+                        input.target_selector.as_deref().unwrap_or("<none>")
+                    ),
+                };
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(desc),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_PRESS_KEY_ACTION_KIND => {
+                let input: BrowserPressKeyActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!("Pressed key '{}' on element", input.key)),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_EXECUTE_JS_ACTION_KIND => {
+                let input: BrowserExecuteJsActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some("Executed JavaScript".to_string()),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND => {
+                let input: BrowserWaitForElementActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Element '{}' appeared within {}ms",
+                        input.selector, input.timeout_ms
                     )),
                     interacted_at: self.now,
                 };
