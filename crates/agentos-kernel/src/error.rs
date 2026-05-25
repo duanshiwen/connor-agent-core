@@ -12,4 +12,10 @@ pub enum KernelError {
         from: &'static str,
         to: &'static str,
     },
+
+    #[error("service not found in {registry} registry: {service_id}")]
+    ServiceNotFound {
+        registry: &'static str,
+        service_id: String,
+    },
 }

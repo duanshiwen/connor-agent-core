@@ -6,10 +6,15 @@
 
 mod builder;
 mod error;
+mod registries;
 mod runtime;
 mod services;
 
 pub use builder::KernelRuntimeBuilder;
 pub use error::{KernelError, KernelResult};
+pub use registries::{
+    ActionExecutorRegistry, ConnectorRegistry, ConnectorService, ModelProviderRegistry,
+    RepositoryRegistry, RepositoryService,
+};
 pub use runtime::{KernelHealthReport, KernelRuntime, KernelRuntimeState};
 pub use services::KernelServices;

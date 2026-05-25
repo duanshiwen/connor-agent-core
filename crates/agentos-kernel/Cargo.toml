@@ -14,3 +14,4 @@ conversation-journal = { path = "../conversation-journal" }
 conversation-kernel = { path = "../conversation-kernel" }
 model-adapter = { path = "../model-adapter" }
 thiserror.workspace = true
+async-trait.workspace = true
