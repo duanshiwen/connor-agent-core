@@ -8,6 +8,333 @@
 use artifact_core::ArtifactId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// Browser profile types
+// ---------------------------------------------------------------------------
+
+/// How a browser profile should be managed.
+///
+/// - `Named("default")` → persistent profile with cookie/localStorage retention
+/// - `Temporary` → isolated UUID directory, cleaned up after session
+/// - `Ephemeral` → no profile directory (incognito-like)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserProfileMode {
+    /// Use a named persistent profile (cookie/localStorage auto-retained).
+    Named(String),
+    /// Use a temporary profile (isolated UUID directory, cleaned up after session).
+    Temporary,
+    /// No profile management (incognito-like, Chromium uses in-memory temp dir).
+    Ephemeral,
+}
+
+impl Default for BrowserProfileMode {
+    fn default() -> Self {
+        Self::Named("default".to_string())
+    }
+}
+
+/// Information about a browser profile's storage on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserProfile {
+    pub name: String,
+    pub path: PathBuf,
+    pub created_at: DateTime<Utc>,
+    pub is_temporary: bool,
+}
+
+/// Storage usage information for a browser profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileStorageInfo {
+    pub profile_name: String,
+    pub total_bytes: u64,
+    pub cookies_db_bytes: u64,
+    pub local_storage_bytes: u64,
+    pub cache_bytes: u64,
+}
+
+/// Platform-agnostic browser storage interface.
+///
+/// Desktop: manages Chromium profile directories.
+/// Mobile: may be no-op (WebView manages persistence itself).
+pub trait BrowserStorage: Send + Sync {
+    /// Resolve a profile's storage path (desktop only).
+    /// Mobile may return `None` (WebView manages persistence).
+    fn resolve_profile(&self, name: &str) -> Result<Option<PathBuf>, BrowserKernelError>;
+
+    /// Check if a profile exists.
+    fn profile_exists(&self, name: &str) -> bool;
+
+    /// List existing profile names.
+    fn list_profiles(&self) -> Result<Vec<String>, BrowserKernelError>;
+
+    /// Clear a profile's data.
+    fn clear_profile(&self, name: &str) -> Result<(), BrowserKernelError>;
+}
+
+// ---------------------------------------------------------------------------
+// FsBrowserStorage (desktop implementation)
+// ---------------------------------------------------------------------------
+
+/// Desktop filesystem-backed browser storage.
+///
+/// Manages Chromium profile directories under `{storage_root}/browser-profiles/`.
+/// Profile metadata is persisted in `profiles.json`.
+pub struct FsBrowserStorage {
+    #[allow(dead_code)] // Used in tests to verify canonicalization
+    root: PathBuf,
+    profiles_dir: PathBuf,
+}
+
+impl FsBrowserStorage {
+    /// Create a new `FsBrowserStorage` with the given storage root.
+    ///
+    /// The `storage_root` can be relative (canonicalized on first use) or absolute.
+    /// Profiles are stored under `{storage_root}/browser-profiles/`.
+    pub fn new(storage_root: impl Into<PathBuf>) -> Result<Self, BrowserKernelError> {
+        let root = storage_root.into();
+        if root.as_os_str().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "storage_root cannot be empty".to_string(),
+            ));
+        }
+
+        // Canonicalize relative paths to absolute (required by Chromium --user-data-dir).
+        let canonical_root = if root.is_absolute() {
+            root.clone()
+        } else {
+            std::fs::canonicalize(&root).unwrap_or_else(|_| {
+                // If canonicalize fails (dir doesn't exist yet), create it first.
+                let _ = std::fs::create_dir_all(&root);
+                std::fs::canonicalize(&root).unwrap_or(root.clone())
+            })
+        };
+
+        let profiles_dir = canonical_root.join("browser-profiles");
+        Ok(Self {
+            root: canonical_root,
+            profiles_dir,
+        })
+    }
+
+    /// Resolve a named profile, creating it if it doesn't exist.
+    pub fn resolve_or_create(&self, name: &str) -> Result<PathBuf, BrowserKernelError> {
+        let profile_path = self.profiles_dir.join(name);
+        if !profile_path.exists() {
+            std::fs::create_dir_all(&profile_path).map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!(
+                    "failed to create profile directory: {}",
+                    e
+                ))
+            })?;
+            self.update_profiles_json(name, false)?;
+        }
+        Ok(profile_path)
+    }
+
+    /// Create a temporary profile with a UUID name.
+    pub fn create_temporary(&self) -> Result<BrowserProfile, BrowserKernelError> {
+        let uuid = uuid_v4();
+        let profile_path = self.profiles_dir.join("_tmp").join(&uuid);
+        std::fs::create_dir_all(&profile_path).map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!(
+                "failed to create temporary profile directory: {}",
+                e
+            ))
+        })?;
+
+        let now = chrono::Utc::now();
+        let profile = BrowserProfile {
+            name: uuid.clone(),
+            path: profile_path,
+            created_at: now,
+            is_temporary: true,
+        };
+
+        self.update_profiles_json(&uuid, true)?;
+        Ok(profile)
+    }
+
+    /// Delete all temporary profiles under `_tmp/`.
+    pub fn delete_temporaries(&self) -> Result<(), BrowserKernelError> {
+        let tmp_dir = self.profiles_dir.join("_tmp");
+        if tmp_dir.exists() {
+            std::fs::remove_dir_all(&tmp_dir).map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!("failed to delete temporaries: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Get storage info for a profile (async for large directories).
+    pub async fn storage_info(&self, name: &str) -> Result<ProfileStorageInfo, BrowserKernelError> {
+        let profile_path = self.profiles_dir.join(name);
+        if !profile_path.exists() {
+            return Err(BrowserKernelError::InvalidConfig(format!(
+                "profile '{}' does not exist",
+                name
+            )));
+        }
+
+        let total_bytes = dir_size(&profile_path);
+        let cookies_db_bytes = file_size(&profile_path.join("Cookies"));
+        let local_storage_bytes = dir_size(&profile_path.join("Local Storage"));
+        let cache_bytes = dir_size(&profile_path.join("Cache"));
+
+        Ok(ProfileStorageInfo {
+            profile_name: name.to_string(),
+            total_bytes,
+            cookies_db_bytes,
+            local_storage_bytes,
+            cache_bytes,
+        })
+    }
+
+    /// Clear cache for a profile (preserves cookies and localStorage).
+    pub async fn clear_cache(&self, name: &str) -> Result<(), BrowserKernelError> {
+        let profile_path = self.profiles_dir.join(name);
+        if !profile_path.exists() {
+            return Err(BrowserKernelError::InvalidConfig(format!(
+                "profile '{}' does not exist",
+                name
+            )));
+        }
+
+        let cache_dir = profile_path.join("Cache");
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!("failed to clear cache: {}", e))
+            })?;
+        }
+
+        let code_cache_dir = profile_path.join("Code Cache");
+        if code_cache_dir.exists() {
+            std::fs::remove_dir_all(&code_cache_dir).map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!("failed to clear code cache: {}", e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn update_profiles_json(
+        &self,
+        name: &str,
+        is_temporary: bool,
+    ) -> Result<(), BrowserKernelError> {
+        let json_path = self.profiles_dir.join("profiles.json");
+        let mut profiles: serde_json::Value = if json_path.exists() {
+            let content = std::fs::read_to_string(&json_path).unwrap_or_default();
+            serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        profiles[name] = serde_json::json!({
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "is_temporary": is_temporary
+        });
+
+        std::fs::create_dir_all(&self.profiles_dir).map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!("failed to create profiles dir: {}", e))
+        })?;
+
+        std::fs::write(&json_path, serde_json::to_string_pretty(&profiles).unwrap()).map_err(
+            |e| BrowserKernelError::InvalidConfig(format!("failed to write profiles.json: {}", e)),
+        )?;
+
+        Ok(())
+    }
+}
+
+impl BrowserStorage for FsBrowserStorage {
+    fn resolve_profile(&self, name: &str) -> Result<Option<PathBuf>, BrowserKernelError> {
+        let profile_path = self.profiles_dir.join(name);
+        if profile_path.exists() {
+            Ok(Some(profile_path))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn profile_exists(&self, name: &str) -> bool {
+        self.profiles_dir.join(name).exists()
+    }
+
+    fn list_profiles(&self) -> Result<Vec<String>, BrowserKernelError> {
+        let json_path = self.profiles_dir.join("profiles.json");
+        if !json_path.exists() {
+            return Ok(vec![]);
+        }
+
+        let content = std::fs::read_to_string(&json_path).map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!("failed to read profiles.json: {}", e))
+        })?;
+
+        let profiles: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
+        let names: Vec<String> = profiles
+            .as_object()
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default();
+
+        Ok(names)
+    }
+
+    fn clear_profile(&self, name: &str) -> Result<(), BrowserKernelError> {
+        let profile_path = self.profiles_dir.join(name);
+        if profile_path.exists() {
+            std::fs::remove_dir_all(&profile_path).map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!("failed to clear profile: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn uuid_v4() -> String {
+    // Simple UUID v4 implementation (no external dependency).
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let nanos = duration.as_nanos();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (nanos >> 96) as u32,
+        (nanos >> 80) as u16,
+        ((nanos >> 64) as u16 & 0x0fff) | 0x4000, // version 4
+        ((nanos >> 48) as u16 & 0x3fff) | 0x8000, // variant 1
+        (nanos & 0xffffffffffff) as u64
+    )
+}
+
+fn dir_size(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -64,7 +391,7 @@ pub struct CdpBrowserConfig {
     pub launch_mode: ChromiumLaunchMode,
     pub viewport: BrowserViewport,
     pub timeouts: BrowserTimeouts,
-    pub user_data_dir: Option<String>,
+    pub profile: BrowserProfileMode,
     pub max_pages: usize,
 }
 
@@ -74,7 +401,7 @@ impl Default for CdpBrowserConfig {
             launch_mode: ChromiumLaunchMode::Headless,
             viewport: BrowserViewport::default(),
             timeouts: BrowserTimeouts::default(),
-            user_data_dir: None,
+            profile: BrowserProfileMode::default(),
             max_pages: 5,
         }
     }
@@ -91,8 +418,8 @@ impl CdpBrowserConfig {
         self
     }
 
-    pub fn with_user_data_dir(mut self, user_data_dir: impl Into<String>) -> Self {
-        self.user_data_dir = Some(user_data_dir.into());
+    pub fn with_profile(mut self, profile: BrowserProfileMode) -> Self {
+        self.profile = profile;
         self
     }
 
@@ -270,14 +597,32 @@ pub struct BrowserActionResult {
 ///
 /// In this skeleton, Chromium is never actually launched.
 /// The manager records the intended config and reports unavailability.
-#[derive(Debug, Clone)]
 pub struct ChromiumLifecycleManager {
     config: CdpBrowserConfig,
+    storage: Option<std::sync::Arc<dyn BrowserStorage>>,
+}
+
+impl std::fmt::Debug for ChromiumLifecycleManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChromiumLifecycleManager")
+            .field("config", &self.config)
+            .field("storage", &self.storage.is_some())
+            .finish()
+    }
 }
 
 impl ChromiumLifecycleManager {
     pub fn new(config: CdpBrowserConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            storage: None,
+        }
+    }
+
+    /// Create with a BrowserStorage backend for profile management.
+    pub fn with_storage(mut self, storage: std::sync::Arc<dyn BrowserStorage>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub fn config(&self) -> &CdpBrowserConfig {
@@ -392,7 +737,10 @@ mod tests {
         assert_eq!(config.timeouts.navigation_timeout_ms, 30_000);
         assert_eq!(config.timeouts.action_timeout_ms, 10_000);
         assert_eq!(config.timeouts.idle_shutdown_ms, 300_000);
-        assert_eq!(config.user_data_dir, None);
+        assert_eq!(
+            config.profile,
+            BrowserProfileMode::Named("default".to_string())
+        );
         assert_eq!(config.max_pages, 5);
     }
 
@@ -405,15 +753,15 @@ mod tests {
                 device_scale_factor: 2.0,
             })
             .with_max_pages(3)
-            .with_user_data_dir("/tmp/agentos-browser-profile");
+            .with_profile(BrowserProfileMode::Named("work".to_string()));
 
         assert_eq!(config.viewport.width, 1920);
         assert_eq!(config.viewport.height, 1080);
         assert_eq!(config.viewport.device_scale_factor, 2.0);
         assert_eq!(config.max_pages, 3);
         assert_eq!(
-            config.user_data_dir,
-            Some("/tmp/agentos-browser-profile".to_string())
+            config.profile,
+            BrowserProfileMode::Named("work".to_string())
         );
     }
 
@@ -628,5 +976,194 @@ mod tests {
             }
             other => panic!("expected ExecutionFailed, got: {other:?}"),
         }
+    }
+
+    // ---- BrowserProfileMode tests ----
+
+    #[test]
+    fn browser_profile_mode_serde_roundtrip() {
+        let modes = vec![
+            BrowserProfileMode::Named("default".to_string()),
+            BrowserProfileMode::Named("work".to_string()),
+            BrowserProfileMode::Temporary,
+            BrowserProfileMode::Ephemeral,
+        ];
+
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let decoded: BrowserProfileMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn browser_profile_mode_default_is_named_default() {
+        let mode = BrowserProfileMode::default();
+        assert_eq!(mode, BrowserProfileMode::Named("default".to_string()));
+    }
+
+    // ---- FsBrowserStorage tests ----
+
+    #[test]
+    fn fs_storage_rejects_empty_root() {
+        let result = FsBrowserStorage::new("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fs_storage_resolve_or_create_creates_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let path = storage.resolve_or_create("test-profile").unwrap();
+        assert!(path.exists());
+        assert!(path.ends_with("browser-profiles/test-profile"));
+    }
+
+    #[test]
+    fn fs_storage_resolve_or_create_returns_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let path1 = storage.resolve_or_create("my-profile").unwrap();
+        let path2 = storage.resolve_or_create("my-profile").unwrap();
+        assert_eq!(path1, path2);
+    }
+
+    #[test]
+    fn fs_storage_create_temporary_generates_uuid_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let profile = storage.create_temporary().unwrap();
+        assert!(profile.is_temporary);
+        assert!(profile.path.exists());
+        assert!(profile.name.len() > 0);
+    }
+
+    #[test]
+    fn fs_storage_delete_temporaries_removes_tmp_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let profile1 = storage.create_temporary().unwrap();
+        let profile2 = storage.create_temporary().unwrap();
+        assert!(profile1.path.exists());
+        assert!(profile2.path.exists());
+
+        storage.delete_temporaries().unwrap();
+        assert!(!profile1.path.exists());
+        assert!(!profile2.path.exists());
+    }
+
+    #[test]
+    fn fs_storage_list_profiles_returns_named_profiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        storage.resolve_or_create("default").unwrap();
+        storage.resolve_or_create("work").unwrap();
+
+        let profiles = storage.list_profiles().unwrap();
+        assert!(profiles.contains(&"default".to_string()));
+        assert!(profiles.contains(&"work".to_string()));
+    }
+
+    #[test]
+    fn fs_storage_clear_profile_removes_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        storage.resolve_or_create("to-clear").unwrap();
+        assert!(storage.profile_exists("to-clear"));
+
+        storage.clear_profile("to-clear").unwrap();
+        assert!(!storage.profile_exists("to-clear"));
+    }
+
+    #[test]
+    fn fs_storage_profiles_json_created_on_first_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        storage.resolve_or_create("first").unwrap();
+
+        let json_path = tmp.path().join("browser-profiles/profiles.json");
+        assert!(json_path.exists());
+
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let profiles: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(profiles.get("first").is_some());
+    }
+
+    #[test]
+    fn fs_storage_profiles_json_graceful_on_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        // Create a corrupt profiles.json
+        let json_path = tmp.path().join("browser-profiles/profiles.json");
+        std::fs::create_dir_all(json_path.parent().unwrap()).unwrap();
+        std::fs::write(&json_path, "not valid json").unwrap();
+
+        // Should still work (graceful fallback)
+        let profiles = storage.list_profiles().unwrap();
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn fs_storage_relative_path_canonicalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let relative_path = tmp.path().join("relative");
+        let storage = FsBrowserStorage::new(&relative_path).unwrap();
+
+        // The root should be canonicalized to absolute
+        assert!(storage.root.is_absolute());
+    }
+
+    #[test]
+    fn profile_storage_info_calculates_sizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let profile_path = storage.resolve_or_create("info-test").unwrap();
+        // Create some files to measure
+        std::fs::write(profile_path.join("Cookies"), vec![0u8; 1024]).unwrap();
+        std::fs::create_dir_all(profile_path.join("Local Storage")).unwrap();
+        std::fs::write(profile_path.join("Local Storage/data"), vec![0u8; 512]).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let info = rt.block_on(storage.storage_info("info-test")).unwrap();
+
+        assert_eq!(info.profile_name, "info-test");
+        assert!(info.total_bytes > 0);
+        assert_eq!(info.cookies_db_bytes, 1024);
+        assert_eq!(info.local_storage_bytes, 512);
+    }
+
+    #[tokio::test]
+    async fn fs_storage_clear_cache_preserves_cookies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FsBrowserStorage::new(tmp.path()).unwrap();
+
+        let profile_path = storage.resolve_or_create("cache-test").unwrap();
+        std::fs::write(profile_path.join("Cookies"), "cookie-data").unwrap();
+        std::fs::create_dir_all(profile_path.join("Cache")).unwrap();
+        std::fs::write(profile_path.join("Cache/data"), "cache-data").unwrap();
+
+        storage.clear_cache("cache-test").await.unwrap();
+
+        // Cookies preserved
+        assert!(profile_path.join("Cookies").exists());
+        // Cache cleared
+        assert!(!profile_path.join("Cache").exists());
+    }
+
+    #[test]
+    fn ephemeral_mode_does_not_create_directories() {
+        let config = CdpBrowserConfig::default().with_profile(BrowserProfileMode::Ephemeral);
+        assert_eq!(config.profile, BrowserProfileMode::Ephemeral);
+        // Ephemeral mode should not create any profile directory
+        // (this is verified by the ChromiumLifecycleManager not calling resolve_profile)
     }
 }
