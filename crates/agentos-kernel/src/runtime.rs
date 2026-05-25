@@ -1,8 +1,12 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{KernelError, KernelResult, KernelServices};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KernelRuntimeState {
     New,
     Initialized,
@@ -23,7 +27,7 @@ impl KernelRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelHealthReport {
     pub state: KernelRuntimeState,
     pub healthy: bool,
@@ -106,6 +110,18 @@ impl KernelRuntime {
                 Ok(())
             }
         }
+    }
+
+    pub async fn diagnostics_bundle(
+        &self,
+        runtime_config: BTreeMap<String, String>,
+    ) -> KernelResult<crate::KernelDiagnosticsBundle> {
+        crate::diagnostics::build_diagnostics_bundle(
+            runtime_config,
+            self.health_check(),
+            self.services.audit_log.as_ref(),
+        )
+        .await
     }
 
     pub fn health_check(&self) -> KernelHealthReport {

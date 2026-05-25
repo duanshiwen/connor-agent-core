@@ -5,12 +5,17 @@
 //! behavior that belongs in lower-level crates.
 
 mod builder;
+mod diagnostics;
 mod error;
 mod registries;
 mod runtime;
 mod services;
 
 pub use builder::KernelRuntimeBuilder;
+pub use diagnostics::{
+    AuditEventSummary, KernelDiagnosticsBundle, RecentAuditSummary, RedactedRuntimeConfig,
+    StorageManifestDump,
+};
 pub use error::{KernelError, KernelResult};
 pub use registries::{
     ActionExecutorRegistry, ConnectorRegistry, ConnectorService, ModelProviderRegistry,

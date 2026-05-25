@@ -18,4 +18,7 @@ pub enum KernelError {
         registry: &'static str,
         service_id: String,
     },
+
+    #[error("kernel diagnostics failed: {reason}")]
+    DiagnosticsFailed { reason: String },
 }

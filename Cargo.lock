@@ -75,10 +75,14 @@ dependencies = [
  "async-trait",
  "audit-log",
  "capability-policy",
+ "chrono",
  "conversation-journal",
  "conversation-kernel",
  "model-adapter",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
