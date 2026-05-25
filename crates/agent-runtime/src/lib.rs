@@ -14,10 +14,15 @@
 //!     → kernel.complete_agent_run(run_id)
 //! ```
 
+mod action_store;
 mod run_queue;
 mod run_store;
 mod tool_loop_checkpoint;
 
+pub use action_store::{
+    ActionRecord, ActionStore, ActionStoreError, ActionStoreResult, JsonlActionStore,
+    MemoryActionStore,
+};
 pub use run_queue::{AgentRunLease, AgentRunQueue, AgentRunQueueError, AgentRunQueueResult};
 pub use run_store::{
     AgentRunRecord, AgentRunStore, AgentRunStoreError, AgentRunStoreResult, DurableAgentRunStatus,
