@@ -37,6 +37,8 @@ pub const BROWSER_COMPARE_PAGES_ACTION_KIND: &str = "browser.compare_pages";
 pub const BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND: &str = "browser.capture_snapshot";
 pub const BROWSER_CLICK_ELEMENT_ACTION_KIND: &str = "browser.click_element";
 pub const BROWSER_TYPE_TEXT_ACTION_KIND: &str = "browser.type_text";
+pub const BROWSER_FILL_FORM_ACTION_KIND: &str = "browser.fill_form";
+pub const BROWSER_SELECT_OPTION_ACTION_KIND: &str = "browser.select_option";
 
 pub fn browser_open_url_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_OPEN_URL_ACTION_KIND)
@@ -64,6 +66,14 @@ pub fn browser_click_element_action_kind() -> ActionKind {
 
 pub fn browser_type_text_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_TYPE_TEXT_ACTION_KIND)
+}
+
+pub fn browser_fill_form_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_FILL_FORM_ACTION_KIND)
+}
+
+pub fn browser_select_option_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_SELECT_OPTION_ACTION_KIND)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +250,38 @@ pub struct BrowserInteractionResult {
     pub interacted_at: DateTime<Utc>,
 }
 
+/// A single field for form filling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserFormFillField {
+    /// CSS selector for the field.
+    pub selector: String,
+    /// Value to fill.
+    pub value: String,
+}
+
+/// Input for `browser.fill_form`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserFillFormActionInput {
+    /// URL to navigate to before filling.
+    pub url: String,
+    /// Fields to fill.
+    pub fields: Vec<BrowserFormFillField>,
+    /// Whether to submit the form after filling.
+    #[serde(default)]
+    pub submit: bool,
+}
+
+/// Input for `browser.select_option`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSelectOptionActionInput {
+    /// URL to navigate to before selecting.
+    pub url: String,
+    /// CSS selector of the <select> element.
+    pub selector: String,
+    /// Value of the option to select.
+    pub value: String,
+}
+
 // ---------------------------------------------------------------------------
 // Validation errors
 // ---------------------------------------------------------------------------
@@ -310,6 +352,22 @@ pub fn register_browser_action_schemas(
         kind: browser_type_text_action_kind(),
         display_name: "Type Text".to_string(),
         description: "Type text into an input element on a web page.".to_string(),
+        side_effect: SideEffectKind::UiSideEffect,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_fill_form_action_kind(),
+        display_name: "Fill Form".to_string(),
+        description: "Fill multiple form fields on a web page.".to_string(),
+        side_effect: SideEffectKind::ExternalSystemMutation,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_select_option_action_kind(),
+        display_name: "Select Option".to_string(),
+        description: "Select an option from a dropdown on a web page.".to_string(),
         side_effect: SideEffectKind::UiSideEffect,
         input_schema: None,
         output_schema: None,
@@ -457,6 +515,44 @@ impl ActionExecutor for FakeBrowserExecutor {
                         "Typed '{}' into element at selector: {}",
                         input.text,
                         input.selector.as_deref().unwrap_or("<focused>")
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_FILL_FORM_ACTION_KIND => {
+                let input: BrowserFillFormActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let field_count = input.fields.len();
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Filled {} form fields{}",
+                        field_count,
+                        if input.submit { " and submitted" } else { "" }
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_SELECT_OPTION_ACTION_KIND => {
+                let input: BrowserSelectOptionActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Selected '{}' in dropdown at selector: {}",
+                        input.value, input.selector
                     )),
                     interacted_at: self.now,
                 };

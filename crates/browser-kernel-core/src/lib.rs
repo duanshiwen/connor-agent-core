@@ -808,6 +808,27 @@ struct BrowserTypeTextInput {
     clear_first: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserFormFillField {
+    selector: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserFillFormInput {
+    url: String,
+    fields: Vec<BrowserFormFillField>,
+    #[serde(default)]
+    submit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserSelectOptionInput {
+    url: String,
+    selector: String,
+    value: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RawInteractiveElement {
     id: String,
@@ -986,7 +1007,7 @@ impl CdpBrowserExecutor {
 
         let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
 
-        let element = page.find_element(&selector).await.map_err(|e| {
+        let element = page.find_element(&*selector).await.map_err(|e| {
             to_execution_failed(format!(
                 "Element not found with selector '{}': {}",
                 selector, e
@@ -1076,6 +1097,152 @@ impl CdpBrowserExecutor {
                     "Typed '{}' into element at selector: {}",
                     text,
                     input.selector.as_deref().unwrap_or("<focused>")
+                ),
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn fill_form(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserFillFormInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+
+        if input.fields.is_empty() {
+            return Err(to_invalid_input(BrowserKernelError::ActionFailed(
+                "fill_form requires at least one field".to_string(),
+            )));
+        }
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        let field_count = input.fields.len();
+        for field in &input.fields {
+            let selector = field.selector.trim();
+            if selector.is_empty() {
+                return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+            }
+            let element = page.find_element(selector).await.map_err(|e| {
+                to_execution_failed(format!(
+                    "Form field not found with selector '{}': {}",
+                    selector, e
+                ))
+            })?;
+            element.click().await.map_err(to_execution_failed)?;
+            // Select all existing text and replace
+            element
+                .press_key("Meta+a")
+                .await
+                .map_err(to_execution_failed)?;
+            element
+                .type_str(&field.value)
+                .await
+                .map_err(to_execution_failed)?;
+        }
+
+        // Submit if requested
+        if input.submit {
+            // Try common submit button selectors
+            let submit_selectors = ["button[type='submit']", "input[type='submit']", "button"];
+            let mut submitted = false;
+            for sel in &submit_selectors {
+                if let Ok(btn) = page.find_element(*sel).await
+                    && btn.click().await.is_ok()
+                {
+                    submitted = true;
+                    break;
+                }
+            }
+            if !submitted {
+                // Try pressing Enter on the last field
+                if let Some(last_field) = input.fields.last()
+                    && let Ok(el) = page.find_element(last_field.selector.trim()).await
+                {
+                    let _ = el.press_key("Enter").await;
+                }
+            }
+        }
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Filled {} form fields on page: {}",
+                field_count, current_url
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": format!(
+                    "Filled {} form fields{}",
+                    field_count,
+                    if input.submit { " and submitted" } else { "" }
+                ),
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn select_option(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserSelectOptionInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let selector = input.selector.trim().to_string();
+        if selector.is_empty() {
+            return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+        }
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        // Use JS to set the select value and dispatch change event
+        let js = format!(
+            r#"(() => {{
+                const sel = document.querySelector('{}');
+                if (!sel) throw new Error('Select element not found');
+                sel.value = '{}';
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return sel.value;
+            }})()"#,
+            selector.replace('\\', "\\\\").replace('\'', "\\'"),
+            input.value.replace('\\', "\\\\").replace('\'', "\\'")
+        );
+
+        page.evaluate(js).await.map_err(|e| {
+            to_execution_failed(format!(
+                "Failed to select option with selector '{}': {}",
+                selector, e
+            ))
+        })?;
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Selected option '{}' in dropdown on page: {}",
+                input.value, current_url
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "element_description": format!(
+                    "Selected '{}' in dropdown at selector: {}",
+                    input.value, selector
                 ),
                 "interacted_at": chrono::Utc::now()
             })),
@@ -1302,6 +1469,16 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                 let input: BrowserTypeTextInput = serde_json::from_value(request.input.clone())
                     .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
                 self.type_text(browser, input).await
+            }
+            "browser.fill_form" => {
+                let input: BrowserFillFormInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.fill_form(browser, input).await
+            }
+            "browser.select_option" => {
+                let input: BrowserSelectOptionInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.select_option(browser, input).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
@@ -1688,6 +1865,51 @@ mod tests {
         assert!(input.clear_first);
     }
 
+    #[test]
+    fn browser_fill_form_input_parses_with_fields() {
+        let input: BrowserFillFormInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/form",
+            "fields": [
+                {"selector": "#name", "value": "Alice"},
+                {"selector": "#email", "value": "alice@example.com"}
+            ],
+            "submit": true
+        }))
+        .unwrap();
+
+        assert_eq!(input.url, "https://example.com/form");
+        assert_eq!(input.fields.len(), 2);
+        assert_eq!(input.fields[0].selector, "#name");
+        assert_eq!(input.fields[0].value, "Alice");
+        assert_eq!(input.fields[1].selector, "#email");
+        assert!(input.submit);
+    }
+
+    #[test]
+    fn browser_fill_form_input_defaults_submit_false() {
+        let input: BrowserFillFormInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "fields": [{"selector": "#x", "value": "y"}]
+        }))
+        .unwrap();
+
+        assert!(!input.submit);
+    }
+
+    #[test]
+    fn browser_select_option_input_parses() {
+        let input: BrowserSelectOptionInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "selector": "select#country",
+            "value": "CN"
+        }))
+        .unwrap();
+
+        assert_eq!(input.url, "https://example.com");
+        assert_eq!(input.selector, "select#country");
+        assert_eq!(input.value, "CN");
+    }
+
     #[tokio::test]
     async fn cdp_browser_click_element_returns_chromium_not_available() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
@@ -1715,6 +1937,44 @@ mod tests {
         let request = action_request_with_input(
             "browser.type_text",
             serde_json::json!({"url": "https://example.com", "text": "hello"}),
+        );
+        let result = executor.execute(&request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActionExecutorError::ExecutionFailed(msg) => {
+                assert!(msg.contains("chromium browser is not available"));
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cdp_browser_fill_form_returns_chromium_not_available() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+
+        let request = action_request_with_input(
+            "browser.fill_form",
+            serde_json::json!({"url": "https://example.com", "fields": [{"selector": "#x", "value": "y"}]}),
+        );
+        let result = executor.execute(&request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActionExecutorError::ExecutionFailed(msg) => {
+                assert!(msg.contains("chromium browser is not available"));
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cdp_browser_select_option_returns_chromium_not_available() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+
+        let request = action_request_with_input(
+            "browser.select_option",
+            serde_json::json!({"url": "https://example.com", "selector": "select#x", "value": "a"}),
         );
         let result = executor.execute(&request).await;
         assert!(result.is_err());
