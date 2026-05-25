@@ -29,6 +29,7 @@ members = [
     "crates/device-pairing-core",
     "crates/sync-runtime",
     "crates/p2p-sync-runtime",
+    "crates/person-entity",
 ]
 resolver = "2"
 
