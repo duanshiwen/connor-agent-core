@@ -11,5 +11,5 @@ mod services;
 
 pub use builder::KernelRuntimeBuilder;
 pub use error::{KernelError, KernelResult};
-pub use runtime::KernelRuntime;
+pub use runtime::{KernelHealthReport, KernelRuntime, KernelRuntimeState};
 pub use services::KernelServices;
