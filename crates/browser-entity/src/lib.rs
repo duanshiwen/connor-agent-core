@@ -383,6 +383,485 @@ impl ActionExecutor for FakeBrowserExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// Readability Extractor (PR 54)
+// ---------------------------------------------------------------------------
+
+/// A single content block extracted from a web page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ContentBlock {
+    Paragraph {
+        text: String,
+    },
+    Heading {
+        level: u8,
+        text: String,
+    },
+    Image {
+        src: String,
+        alt: Option<String>,
+    },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
+    List {
+        ordered: bool,
+        items: Vec<String>,
+    },
+    BlockQuote {
+        text: String,
+    },
+}
+
+/// A table extracted from a web page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtractedTable {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// Structured result from readability extraction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadabilityResult {
+    pub title: String,
+    pub lead_image: Option<String>,
+    pub content_blocks: Vec<ContentBlock>,
+    pub tables: Vec<ExtractedTable>,
+    pub byline: Option<String>,
+    pub site_name: Option<String>,
+    pub language: Option<String>,
+}
+
+impl ReadabilityResult {
+    /// Convert structured content to plain text for backward compatibility.
+    pub fn to_plain_text(&self) -> String {
+        let mut parts = Vec::new();
+
+        if !self.title.is_empty() {
+            parts.push(self.title.clone());
+        }
+
+        for block in &self.content_blocks {
+            match block {
+                ContentBlock::Paragraph { text } => parts.push(text.clone()),
+                ContentBlock::Heading { text, .. } => parts.push(text.clone()),
+                ContentBlock::Image { src, alt } => {
+                    let label = alt.as_deref().unwrap_or("image");
+                    parts.push(format!("[{}]({})", label, src));
+                }
+                ContentBlock::CodeBlock { code, .. } => parts.push(code.clone()),
+                ContentBlock::List { items, .. } => {
+                    for item in items {
+                        parts.push(format!("- {}", item));
+                    }
+                }
+                ContentBlock::BlockQuote { text } => parts.push(text.clone()),
+            }
+        }
+
+        for table in &self.tables {
+            if !table.headers.is_empty() {
+                parts.push(table.headers.join(" | "));
+            }
+            for row in &table.rows {
+                parts.push(row.join(" | "));
+            }
+        }
+
+        parts.join("\n")
+    }
+}
+
+/// Structured content extractor using deterministic heuristics.
+///
+/// Extracts title, headings, paragraphs, images, and tables from HTML.
+/// Prioritizes `<article>` > `<main>` > `<body>` for content area detection.
+pub struct ReadabilityExtractor;
+
+impl ReadabilityExtractor {
+    /// Extract structured content from HTML.
+    pub fn extract(html: &str, _url: &str) -> ReadabilityResult {
+        let title = Self::extract_title(html);
+        let lead_image = Self::extract_meta_attr(html, "og:image");
+        let byline = Self::extract_meta_attr(html, "author")
+            .or_else(|| Self::extract_meta_attr(html, "article:author"));
+        let site_name = Self::extract_meta_attr(html, "og:site_name");
+        let language = Self::extract_html_lang(html);
+
+        // Determine content area: article > main > body
+        let content_area = Self::extract_tag_block(html, "article")
+            .or_else(|| Self::extract_tag_block(html, "main"))
+            .unwrap_or_else(|| html.to_string());
+
+        let content_blocks = Self::extract_content_blocks(&content_area);
+        let tables = Self::extract_tables(&content_area);
+
+        ReadabilityResult {
+            title,
+            lead_image,
+            content_blocks,
+            tables,
+            byline,
+            site_name,
+            language,
+        }
+    }
+
+    /// Extract title from `<title>` or `og:title` meta tag.
+    fn extract_title(html: &str) -> String {
+        // Try og:title first (usually more meaningful)
+        if let Some(og_title) = Self::extract_meta_attr(html, "og:title")
+            && !og_title.is_empty()
+        {
+            return og_title;
+        }
+        // Fallback to <title>
+        extract_tag_content(html, "title").unwrap_or_default()
+    }
+
+    /// Extract content attribute from a meta tag with the given property/name.
+    fn extract_meta_attr(html: &str, property: &str) -> Option<String> {
+        // Look for: <meta property="{property}" content="value">
+        // or:       <meta name="{property}" content="value">
+        let lower = html.to_lowercase();
+        for pattern in &[
+            format!("property=\"{}\"", property),
+            format!("name=\"{}\"", property),
+            format!("property='{}'", property),
+            format!("name='{}'", property),
+        ] {
+            if let Some(pos) = lower.find(pattern) {
+                // Find the content attribute within this meta tag
+                let tag_start = lower[..pos].rfind('<').unwrap_or(0);
+                let tag_end = lower[pos..]
+                    .find('>')
+                    .map(|e| pos + e)
+                    .unwrap_or(lower.len());
+                let _tag = &html[tag_start..tag_end];
+                let tag_lower = &lower[tag_start..tag_end];
+
+                if let Some(content_pos) = tag_lower.find("content=\"") {
+                    let val_start = tag_start + content_pos + 9; // "content=\"".len()
+                    if let Some(val_end) = html[val_start..].find('"') {
+                        let val = html[val_start..val_start + val_end].trim();
+                        if !val.is_empty() {
+                            return Some(val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract the `lang` attribute from `<html>` tag.
+    fn extract_html_lang(html: &str) -> Option<String> {
+        let lower = html.to_lowercase();
+        let html_pos = lower.find("<html")?;
+        let tag_end = lower[html_pos..].find('>').map(|e| html_pos + e)?;
+        let _tag = &html[html_pos..tag_end];
+        let tag_lower = &lower[html_pos..tag_end];
+
+        if let Some(lang_pos) = tag_lower.find("lang=\"") {
+            let val_start = html_pos + lang_pos + 6;
+            if let Some(val_end) = html[val_start..].find('"') {
+                let val = html[val_start..val_start + val_end].trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract the full block content between opening and closing tags (non-greedy).
+    /// Returns the inner content of the first matching tag pair.
+    fn extract_tag_block(html: &str, tag: &str) -> Option<String> {
+        let open_patterns = [format!("<{}", tag), format!("<{} ", tag)];
+        let close_tag = format!("</{}>", tag);
+
+        let lower = html.to_lowercase();
+        let mut start_pos = None;
+        for pattern in &open_patterns {
+            if let Some(pos) = lower.find(pattern) {
+                start_pos = Some(pos);
+                break;
+            }
+        }
+        let start = start_pos?;
+        let tag_end = lower[start..].find('>').map(|e| start + e + 1)?;
+        let close = lower[tag_end..]
+            .find(&close_tag.to_lowercase())
+            .map(|e| tag_end + e)?;
+
+        Some(html[tag_end..close].to_string())
+    }
+
+    /// Extract content blocks from the content area HTML.
+    fn extract_content_blocks(html: &str) -> Vec<ContentBlock> {
+        let mut blocks = Vec::new();
+
+        // Extract headings
+        for level in 1..=6u8 {
+            let tag = format!("h{}", level);
+            let mut pos = 0;
+            while let Some(content) = Self::find_next_tag_content(html, &tag, pos) {
+                let text = strip_html_tags(&content);
+                if !text.trim().is_empty() {
+                    blocks.push(ContentBlock::Heading {
+                        level,
+                        text: text.trim().to_string(),
+                    });
+                }
+                pos = html[pos..]
+                    .find(&format!("</{}>", tag))
+                    .map(|e| pos + e + tag.len() + 3)
+                    .unwrap_or(html.len());
+            }
+        }
+
+        // Extract paragraphs
+        let mut para_pos = 0;
+        while let Some(content) = Self::find_next_tag_content(html, "p", para_pos) {
+            let text = strip_html_tags(&content);
+            if !text.trim().is_empty() {
+                blocks.push(ContentBlock::Paragraph {
+                    text: text.trim().to_string(),
+                });
+            }
+            para_pos = html[para_pos..]
+                .find("</p>")
+                .map(|e| para_pos + e + 4)
+                .unwrap_or(html.len());
+        }
+
+        // Extract images
+        let mut img_pos = 0;
+        let lower = html.to_lowercase();
+        while let Some(start) = lower[img_pos..].find("<img") {
+            let abs = img_pos + start;
+            let tag_end = lower[abs..]
+                .find('>')
+                .map(|e| abs + e + 1)
+                .unwrap_or(html.len());
+            let tag = &html[abs..tag_end];
+            let tag_lower = &lower[abs..tag_end];
+
+            let src = Self::extract_attr(tag, tag_lower, "src");
+            let alt = Self::extract_attr(tag, tag_lower, "alt");
+
+            if let Some(src_val) = src
+                && !src_val.starts_with("data:")
+            {
+                blocks.push(ContentBlock::Image { src: src_val, alt });
+            }
+
+            img_pos = tag_end;
+        }
+
+        // Extract code blocks (pre > code)
+        let mut pre_pos = 0;
+        while let Some(content) = Self::find_next_tag_content(html, "pre", pre_pos) {
+            let code_content =
+                Self::find_next_tag_content(&content, "code", 0).unwrap_or_else(|| content.clone());
+            let language = Self::extract_code_language(&code_content);
+            let code = strip_html_tags(&code_content);
+            if !code.trim().is_empty() {
+                blocks.push(ContentBlock::CodeBlock {
+                    language,
+                    code: code.trim().to_string(),
+                });
+            }
+            pre_pos = html[pre_pos..]
+                .find("</pre>")
+                .map(|e| pre_pos + e + 5)
+                .unwrap_or(html.len());
+        }
+
+        // Extract blockquotes
+        let mut bq_pos = 0;
+        while let Some(content) = Self::find_next_tag_content(html, "blockquote", bq_pos) {
+            let text = strip_html_tags(&content);
+            if !text.trim().is_empty() {
+                blocks.push(ContentBlock::BlockQuote {
+                    text: text.trim().to_string(),
+                });
+            }
+            bq_pos = html[bq_pos..]
+                .find("</blockquote>")
+                .map(|e| bq_pos + e + 13)
+                .unwrap_or(html.len());
+        }
+
+        // Extract lists (ul/ol)
+        for (tag, ordered) in &[("ul", false), ("ol", true)] {
+            let mut list_pos = 0;
+            while let Some(content) = Self::find_next_tag_content(html, tag, list_pos) {
+                let items = Self::extract_list_items(&content);
+                if !items.is_empty() {
+                    blocks.push(ContentBlock::List {
+                        ordered: *ordered,
+                        items,
+                    });
+                }
+                let close = format!("</{}>", tag);
+                list_pos = html[list_pos..]
+                    .find(&close)
+                    .map(|e| list_pos + e + close.len())
+                    .unwrap_or(html.len());
+            }
+        }
+
+        blocks
+    }
+
+    /// Extract tables from HTML.
+    fn extract_tables(html: &str) -> Vec<ExtractedTable> {
+        let mut tables = Vec::new();
+        let mut pos = 0;
+
+        while let Some(table_content) = Self::find_next_tag_content(html, "table", pos) {
+            let mut headers = Vec::new();
+            let mut rows = Vec::new();
+
+            // Extract header row (th)
+            if let Some(thead) = Self::find_next_tag_content(&table_content, "thead", 0)
+                && let Some(tr) = Self::find_next_tag_content(&thead, "tr", 0)
+            {
+                headers = Self::extract_table_cells(&tr, true);
+            }
+            // If no thead, try first tr with th
+            if headers.is_empty()
+                && let Some(tr) = Self::find_next_tag_content(&table_content, "tr", 0)
+            {
+                let th_cells = Self::extract_table_cells(&tr, true);
+                if !th_cells.is_empty() {
+                    headers = th_cells;
+                }
+            }
+
+            // Extract body rows (td)
+            let tbody_content = Self::find_next_tag_content(&table_content, "tbody", 0)
+                .unwrap_or_else(|| table_content.clone());
+
+            let mut tr_pos = 0;
+            while let Some(tr) = Self::find_next_tag_content(&tbody_content, "tr", tr_pos) {
+                let cells = Self::extract_table_cells(&tr, false);
+                if !cells.is_empty() {
+                    // Skip header row if it was already captured
+                    if headers.is_empty() || cells != headers {
+                        rows.push(cells);
+                    }
+                }
+                tr_pos = tbody_content[tr_pos..]
+                    .find("</tr>")
+                    .map(|e| tr_pos + e + 4)
+                    .unwrap_or(tbody_content.len());
+            }
+
+            if !headers.is_empty() || !rows.is_empty() {
+                tables.push(ExtractedTable { headers, rows });
+            }
+
+            pos = html[pos..]
+                .find("</table>")
+                .map(|e| pos + e + 8)
+                .unwrap_or(html.len());
+        }
+
+        tables
+    }
+
+    /// Extract cells from a table row.
+    fn extract_table_cells(tr_html: &str, th_only: bool) -> Vec<String> {
+        let mut cells = Vec::new();
+        let tags = if th_only {
+            vec!["th"]
+        } else {
+            vec!["td", "th"]
+        };
+
+        for tag in &tags {
+            let mut pos = 0;
+            while let Some(content) = Self::find_next_tag_content(tr_html, tag, pos) {
+                cells.push(strip_html_tags(&content).trim().to_string());
+                pos = tr_html[pos..]
+                    .find(&format!("</{}>", tag))
+                    .map(|e| pos + e + tag.len() + 3)
+                    .unwrap_or(tr_html.len());
+            }
+        }
+
+        cells
+    }
+
+    /// Extract list items from a ul/ol.
+    fn extract_list_items(list_html: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut pos = 0;
+        while let Some(content) = Self::find_next_tag_content(list_html, "li", pos) {
+            let text = strip_html_tags(&content).trim().to_string();
+            if !text.is_empty() {
+                items.push(text);
+            }
+            pos = list_html[pos..]
+                .find("</li>")
+                .map(|e| pos + e + 4)
+                .unwrap_or(list_html.len());
+        }
+        items
+    }
+
+    /// Find the inner content of the next occurrence of a tag.
+    fn find_next_tag_content(html: &str, tag: &str, start_pos: usize) -> Option<String> {
+        let open = format!("<{}", tag);
+        let close = format!("</{}>", tag);
+        let lower = html.to_lowercase();
+
+        let open_pos = lower[start_pos..].find(&open)? + start_pos;
+        let tag_end = lower[open_pos..].find('>').map(|e| open_pos + e + 1)?;
+        let close_pos = lower[tag_end..]
+            .find(&close.to_lowercase())
+            .map(|e| tag_end + e)?;
+
+        Some(html[tag_end..close_pos].to_string())
+    }
+
+    /// Extract an attribute value from a tag (case-insensitive attr name).
+    fn extract_attr(tag: &str, tag_lower: &str, attr: &str) -> Option<String> {
+        let pattern = format!("{}=\"", attr);
+        let pattern_lower = pattern.to_lowercase();
+        let pos = tag_lower.find(&pattern_lower)?;
+        let val_start = pos + pattern.len();
+        let val_end = tag[val_start..].find('"')?;
+        let val = tag[val_start..val_start + val_end].trim();
+        if val.is_empty() {
+            None
+        } else {
+            Some(val.to_string())
+        }
+    }
+
+    /// Extract language from a code tag's class attribute.
+    fn extract_code_language(code_html: &str) -> Option<String> {
+        let lower = code_html.to_lowercase();
+        let class_val = Self::extract_attr(code_html, &lower, "class")?;
+        // Common patterns: "language-rust", "lang-python", "highlight-ruby"
+        for prefix in &["language-", "lang-", "highlight-"] {
+            if let Some(lang) = class_val.strip_prefix(prefix) {
+                return Some(lang.to_string());
+            }
+            // Also check lowercase
+            if let Some(lang) = class_val.to_lowercase().strip_prefix(prefix) {
+                return Some(lang.to_string());
+            }
+        }
+        Some(class_val)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTML parsing utilities
 // ---------------------------------------------------------------------------
 
@@ -394,12 +873,20 @@ struct ParsedHtml {
     images: Vec<String>,
 }
 
-/// Parse HTML content with simple regex-free extraction.
+/// Parse HTML content with readability extraction + fallback.
 fn parse_html(html: &str) -> ParsedHtml {
     let title = extract_tag_content(html, "title").unwrap_or_default();
     let links = extract_attribute_values(html, "a", "href");
     let images = extract_attribute_values(html, "img", "src");
-    let text = strip_html_tags(html);
+
+    // Use readability extractor for structured content
+    let readability = ReadabilityExtractor::extract(html, "");
+    let text = if readability.content_blocks.is_empty() && readability.tables.is_empty() {
+        // Fallback to plain tag stripping when no structured content found
+        strip_html_tags(html)
+    } else {
+        readability.to_plain_text()
+    };
 
     ParsedHtml {
         title,
@@ -1005,5 +1492,296 @@ mod tests {
     fn static_browser_executor_type_exists() {
         // Verify the type compiles and can be instantiated
         let _executor = StaticHtmlBrowserExecutor::new(ts());
+    }
+
+    // ---- ReadabilityExtractor tests (PR 54) ----
+
+    #[test]
+    fn readability_result_roundtrips() {
+        let result = ReadabilityResult {
+            title: "Test Article".to_string(),
+            lead_image: Some("https://example.com/img.png".to_string()),
+            content_blocks: vec![
+                ContentBlock::Heading {
+                    level: 1,
+                    text: "Main Title".to_string(),
+                },
+                ContentBlock::Paragraph {
+                    text: "Some body text.".to_string(),
+                },
+            ],
+            tables: vec![],
+            byline: Some("Author Name".to_string()),
+            site_name: Some("Example Site".to_string()),
+            language: Some("en".to_string()),
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let decoded: ReadabilityResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn content_block_variants_roundtrip() {
+        let blocks = vec![
+            ContentBlock::Paragraph {
+                text: "para".to_string(),
+            },
+            ContentBlock::Heading {
+                level: 2,
+                text: "heading".to_string(),
+            },
+            ContentBlock::Image {
+                src: "img.png".to_string(),
+                alt: Some("alt".to_string()),
+            },
+            ContentBlock::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "fn main() {}".to_string(),
+            },
+            ContentBlock::List {
+                ordered: true,
+                items: vec!["a".to_string(), "b".to_string()],
+            },
+            ContentBlock::BlockQuote {
+                text: "quoted".to_string(),
+            },
+        ];
+
+        let json = serde_json::to_string_pretty(&blocks).unwrap();
+        let decoded: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, blocks);
+    }
+
+    #[test]
+    fn extracted_table_roundtrips() {
+        let table = ExtractedTable {
+            headers: vec!["Name".to_string(), "Age".to_string()],
+            rows: vec![
+                vec!["Alice".to_string(), "30".to_string()],
+                vec!["Bob".to_string(), "25".to_string()],
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&table).unwrap();
+        let decoded: ExtractedTable = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, table);
+    }
+
+    #[test]
+    fn extract_from_article_html() {
+        let html = r#"<html lang="en">
+            <head>
+                <title>Test Article</title>
+                <meta property="og:title" content="The Real Title">
+                <meta property="og:image" content="https://example.com/hero.jpg">
+            </head>
+            <body>
+                <article>
+                    <h1>The Real Title</h1>
+                    <p>First paragraph of the article.</p>
+                    <h2>Section One</h2>
+                    <p>Second paragraph with <b>bold</b> text.</p>
+                    <img src="photo.jpg" alt="A photo">
+                </article>
+                <footer>Footer content</footer>
+            </body>
+        </html>"#;
+
+        let result = ReadabilityExtractor::extract(html, "https://example.com/article");
+
+        assert_eq!(result.title, "The Real Title");
+        assert_eq!(
+            result.lead_image,
+            Some("https://example.com/hero.jpg".to_string())
+        );
+        assert_eq!(result.language, Some("en".to_string()));
+
+        // Should have heading + paragraphs + image from article
+        let has_h1 = result.content_blocks.iter().any(
+            |b| matches!(b, ContentBlock::Heading { level: 1, text } if text == "The Real Title"),
+        );
+        let has_para1 = result.content_blocks.iter().any(
+            |b| matches!(b, ContentBlock::Paragraph { text } if text.contains("First paragraph")),
+        );
+        let has_para2 = result.content_blocks.iter().any(
+            |b| matches!(b, ContentBlock::Paragraph { text } if text.contains("Second paragraph")),
+        );
+        let has_img = result.content_blocks.iter().any(|b| matches!(b, ContentBlock::Image { src, alt } if src == "photo.jpg" && alt.as_deref() == Some("A photo")));
+
+        assert!(has_h1, "should extract h1");
+        assert!(has_para1, "should extract first paragraph");
+        assert!(has_para2, "should extract second paragraph");
+        assert!(has_img, "should extract image");
+
+        // Footer should NOT be in content blocks (article takes priority)
+        let has_footer = result.content_blocks.iter().any(|b| match b {
+            ContentBlock::Paragraph { text } => text.contains("Footer"),
+            _ => false,
+        });
+        assert!(!has_footer, "footer should not be in article content");
+    }
+
+    #[test]
+    fn extract_from_blog_html() {
+        let html = r#"<html>
+            <head><title>My Blog Post</title></head>
+            <body>
+                <main>
+                    <h1>Blog Title</h1>
+                    <p>Introduction paragraph.</p>
+                    <ul>
+                        <li>Item one</li>
+                        <li>Item two</li>
+                    </ul>
+                    <blockquote>A wise quote.</blockquote>
+                </main>
+                <nav>Sidebar navigation</nav>
+            </body>
+        </html>"#;
+
+        let result = ReadabilityExtractor::extract(html, "https://blog.example.com/post");
+
+        assert_eq!(result.title, "My Blog Post");
+
+        let has_list = result
+            .content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::List { ordered: false, items } if items.len() == 2));
+        let has_quote = result
+            .content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::BlockQuote { text } if text == "A wise quote."));
+
+        assert!(has_list, "should extract unordered list");
+        assert!(has_quote, "should extract blockquote");
+    }
+
+    #[test]
+    fn extract_fallback_to_plain_text() {
+        // HTML with no article/main/body structure worth extracting
+        let html = r#"<html><head><title>Empty</title></head><body><div>Just some text</div></body></html>"#;
+
+        let result = ReadabilityExtractor::extract(html, "");
+
+        assert_eq!(result.title, "Empty");
+        // Should still produce content blocks from body
+        // div content is not directly extracted as p/h, so content_blocks may be empty
+        // but to_plain_text should still work
+        let plain = result.to_plain_text();
+        assert!(plain.contains("Empty"));
+    }
+
+    #[test]
+    fn extract_handles_empty_html() {
+        let result = ReadabilityExtractor::extract("", "");
+
+        assert!(result.title.is_empty());
+        assert!(result.content_blocks.is_empty());
+        assert!(result.tables.is_empty());
+        assert!(result.to_plain_text().is_empty());
+    }
+
+    #[test]
+    fn extract_preserves_image_urls() {
+        let html = r#"<html><head><title>T</title></head>
+            <body>
+                <article>
+                    <p>Text</p>
+                    <img src="https://cdn.example.com/photo.jpg" alt="Photo">
+                    <img src="data:image/png;base64,abc" alt="inline">
+                </article>
+            </body>
+        </html>"#;
+
+        let result = ReadabilityExtractor::extract(html, "");
+
+        let real_img = result.content_blocks.iter().find(
+            |b| matches!(b, ContentBlock::Image { src, .. } if src.contains("cdn.example.com")),
+        );
+        assert!(real_img.is_some(), "should extract real image URL");
+
+        let data_img = result
+            .content_blocks
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Image { src, .. } if src.starts_with("data:")));
+        assert!(data_img.is_none(), "should skip data: URIs");
+    }
+
+    #[test]
+    fn extract_preserves_table_structure() {
+        let html = r#"<html><head><title>T</title></head>
+            <body>
+                <article>
+                    <table>
+                        <thead><tr><th>Name</th><th>Score</th></tr></thead>
+                        <tbody>
+                            <tr><td>Alice</td><td>95</td></tr>
+                            <tr><td>Bob</td><td>87</td></tr>
+                        </tbody>
+                    </table>
+                </article>
+            </body>
+        </html>"#;
+
+        let result = ReadabilityExtractor::extract(html, "");
+
+        assert_eq!(result.tables.len(), 1, "should extract one table");
+        let table = &result.tables[0];
+        assert_eq!(table.headers, vec!["Name", "Score"]);
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0], vec!["Alice", "95"]);
+        assert_eq!(table.rows[1], vec!["Bob", "87"]);
+    }
+
+    #[test]
+    fn extract_table_in_plain_text() {
+        let table = ExtractedTable {
+            headers: vec!["A".to_string(), "B".to_string()],
+            rows: vec![vec!["1".to_string(), "2".to_string()]],
+        };
+        let result = ReadabilityResult {
+            title: "T".to_string(),
+            lead_image: None,
+            content_blocks: vec![],
+            tables: vec![table],
+            byline: None,
+            site_name: None,
+            language: None,
+        };
+
+        let plain = result.to_plain_text();
+        assert!(plain.contains("A | B"));
+        assert!(plain.contains("1 | 2"));
+    }
+
+    #[test]
+    fn static_html_executor_uses_readability_text() {
+        // Verify that StaticHtmlBrowserExecutor's parse_html uses ReadabilityExtractor
+        let html = r#"<html><head><title>Test</title></head>
+            <body>
+                <article>
+                    <h1>Title</h1>
+                    <p>Article content.</p>
+                </article>
+                <nav>Navigation noise</nav>
+            </body>
+        </html>"#;
+
+        let parsed = parse_html(html);
+
+        assert_eq!(parsed.title, "Test");
+        assert!(
+            parsed.text.contains("Title"),
+            "should contain article heading"
+        );
+        assert!(
+            parsed.text.contains("Article content"),
+            "should contain article paragraph"
+        );
+        assert!(
+            !parsed.text.contains("Navigation noise"),
+            "should not contain nav content"
+        );
     }
 }
