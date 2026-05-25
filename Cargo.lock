@@ -590,6 +590,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enterprise-permission-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "entity-core"
 version = "0.1.0"
 dependencies = [

@@ -32,6 +32,7 @@ members = [
     "crates/person-entity",
     "crates/relationship-core",
     "crates/people-intelligence",
+    "crates/enterprise-permission-core",
 ]
 resolver = "2"
 

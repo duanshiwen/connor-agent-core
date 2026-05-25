@@ -277,6 +277,7 @@ pub enum PeopleIntelligenceError {
 mod tests {
     use super::*;
     use person_entity::{EvidenceSource, ProfileEvidence};
+    use relationship_core::RelationshipKind;
 
     fn ts() -> DateTime<Utc> {
         "2026-05-25T12:00:00Z".parse().unwrap()
