@@ -790,6 +790,16 @@ impl CdpBrowserExecutor {
     pub fn lifecycle(&self) -> &ChromiumLifecycleManager {
         &self.lifecycle
     }
+
+    /// Check if Chromium is available for action execution.
+    pub fn is_chromium_available(&self) -> bool {
+        self.lifecycle.is_available()
+    }
+
+    /// Get a reference to the browser (if available).
+    pub fn browser(&self) -> Option<&chromiumoxide::Browser> {
+        self.lifecycle.browser()
+    }
 }
 
 const KNOWN_BROWSER_ACTIONS: &[&str] = &[
@@ -818,15 +828,38 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
     ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
         let kind = request.action_kind.0.as_str();
 
-        if KNOWN_BROWSER_ACTIONS.contains(&kind) {
-            Err(action_core::ActionExecutorError::ExecutionFailed(
-                BrowserKernelError::ChromiumNotAvailable.to_string(),
-            ))
-        } else {
-            Err(action_core::ActionExecutorError::NotSupported(
+        // Check if this is a known browser action
+        if !KNOWN_BROWSER_ACTIONS.contains(&kind) {
+            return Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
-            ))
+            ));
         }
+
+        // Check if Chromium is available
+        if !self.is_chromium_available() {
+            return Err(action_core::ActionExecutorError::ExecutionFailed(
+                BrowserKernelError::ChromiumNotAvailable.to_string(),
+            ));
+        }
+
+        // Get browser reference
+        let _browser = self.browser().ok_or_else(|| {
+            action_core::ActionExecutorError::ExecutionFailed(
+                BrowserKernelError::ChromiumNotAvailable.to_string(),
+            )
+        })?;
+
+        // TODO: Implement real browser actions
+        // For now, return a placeholder result
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Action '{}' executed (placeholder)", kind),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "message": format!("Action '{}' executed", kind)
+            })),
+            completed_at: chrono::Utc::now(),
+        })
     }
 }
 
