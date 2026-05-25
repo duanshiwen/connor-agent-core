@@ -862,6 +862,130 @@ impl ReadabilityExtractor {
 }
 
 // ---------------------------------------------------------------------------
+// Dual-Path Browser Router (PR 55)
+// ---------------------------------------------------------------------------
+
+/// Describes the user's intent for a web page.
+///
+/// This drives routing decisions: informational pages use fast static HTML
+/// extraction, while interactive pages need a real browser (CDP).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageIntent {
+    /// Read-only: extract text, summarize, compare.
+    Informational,
+    /// Needs JS rendering, form filling, clicking, scrolling.
+    Interactive,
+    /// Let the router decide based on URL heuristics.
+    Auto,
+}
+
+impl Default for PageIntent {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// The routing decision for a page.
+///
+/// This is the output of `BrowserRouter::route()` — the caller uses it
+/// to dispatch to the appropriate executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRouteDecision {
+    /// Use StaticHtmlBrowserExecutor (HTTP fetch + readability).
+    StaticHtml,
+    /// Use CdpBrowserExecutor (Chromium + CDP).
+    CdpBrowser,
+}
+
+/// Heuristic router that decides which browser executor to use.
+///
+/// The router does NOT own executors — it only produces a `BrowserRouteDecision`.
+/// The caller is responsible for dispatching to the correct executor.
+pub struct BrowserRouter;
+
+impl BrowserRouter {
+    /// Route a page to the appropriate executor based on intent and URL.
+    pub fn route(url: &str, intent: &PageIntent) -> BrowserRouteDecision {
+        match intent {
+            PageIntent::Informational => BrowserRouteDecision::StaticHtml,
+            PageIntent::Interactive => BrowserRouteDecision::CdpBrowser,
+            PageIntent::Auto => Self::auto_route(url),
+        }
+    }
+
+    /// Auto-route based on URL heuristics.
+    ///
+    /// Heuristics:
+    /// - Known SPA/login domains → CdpBrowser
+    /// - Static content domains (Wikipedia, docs) → StaticHtml
+    /// - Default → StaticHtml (fast, safe default)
+    fn auto_route(url: &str) -> BrowserRouteDecision {
+        let lower = url.to_lowercase();
+
+        // SPA-heavy sites that need JS rendering
+        let cdp_indicators = [
+            ".app.",
+            "app.",
+            "dashboard.",
+            "console.",
+            "admin.",
+            "/login",
+            "/signin",
+            "/signup",
+            "/register",
+            "/auth",
+            "twitter.com",
+            "x.com",
+            "facebook.com",
+            "instagram.com",
+            "linkedin.com",
+            "gmail.com",
+            "outlook.com",
+            "notion.so",
+            "figma.com",
+            "slack.com",
+            "discord.com",
+            "vercel.com",
+            "netlify.com",
+            "github.com/login",
+            "gitlab.com/login",
+        ];
+
+        for indicator in &cdp_indicators {
+            if lower.contains(indicator) {
+                return BrowserRouteDecision::CdpBrowser;
+            }
+        }
+
+        // Content-heavy sites that work well with static HTML
+        let static_indicators = [
+            "wikipedia.org",
+            "docs.",
+            "/wiki/",
+            "/blog/",
+            "/article/",
+            "/post/",
+            "medium.com",
+            "arxiv.org",
+            "stackoverflow.com",
+            "news.ycombinator.com",
+            "reddit.com/r/", // subreddit pages are readable without JS
+        ];
+
+        for indicator in &static_indicators {
+            if lower.contains(indicator) {
+                return BrowserRouteDecision::StaticHtml;
+            }
+        }
+
+        // Default: static HTML (fast, safe)
+        BrowserRouteDecision::StaticHtml
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTML parsing utilities
 // ---------------------------------------------------------------------------
 
@@ -1783,5 +1907,129 @@ mod tests {
             !parsed.text.contains("Navigation noise"),
             "should not contain nav content"
         );
+    }
+
+    // ---- Dual-Path Browser Router tests (PR 55) ----
+
+    #[test]
+    fn page_intent_default_is_auto() {
+        let intent = PageIntent::default();
+        assert_eq!(intent, PageIntent::Auto);
+    }
+
+    #[test]
+    fn page_intent_serializes_correctly() {
+        let cases = vec![
+            (PageIntent::Informational, "\"informational\""),
+            (PageIntent::Interactive, "\"interactive\""),
+            (PageIntent::Auto, "\"auto\""),
+        ];
+        for (intent, expected) in cases {
+            let json = serde_json::to_string(&intent).unwrap();
+            assert_eq!(json, expected);
+            let decoded: PageIntent = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, intent);
+        }
+    }
+
+    #[test]
+    fn browser_route_decision_serializes() {
+        let cases = vec![
+            BrowserRouteDecision::StaticHtml,
+            BrowserRouteDecision::CdpBrowser,
+        ];
+        for decision in cases {
+            let json = serde_json::to_string(&decision).unwrap();
+            let decoded: BrowserRouteDecision = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, decision);
+        }
+    }
+
+    #[test]
+    fn router_informational_always_static() {
+        let urls = vec![
+            "https://example.com",
+            "https://twitter.com/home",
+            "https://gmail.com",
+        ];
+        for url in urls {
+            let decision = BrowserRouter::route(url, &PageIntent::Informational);
+            assert_eq!(
+                decision,
+                BrowserRouteDecision::StaticHtml,
+                "Informational should always route to StaticHtml for {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn router_interactive_always_cdp() {
+        let urls = vec![
+            "https://example.com",
+            "https://wikipedia.org/wiki/Rust",
+            "https://docs.rs/some-crate",
+        ];
+        for url in urls {
+            let decision = BrowserRouter::route(url, &PageIntent::Interactive);
+            assert_eq!(
+                decision,
+                BrowserRouteDecision::CdpBrowser,
+                "Interactive should always route to CdpBrowser for {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn router_auto_spa_sites_route_to_cdp() {
+        let spa_urls = vec![
+            "https://twitter.com/home",
+            "https://gmail.com/inbox",
+            "https://app.example.com/dashboard",
+            "https://notion.so/my-page",
+            "https://figma.com/design/abc",
+            "https://example.com/login",
+            "https://example.com/auth/callback",
+        ];
+        for url in spa_urls {
+            let decision = BrowserRouter::route(url, &PageIntent::Auto);
+            assert_eq!(
+                decision,
+                BrowserRouteDecision::CdpBrowser,
+                "SPA site should route to CdpBrowser: {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn router_auto_content_sites_route_to_static() {
+        let static_urls = vec![
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "https://docs.rs/tokio/latest/tokio",
+            "https://medium.com/@user/my-article",
+            "https://arxiv.org/abs/2301.00001",
+            "https://stackoverflow.com/questions/12345",
+            "https://example.com/blog/my-post",
+            "https://example.com/article/tech-news",
+            "https://news.ycombinator.com/item?id=12345",
+            "https://reddit.com/r/rust/comments/abc",
+        ];
+        for url in static_urls {
+            let decision = BrowserRouter::route(url, &PageIntent::Auto);
+            assert_eq!(
+                decision,
+                BrowserRouteDecision::StaticHtml,
+                "Content site should route to StaticHtml: {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn router_auto_unknown_url_defaults_to_static() {
+        let decision = BrowserRouter::route("https://some-random-blog.com/post", &PageIntent::Auto);
+        assert_eq!(decision, BrowserRouteDecision::StaticHtml);
     }
 }
