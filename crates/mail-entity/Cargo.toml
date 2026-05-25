@@ -1,0 +1,19 @@
+[package]
+name = "mail-entity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Mail entity domain model, action schemas, and fake executor for AgentOS."
+
+[dependencies]
+action-core = { path = "../action-core" }
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+capability-policy = { path = "../capability-policy" }
+tokio.workspace = true
