@@ -9,6 +9,7 @@ pub mod kernel;
 pub mod policy;
 pub mod projector;
 pub mod slice_builder;
+pub mod snapshot;
 pub mod state;
 
 pub use commands::{
@@ -25,4 +26,5 @@ pub use kernel::{Clock, ConversationKernel, IdGenerator, UtcClock, UuidGenerator
 pub use policy::{AgentRunReason, ConversationPolicy, RuleBasedPolicy};
 pub use projector::ConversationProjector;
 pub use slice_builder::ConversationSliceBuilder;
+pub use snapshot::{CONVERSATION_SNAPSHOT_VERSION, ConversationProjectionSnapshot};
 pub use state::ConversationState;

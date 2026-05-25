@@ -41,7 +41,7 @@ impl ConversationActionStatus {
 }
 
 /// Projected state for a single action invocation in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationActionState {
     pub action_id: ActionId,
     pub action_kind: ActionKind,

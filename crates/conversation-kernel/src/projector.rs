@@ -1,11 +1,13 @@
 //! Event projector — replays events into `ConversationState`.
 
+use crate::snapshot::ConversationProjectionSnapshot;
 use crate::state::ConversationState;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use asset_core::AssetProcessingStatus;
+use chrono::{DateTime, Utc};
 use conversation_core::{
     AgentRunState, AgentRunStatus, ConversationActionState, ConversationActionStatus,
-    ConversationEvent, ConversationEventEnvelope,
+    ConversationEvent, ConversationEventEnvelope, ConversationId,
 };
 use surface_core::{SurfaceLifecycleStatus, SurfaceState};
 
@@ -20,6 +22,57 @@ impl ConversationProjector {
         let mut state = ConversationState::default();
 
         for envelope in events {
+            Self::apply_event(&mut state, &envelope.event)?;
+        }
+
+        Ok(state)
+    }
+
+    /// Build a versioned projection snapshot from a full event prefix.
+    pub fn snapshot(
+        conversation_id: ConversationId,
+        events: &[ConversationEventEnvelope],
+        created_at: DateTime<Utc>,
+    ) -> Result<ConversationProjectionSnapshot> {
+        for envelope in events {
+            if envelope.conversation_id != conversation_id {
+                bail!(
+                    "projection snapshot: event {} belongs to conversation {}, expected {}",
+                    envelope.event_id.0,
+                    envelope.conversation_id.0,
+                    conversation_id.0
+                );
+            }
+        }
+
+        let state = Self::project(events)?;
+        let last_event_id = events.last().map(|event| event.event_id.clone());
+
+        Ok(ConversationProjectionSnapshot::new(
+            conversation_id,
+            created_at,
+            last_event_id,
+            events.len() as u64,
+            state,
+        ))
+    }
+
+    /// Project tail events starting from an existing projection snapshot.
+    pub fn project_from_snapshot(
+        snapshot: &ConversationProjectionSnapshot,
+        tail_events: &[ConversationEventEnvelope],
+    ) -> Result<ConversationState> {
+        let mut state = snapshot.state.clone();
+
+        for envelope in tail_events {
+            if envelope.conversation_id != snapshot.conversation_id {
+                bail!(
+                    "projection snapshot: tail event {} belongs to conversation {}, expected {}",
+                    envelope.event_id.0,
+                    envelope.conversation_id.0,
+                    snapshot.conversation_id.0
+                );
+            }
             Self::apply_event(&mut state, &envelope.event)?;
         }
 
@@ -406,6 +459,86 @@ mod tests {
         assert_eq!(session.id, ConversationId::from("conv-1"));
         assert_eq!(session.kind, ConversationKind::Direct);
         assert_eq!(session.status, ConversationStatus::Active);
+    }
+
+    #[test]
+    fn snapshot_records_version_and_last_event() {
+        let events = vec![
+            envelope(conversation_created_event()),
+            envelope(participant_added_event("u1", "Test User")),
+        ];
+        let created_at = now();
+
+        let snapshot =
+            ConversationProjector::snapshot(ConversationId::from("conv-1"), &events, created_at)
+                .unwrap();
+
+        assert_eq!(
+            snapshot.snapshot_version,
+            crate::snapshot::CONVERSATION_SNAPSHOT_VERSION
+        );
+        assert_eq!(snapshot.conversation_id, ConversationId::from("conv-1"));
+        assert_eq!(snapshot.created_at, created_at);
+        assert_eq!(snapshot.event_count, events.len() as u64);
+        assert_eq!(
+            snapshot.last_event_id,
+            Some(events.last().unwrap().event_id.clone())
+        );
+        assert_eq!(snapshot.state.participants.len(), 1);
+    }
+
+    #[test]
+    fn project_from_snapshot_matches_full_replay() {
+        let events = vec![
+            envelope(conversation_created_event()),
+            envelope(participant_added_event("u1", "Test User")),
+            envelope(message_appended_event("msg-1", "first", None, None)),
+            envelope(message_appended_event("msg-2", "second", None, None)),
+        ];
+        let snapshot =
+            ConversationProjector::snapshot(ConversationId::from("conv-1"), &events[..2], now())
+                .unwrap();
+
+        let full = ConversationProjector::project(&events).unwrap();
+        let from_snapshot =
+            ConversationProjector::project_from_snapshot(&snapshot, &events[2..]).unwrap();
+
+        assert_eq!(from_snapshot, full);
+    }
+
+    #[test]
+    fn projection_snapshot_serde_roundtrips() {
+        let events = vec![
+            envelope(conversation_created_event()),
+            envelope(participant_added_event("u1", "Test User")),
+            envelope(message_appended_event("msg-1", "first", None, None)),
+        ];
+        let snapshot =
+            ConversationProjector::snapshot(ConversationId::from("conv-1"), &events, now())
+                .unwrap();
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: crate::snapshot::ConversationProjectionSnapshot =
+            serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn project_from_snapshot_rejects_tail_event_for_different_conversation() {
+        let events = vec![envelope(conversation_created_event())];
+        let snapshot =
+            ConversationProjector::snapshot(ConversationId::from("conv-1"), &events, now())
+                .unwrap();
+        let mut tail_event = envelope(message_appended_event("msg-1", "first", None, None));
+        tail_event.conversation_id = ConversationId::from("conv-2");
+
+        let result = ConversationProjector::project_from_snapshot(&snapshot, &[tail_event]);
+
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("snapshot"));
+        assert!(message.contains("conversation"));
     }
 
     #[test]

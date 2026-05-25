@@ -8,11 +8,12 @@ use artifact_core::{ArtifactDescriptor, ArtifactId};
 use asset_core::{AssetId, AssetMetadata, AssetProcessingStatus};
 use conversation_core::*;
 use entity_core::{EntityDescriptor, EntityId};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surface_core::{SurfaceId, SurfaceState};
 
 /// The projected state of a conversation, rebuilt from its event journal.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConversationState {
     /// The conversation session (None until `ConversationCreated` is seen).
     pub session: Option<ConversationSession>,
