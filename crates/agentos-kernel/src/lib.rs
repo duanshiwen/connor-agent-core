@@ -7,6 +7,7 @@
 mod builder;
 mod diagnostics;
 mod error;
+mod host_api;
 mod registries;
 mod runtime;
 mod services;
@@ -17,6 +18,11 @@ pub use diagnostics::{
     StorageManifestDump,
 };
 pub use error::{KernelError, KernelResult};
+pub use host_api::{
+    HostActionDecisionRequest, HostApiError, HostApiResult, HostPendingApproval, HostRunStatus,
+    HostRunStatusResponse, KernelHostApi, StartAgentRunRequest, StartAgentRunResponse,
+    SubmitUserMessageRequest, SubmitUserMessageResponse,
+};
 pub use registries::{
     ActionExecutorRegistry, ConnectorRegistry, ConnectorService, ModelProviderRegistry,
     RepositoryRegistry, RepositoryService,

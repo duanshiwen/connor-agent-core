@@ -72,10 +72,12 @@ name = "agentos-kernel"
 version = "0.1.0"
 dependencies = [
  "action-core",
+ "anyhow",
  "async-trait",
  "audit-log",
  "capability-policy",
  "chrono",
+ "conversation-core",
  "conversation-journal",
  "conversation-kernel",
  "model-adapter",
