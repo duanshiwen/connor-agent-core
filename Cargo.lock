@@ -1422,6 +1422,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "people-intelligence"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "person-entity",
+ "relationship-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -31,6 +31,7 @@ members = [
     "crates/p2p-sync-runtime",
     "crates/person-entity",
     "crates/relationship-core",
+    "crates/people-intelligence",
 ]
 resolver = "2"
 

@@ -1,0 +1,19 @@
+[package]
+name = "people-intelligence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "People Intelligence policy and event types for AgentOS."
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+person-entity = { path = "../person-entity" }
+relationship-core = { path = "../relationship-core" }
+
+[dev-dependencies]
+tokio.workspace = true
