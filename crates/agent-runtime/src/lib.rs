@@ -16,6 +16,7 @@
 
 mod action_store;
 mod approval_queue;
+mod retry_policy;
 mod run_queue;
 mod run_store;
 mod tool_loop_checkpoint;
@@ -28,6 +29,10 @@ pub use approval_queue::{
 pub use action_store::{
     ActionRecord, ActionStore, ActionStoreError, ActionStoreResult, JsonlActionStore,
     MemoryActionStore,
+};
+pub use retry_policy::{
+    DefaultRetryPolicy, RetryBackoffConfig, RetryDecision, RetryErrorClass, RetryPolicy,
+    classify_error_message,
 };
 pub use run_queue::{AgentRunLease, AgentRunQueue, AgentRunQueueError, AgentRunQueueResult};
 pub use run_store::{
