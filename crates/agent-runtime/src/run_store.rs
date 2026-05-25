@@ -279,6 +279,9 @@ fn is_valid_transition(from: &DurableAgentRunStatus, to: &DurableAgentRunStatus)
             DurableAgentRunStatus::TimedOut
         ) | (
             DurableAgentRunStatus::Running,
+            DurableAgentRunStatus::Queued
+        ) | (
+            DurableAgentRunStatus::Running,
             DurableAgentRunStatus::WaitingForApproval
         ) | (
             DurableAgentRunStatus::Running,

@@ -14,8 +14,10 @@
 //!     → kernel.complete_agent_run(run_id)
 //! ```
 
+mod run_queue;
 mod run_store;
 
+pub use run_queue::{AgentRunLease, AgentRunQueue, AgentRunQueueError, AgentRunQueueResult};
 pub use run_store::{
     AgentRunRecord, AgentRunStore, AgentRunStoreError, AgentRunStoreResult, DurableAgentRunStatus,
     JsonlAgentRunStore, MemoryAgentRunStore,
