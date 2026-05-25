@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use conversation_core::{ConversationEventEnvelope, ConversationId};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -31,6 +32,58 @@ const SEGMENTS_DIR: &str = "segments";
 pub struct JsonlConversationJournal {
     root_dir: PathBuf,
     max_segment_bytes: u64,
+}
+
+/// Integrity verification report for a single conversation journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalIntegrityReport {
+    pub conversation_id: ConversationId,
+    pub verified_segments: usize,
+    pub verified_events: u64,
+    pub issues: Vec<JournalIntegrityIssue>,
+}
+
+impl JournalIntegrityReport {
+    pub fn is_clean(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+/// Integrity issue detected while verifying a segmented conversation journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalIntegrityIssue {
+    MissingSegment {
+        file_name: String,
+    },
+    SegmentByteMismatch {
+        file_name: String,
+        expected: u64,
+        actual: u64,
+    },
+    SegmentChecksumMismatch {
+        file_name: String,
+        expected: String,
+        actual: String,
+    },
+    SegmentEventCountMismatch {
+        file_name: String,
+        expected: u64,
+        actual: u64,
+    },
+    TotalEventCountMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    CorruptedEventLine {
+        file_name: String,
+        line_number: u64,
+        message: String,
+    },
+    HashChainMismatch {
+        file_name: String,
+        expected_previous: String,
+        actual_previous: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +101,10 @@ struct SegmentMetadata {
     file_name: String,
     event_count: u64,
     bytes: u64,
+    #[serde(default)]
+    checksum_sha256: Option<String>,
+    #[serde(default)]
+    previous_segment_checksum_sha256: Option<String>,
 }
 
 impl JournalManifest {
@@ -81,6 +138,12 @@ impl JournalManifest {
         self.active_segment_index = next_index;
         self.segments.push(SegmentMetadata::new(next_index));
     }
+
+    fn has_integrity_metadata(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| segment.checksum_sha256.is_some())
+    }
 }
 
 impl SegmentMetadata {
@@ -90,6 +153,8 @@ impl SegmentMetadata {
             file_name: segment_file_name(index),
             event_count: 0,
             bytes: 0,
+            checksum_sha256: None,
+            previous_segment_checksum_sha256: None,
         }
     }
 }
@@ -115,6 +180,108 @@ impl JsonlConversationJournal {
             root_dir: root_dir.into(),
             max_segment_bytes: max_segment_bytes.max(1),
         }
+    }
+
+    /// Verify the integrity of a conversation journal without mutating it.
+    pub async fn verify(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> anyhow::Result<JournalIntegrityReport> {
+        let Some(mut manifest) = self.load_manifest(conversation_id).await? else {
+            return Ok(JournalIntegrityReport {
+                conversation_id: conversation_id.clone(),
+                verified_segments: 0,
+                verified_events: 0,
+                issues: Vec::new(),
+            });
+        };
+
+        manifest.segments.sort_by_key(|segment| segment.index);
+
+        let mut report = JournalIntegrityReport {
+            conversation_id: conversation_id.clone(),
+            verified_segments: 0,
+            verified_events: 0,
+            issues: Vec::new(),
+        };
+        let mut previous_actual_checksum: Option<String> = None;
+
+        for segment in &manifest.segments {
+            let path = self.segment_path(conversation_id, &segment.file_name);
+            if !path.exists() {
+                report.issues.push(JournalIntegrityIssue::MissingSegment {
+                    file_name: segment.file_name.clone(),
+                });
+                previous_actual_checksum = None;
+                continue;
+            }
+
+            let bytes = fs::read(&path).await?;
+            report.verified_segments += 1;
+
+            let actual_bytes = bytes.len() as u64;
+            if actual_bytes != segment.bytes {
+                report
+                    .issues
+                    .push(JournalIntegrityIssue::SegmentByteMismatch {
+                        file_name: segment.file_name.clone(),
+                        expected: segment.bytes,
+                        actual: actual_bytes,
+                    });
+            }
+
+            let actual_checksum = sha256_hex(&bytes);
+            if let Some(expected_checksum) = &segment.checksum_sha256 {
+                if expected_checksum != &actual_checksum {
+                    report
+                        .issues
+                        .push(JournalIntegrityIssue::SegmentChecksumMismatch {
+                            file_name: segment.file_name.clone(),
+                            expected: expected_checksum.clone(),
+                            actual: actual_checksum.clone(),
+                        });
+                }
+            }
+
+            if let Some(expected_previous) = &segment.previous_segment_checksum_sha256 {
+                if Some(expected_previous) != previous_actual_checksum.as_ref() {
+                    report
+                        .issues
+                        .push(JournalIntegrityIssue::HashChainMismatch {
+                            file_name: segment.file_name.clone(),
+                            expected_previous: expected_previous.clone(),
+                            actual_previous: previous_actual_checksum.clone(),
+                        });
+                }
+            }
+
+            let (event_count, parse_issues) = verify_jsonl_event_lines(&segment.file_name, &bytes);
+            report.verified_events += event_count;
+            report.issues.extend(parse_issues);
+
+            if event_count != segment.event_count {
+                report
+                    .issues
+                    .push(JournalIntegrityIssue::SegmentEventCountMismatch {
+                        file_name: segment.file_name.clone(),
+                        expected: segment.event_count,
+                        actual: event_count,
+                    });
+            }
+
+            previous_actual_checksum = Some(actual_checksum);
+        }
+
+        if report.verified_events != manifest.total_events {
+            report
+                .issues
+                .push(JournalIntegrityIssue::TotalEventCountMismatch {
+                    expected: manifest.total_events,
+                    actual: report.verified_events,
+                });
+        }
+
+        Ok(report)
     }
 
     fn conversation_dir(&self, conversation_id: &ConversationId) -> PathBuf {
@@ -241,10 +408,26 @@ impl ConversationJournal for JsonlConversationJournal {
 
         file.write_all(json.as_bytes()).await?;
         file.flush().await?;
+        drop(file);
+
+        let active_index = manifest.active_segment_index;
+        let active_bytes = fs::read(&path).await?;
+        let active_checksum = sha256_hex(&active_bytes);
+        let previous_checksum = if active_index > 0 {
+            manifest
+                .segments
+                .iter()
+                .find(|segment| segment.index + 1 == active_index)
+                .and_then(|segment| segment.checksum_sha256.clone())
+        } else {
+            None
+        };
 
         let active_segment = manifest.active_segment_mut();
         active_segment.event_count += 1;
         active_segment.bytes += line_bytes;
+        active_segment.checksum_sha256 = Some(active_checksum);
+        active_segment.previous_segment_checksum_sha256 = previous_checksum;
         manifest.total_events += 1;
 
         self.save_manifest(&event.conversation_id, &manifest)
@@ -260,6 +443,18 @@ impl ConversationJournal for JsonlConversationJournal {
         let Some(mut manifest) = self.load_manifest(conversation_id).await? else {
             return Ok(Vec::new());
         };
+
+        if manifest.has_integrity_metadata() {
+            let report = self.verify(conversation_id).await?;
+            if !report.is_clean() {
+                anyhow::bail!(
+                    "journal integrity: verification failed for {} with {} issue(s): {:?}",
+                    conversation_id.0,
+                    report.issues.len(),
+                    report.issues
+                );
+            }
+        }
 
         manifest.segments.sort_by_key(|segment| segment.index);
 
@@ -301,6 +496,46 @@ fn segment_file_name(index: u64) -> String {
     format!("{index:020}.jsonl")
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn verify_jsonl_event_lines(file_name: &str, bytes: &[u8]) -> (u64, Vec<JournalIntegrityIssue>) {
+    let mut count = 0;
+    let mut issues = Vec::new();
+
+    for (index, raw_line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let line_number = index as u64 + 1;
+        let line = match std::str::from_utf8(raw_line) {
+            Ok(line) => line.trim(),
+            Err(error) => {
+                issues.push(JournalIntegrityIssue::CorruptedEventLine {
+                    file_name: file_name.to_string(),
+                    line_number,
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+
+        if line.is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<ConversationEventEnvelope>(line) {
+            Ok(_) => count += 1,
+            Err(error) => issues.push(JournalIntegrityIssue::CorruptedEventLine {
+                file_name: file_name.to_string(),
+                line_number,
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    (count, issues)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +560,25 @@ mod tests {
                 },
             },
         }
+    }
+
+    async fn load_manifest_from_dir(dir: &Path, conversation_id: &str) -> JournalManifest {
+        let manifest_path = dir.join(conversation_id).join(MANIFEST_FILE);
+        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
+        serde_json::from_slice(&manifest_bytes).unwrap()
+    }
+
+    async fn save_manifest_to_dir(dir: &Path, conversation_id: &str, manifest: &JournalManifest) {
+        let manifest_path = dir.join(conversation_id).join(MANIFEST_FILE);
+        let bytes = serde_json::to_vec_pretty(manifest).unwrap();
+        fs::write(&manifest_path, bytes).await.unwrap();
+    }
+
+    fn has_issue<F>(report: &JournalIntegrityReport, predicate: F) -> bool
+    where
+        F: Fn(&JournalIntegrityIssue) -> bool,
+    {
+        report.issues.iter().any(predicate)
     }
 
     #[tokio::test]
@@ -448,9 +702,7 @@ mod tests {
         journal.append(make_event("conv-1", "evt-3")).await.unwrap();
 
         // Verify manifest total matches actual loaded events.
-        let manifest_path = dir.path().join("conv-1").join(MANIFEST_FILE);
-        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
-        let manifest: JournalManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
         assert_eq!(manifest.total_events, 3);
 
         // Verify each segment metadata matches actual file.
@@ -510,12 +762,9 @@ mod tests {
         journal.append(make_event("conv-1", "evt-2")).await.unwrap();
 
         // Tamper with manifest to have wrong total_events.
-        let manifest_path = dir.path().join("conv-1").join(MANIFEST_FILE);
-        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
-        let mut manifest: JournalManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
         manifest.total_events = 999; // Wrong!
-        let tampered = serde_json::to_vec_pretty(&manifest).unwrap();
-        fs::write(&manifest_path, &tampered).await.unwrap();
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
 
         // Load should detect the mismatch.
         let result = journal.load(&ConversationId::from("conv-1")).await;
@@ -536,13 +785,196 @@ mod tests {
         journal.append(make_event("conv-1", "evt-1")).await.unwrap();
         journal.append(make_event("conv-1", "evt-2")).await.unwrap();
 
-        let manifest_path = dir.path().join("conv-1").join(MANIFEST_FILE);
-        let manifest_bytes = fs::read(manifest_path).await.unwrap();
-        let manifest: JournalManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
 
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.total_events, 2);
         assert_eq!(manifest.segments.len(), 2);
         assert_eq!(manifest.active_segment_index, 1);
+    }
+
+    #[tokio::test]
+    async fn verify_clean_journal_returns_no_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+        let conversation_id = ConversationId::from("conv-1");
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-3")).await.unwrap();
+
+        let report = journal.verify(&conversation_id).await.unwrap();
+
+        assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
+        assert_eq!(report.verified_events, 3);
+        assert!(report.verified_segments >= 1);
+    }
+
+    #[tokio::test]
+    async fn manifest_records_segment_checksum_after_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::with_max_segment_bytes(dir.path(), 1);
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        let manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        assert!(manifest.segments.len() >= 2);
+        for segment in &manifest.segments {
+            let checksum = segment
+                .checksum_sha256
+                .as_ref()
+                .expect("segment checksum should be recorded");
+            assert_eq!(checksum.len(), 64);
+        }
+        assert!(
+            manifest.segments[1]
+                .previous_segment_checksum_sha256
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_detects_segment_checksum_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+        let conversation_id = ConversationId::from("conv-1");
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+
+        let seg_path = dir
+            .path()
+            .join("conv-1")
+            .join(SEGMENTS_DIR)
+            .join("00000000000000000000.jsonl");
+        let mut content = fs::read(&seg_path).await.unwrap();
+        content[0] = if content[0] == b'{' { b' ' } else { b'{' };
+        fs::write(&seg_path, &content).await.unwrap();
+
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        manifest.segments[0].bytes = content.len() as u64;
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
+
+        let report = journal.verify(&conversation_id).await.unwrap();
+        assert!(has_issue(&report, |issue| matches!(
+            issue,
+            JournalIntegrityIssue::SegmentChecksumMismatch { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn verify_detects_missing_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::with_max_segment_bytes(dir.path(), 1);
+        let conversation_id = ConversationId::from("conv-1");
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        let seg_path = dir
+            .path()
+            .join("conv-1")
+            .join(SEGMENTS_DIR)
+            .join("00000000000000000001.jsonl");
+        fs::remove_file(seg_path).await.unwrap();
+
+        let report = journal.verify(&conversation_id).await.unwrap();
+        assert!(has_issue(&report, |issue| matches!(
+            issue,
+            JournalIntegrityIssue::MissingSegment { file_name } if file_name == "00000000000000000001.jsonl"
+        )));
+    }
+
+    #[tokio::test]
+    async fn verify_detects_segment_event_count_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+        let conversation_id = ConversationId::from("conv-1");
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        manifest.segments[0].event_count = 999;
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
+
+        let report = journal.verify(&conversation_id).await.unwrap();
+        assert!(has_issue(&report, |issue| matches!(
+            issue,
+            JournalIntegrityIssue::SegmentEventCountMismatch {
+                expected: 999,
+                actual: 2,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn verify_detects_hash_chain_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::with_max_segment_bytes(dir.path(), 1);
+        let conversation_id = ConversationId::from("conv-1");
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        manifest.segments[1].previous_segment_checksum_sha256 = Some("0".repeat(64));
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
+
+        let report = journal.verify(&conversation_id).await.unwrap();
+        assert!(has_issue(&report, |issue| matches!(
+            issue,
+            JournalIntegrityIssue::HashChainMismatch { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_checksum_mismatch_for_integrity_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+
+        let seg_path = dir
+            .path()
+            .join("conv-1")
+            .join(SEGMENTS_DIR)
+            .join("00000000000000000000.jsonl");
+        let mut content = fs::read(&seg_path).await.unwrap();
+        content[0] = if content[0] == b'{' { b' ' } else { b'{' };
+        fs::write(&seg_path, &content).await.unwrap();
+
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        manifest.segments[0].bytes = content.len() as u64;
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
+
+        let result = journal.load(&ConversationId::from("conv-1")).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("journal integrity")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_manifest_without_checksum_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = JsonlConversationJournal::new(dir.path());
+
+        journal.append(make_event("conv-1", "evt-1")).await.unwrap();
+        journal.append(make_event("conv-1", "evt-2")).await.unwrap();
+
+        let mut manifest = load_manifest_from_dir(dir.path(), "conv-1").await;
+        for segment in &mut manifest.segments {
+            segment.checksum_sha256 = None;
+            segment.previous_segment_checksum_sha256 = None;
+        }
+        save_manifest_to_dir(dir.path(), "conv-1", &manifest).await;
+
+        let loaded = journal.load(&ConversationId::from("conv-1")).await.unwrap();
+        assert_eq!(loaded.len(), 2);
     }
 }

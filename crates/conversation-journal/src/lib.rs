@@ -6,7 +6,7 @@
 pub mod jsonl;
 pub mod memory;
 
-pub use jsonl::JsonlConversationJournal;
+pub use jsonl::{JournalIntegrityIssue, JournalIntegrityReport, JsonlConversationJournal};
 pub use memory::MemoryConversationJournal;
 
 use async_trait::async_trait;
