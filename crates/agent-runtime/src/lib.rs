@@ -16,11 +16,18 @@
 
 mod run_queue;
 mod run_store;
+mod tool_loop_checkpoint;
 
 pub use run_queue::{AgentRunLease, AgentRunQueue, AgentRunQueueError, AgentRunQueueResult};
 pub use run_store::{
     AgentRunRecord, AgentRunStore, AgentRunStoreError, AgentRunStoreResult, DurableAgentRunStatus,
     JsonlAgentRunStore, MemoryAgentRunStore,
+};
+
+pub use tool_loop_checkpoint::{
+    MemoryToolLoopCheckpointStore, ToolLoopCheckpoint, ToolLoopCheckpointError,
+    ToolLoopCheckpointKind, ToolLoopCheckpointResult, ToolLoopCheckpointStore, ToolLoopResumePlan,
+    ToolResultCheckpoint,
 };
 
 use action_core::{ActionId, ActionKind, ActionRequest};
@@ -793,9 +800,36 @@ pub struct AgentToolLoop;
 
 impl AgentToolLoop {
     pub async fn run(req: ToolLoopRequest<'_>) -> ToolLoopOutcome {
+        Self::run_inner(req, None).await
+    }
+
+    pub async fn run_with_checkpoints(
+        req: ToolLoopRequest<'_>,
+        checkpoint_store: &dyn ToolLoopCheckpointStore,
+    ) -> ToolLoopOutcome {
+        Self::run_inner(req, Some(checkpoint_store)).await
+    }
+
+    async fn run_inner(
+        req: ToolLoopRequest<'_>,
+        checkpoint_store: Option<&dyn ToolLoopCheckpointStore>,
+    ) -> ToolLoopOutcome {
         let mut turns_used: u32 = 0;
         let mut tool_calls_made: u32 = 0;
         let mut current_request = req.initial_request;
+        let resume_plan = if let Some(store) = checkpoint_store {
+            match store.list(req.run_id).await {
+                Ok(checkpoints) => ToolLoopResumePlan::from_checkpoints(checkpoints),
+                Err(e) => {
+                    return ToolLoopOutcome::Failed {
+                        error: format!("checkpoint load failed: {e}"),
+                        turns_used: 0,
+                    };
+                }
+            }
+        } else {
+            ToolLoopResumePlan::default()
+        };
 
         loop {
             turns_used += 1;
@@ -805,6 +839,20 @@ impl AgentToolLoop {
                     last_tool_calls: vec![],
                     turns_used: turns_used - 1,
                 };
+            }
+
+            if let Some(store) = checkpoint_store {
+                if let Err(e) = store
+                    .append(ToolLoopCheckpoint::before_model_call(
+                        req.run_id, turns_used,
+                    ))
+                    .await
+                {
+                    return ToolLoopOutcome::Failed {
+                        error: format!("checkpoint write failed: {e}"),
+                        turns_used: turns_used - 1,
+                    };
+                }
             }
 
             let output = match req
@@ -825,6 +873,18 @@ impl AgentToolLoop {
                 }
             };
 
+            if let Some(store) = checkpoint_store {
+                if let Err(e) = store
+                    .append(ToolLoopCheckpoint::after_model_call(req.run_id, turns_used))
+                    .await
+                {
+                    return ToolLoopOutcome::Failed {
+                        error: format!("checkpoint write failed: {e}"),
+                        turns_used: turns_used - 1,
+                    };
+                }
+            }
+
             match output {
                 ModelOutput::Text { text, .. } => {
                     return ToolLoopOutcome::Completed {
@@ -842,7 +902,13 @@ impl AgentToolLoop {
                     let mut tool_results: Vec<(String, String)> = Vec::new();
 
                     for tc in &tool_calls {
-                        tool_calls_made += 1;
+                        if resume_plan.should_skip_tool_call(&tc.id) {
+                            if let Some(result) = resume_plan.completed_tool_result(&tc.id) {
+                                tool_results.push((tc.id.clone(), result.to_string()));
+                                continue;
+                            }
+                        }
+
                         let action_request = match req.mapper.map_to_action_request(
                             tc,
                             req.run_id,
@@ -854,6 +920,9 @@ impl AgentToolLoop {
                                 continue;
                             }
                         };
+                        tool_calls_made += 1;
+                        let action_id = action_request.action_id.to_string();
+                        let read_only = is_read_only_tool_action(&action_request.action_kind.0);
 
                         let outcome = match req
                             .action_runtime
@@ -886,6 +955,27 @@ impl AgentToolLoop {
                                 ..
                             } => format!("failed ({action_id}): {error_message}"),
                         };
+
+                        if let Some(store) = checkpoint_store {
+                            if let Err(e) = store
+                                .append(ToolLoopCheckpoint::tool_result(
+                                    req.run_id,
+                                    turns_used,
+                                    ToolResultCheckpoint {
+                                        tool_call_id: tc.id.clone(),
+                                        action_id,
+                                        result_text: result_text.clone(),
+                                        read_only,
+                                    },
+                                ))
+                                .await
+                            {
+                                return ToolLoopOutcome::Failed {
+                                    error: format!("checkpoint write failed: {e}"),
+                                    turns_used: turns_used - 1,
+                                };
+                            }
+                        }
                         tool_results.push((tc.id.clone(), result_text));
                     }
 
@@ -924,6 +1014,14 @@ impl AgentToolLoop {
             }
         }
     }
+}
+
+fn is_read_only_tool_action(action_kind: &str) -> bool {
+    action_kind.contains(".search")
+        || action_kind.contains(".read")
+        || action_kind.contains(".list")
+        || action_kind.contains(".get")
+        || action_kind.contains(".fetch")
 }
 
 #[cfg(test)]
@@ -2463,6 +2561,60 @@ mod tests {
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
                 response_text, turns_used: 1, tool_calls_made: 1
             } if response_text == "Found it!"));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_checkpoint_resume_skips_completed_read_only_tool_result() {
+        let checkpoint_store = MemoryToolLoopCheckpointStore::new();
+        checkpoint_store
+            .append(ToolLoopCheckpoint::tool_result(
+                "run-resume",
+                1,
+                ToolResultCheckpoint {
+                    tool_call_id: "call_001".to_string(),
+                    action_id: "run-resume-call_001".to_string(),
+                    result_text: "cached result".to_string(),
+                    read_only: true,
+                },
+            ))
+            .await
+            .unwrap();
+        let adapter = FakeToolAdapter::new(vec![
+            ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_001".into(),
+                    name: "knowledge.search".into(),
+                    arguments: serde_json::json!({"q": "test"}),
+                    raw_arguments: r#"{"q":"test"}"#.into(),
+                }],
+                usage: None,
+            },
+            ModelOutput::Text {
+                text: "Used cached result".to_string(),
+                usage: None,
+            },
+        ]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run_with_checkpoints(
+                ToolLoopRequest {
+                    adapter: &adapter,
+                    action_runtime: &rt,
+                    mapper: &TestMapper,
+                    config: &ToolLoopConfig::default(),
+                    initial_request: ModelRequest::new("test", vec![ModelMessage::user("search")]),
+                    tools: vec![],
+                    tool_choice: ToolChoice::Auto,
+                    run_id: "run-resume",
+                    conversation_id: "conv-resume",
+                },
+                &checkpoint_store,
+            )
+            .await;
+            assert!(matches!(outcome, ToolLoopOutcome::Completed {
+                response_text, turns_used: 1, tool_calls_made: 0
+            } if response_text == "Used cached result"));
         });
     }
 
