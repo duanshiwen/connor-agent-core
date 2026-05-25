@@ -14,6 +14,13 @@
 //!     → kernel.complete_agent_run(run_id)
 //! ```
 
+mod run_store;
+
+pub use run_store::{
+    AgentRunRecord, AgentRunStore, AgentRunStoreError, AgentRunStoreResult, DurableAgentRunStatus,
+    JsonlAgentRunStore, MemoryAgentRunStore,
+};
+
 use action_core::{ActionId, ActionKind, ActionRequest};
 use action_runtime::{ActionRuntime, ActionRuntimeOutcome, ProcessActionRequest};
 use anyhow::{Context, Result};
