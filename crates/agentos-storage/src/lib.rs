@@ -1,11 +1,18 @@
 //! AgentOS durable storage layout primitives.
 
+pub mod migration;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use migration::{
+    MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
+    StorageMigration, StorageMigrationRegistry,
+};
 
 pub const STORAGE_LAYOUT_VERSION: u32 = 1;
 
@@ -41,6 +48,25 @@ pub enum StorageError {
 
     #[error("unsupported storage version {found}, expected {expected}")]
     UnsupportedVersion { found: u32, expected: u32 },
+
+    #[error("duplicate storage migration {from_version} -> {to_version}")]
+    DuplicateMigration { from_version: u32, to_version: u32 },
+
+    #[error("invalid storage migration {name}: {from_version} -> {to_version}")]
+    InvalidMigration {
+        name: String,
+        from_version: u32,
+        to_version: u32,
+    },
+
+    #[error("storage migration path not found from {from_version} to {target_version}")]
+    MigrationPathNotFound {
+        from_version: u32,
+        target_version: u32,
+    },
+
+    #[error("storage migration {name} failed: {message}")]
+    MigrationFailed { name: String, message: String },
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -136,7 +162,7 @@ fn create_dir_all(path: impl AsRef<Path>) -> StorageResult<()> {
     })
 }
 
-fn read_manifest(path: &Path) -> StorageResult<StorageManifest> {
+pub(crate) fn read_manifest(path: &Path) -> StorageResult<StorageManifest> {
     let bytes = fs::read(path).map_err(|source| StorageError::Io {
         path: path.to_path_buf(),
         source,
@@ -147,7 +173,7 @@ fn read_manifest(path: &Path) -> StorageResult<StorageManifest> {
     })
 }
 
-fn write_manifest(path: &Path, manifest: &StorageManifest) -> StorageResult<()> {
+pub(crate) fn write_manifest(path: &Path, manifest: &StorageManifest) -> StorageResult<()> {
     let bytes =
         serde_json::to_vec_pretty(manifest).map_err(|source| StorageError::ManifestSerde {
             path: path.to_path_buf(),
