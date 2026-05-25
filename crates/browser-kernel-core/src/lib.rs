@@ -434,19 +434,23 @@ impl CdpBrowserConfig {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors produced by browser-kernel-core validation and skeleton runtime paths.
+/// Errors produced by browser-kernel-core validation and runtime paths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BrowserKernelError {
     #[error("element selector cannot be empty")]
     EmptySelector,
     #[error("form fill spec must contain at least one field")]
     EmptyForm,
+    #[error("url cannot be empty")]
+    EmptyUrl,
     #[error("invalid browser config: {0}")]
     InvalidConfig(String),
-    #[error("chromium browser is not available in skeleton executor")]
+    #[error("chromium browser is not available")]
     ChromiumNotAvailable,
     #[error("unsupported browser action: {0}")]
     UnsupportedAction(String),
+    #[error("browser action failed: {0}")]
+    ActionFailed(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -771,12 +775,25 @@ impl Drop for ChromiumLifecycleManager {
 // CDP browser executor skeleton
 // ---------------------------------------------------------------------------
 
-/// Skeleton CDP browser executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserOpenUrlInput {
+    url: String,
+    #[serde(default)]
+    take_snapshot: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserExtractContentInput {
+    url: String,
+}
+
+/// Real CDP browser executor.
 ///
-/// This executor implements [`ActionExecutor`] but always returns
-/// [`ActionExecutorError::ExecutionFailed`] for known browser actions
-/// because no real Chromium process is connected. Unknown action kinds
-/// return [`ActionExecutorError::NotSupported`].
+/// This executor implements [`ActionExecutor`] for browser actions backed by a
+/// live `chromiumoxide::Browser` when Chromium has been launched or connected.
+/// Unknown action kinds return [`ActionExecutorError::NotSupported`]. Known
+/// actions still return [`ActionExecutorError::ExecutionFailed`] when Chromium
+/// is not available.
 #[derive(Debug)]
 pub struct CdpBrowserExecutor {
     lifecycle: ChromiumLifecycleManager,
@@ -800,6 +817,139 @@ impl CdpBrowserExecutor {
     pub fn browser(&self) -> Option<&chromiumoxide::Browser> {
         self.lifecycle.browser()
     }
+
+    fn validate_url(url: &str) -> Result<String, BrowserKernelError> {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return Err(BrowserKernelError::EmptyUrl);
+        }
+        Ok(trimmed.to_string())
+    }
+
+    async fn open_url(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserOpenUrlInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let title = page_title(&page).await.unwrap_or_default();
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+        let html_source = if input.take_snapshot {
+            Some(page.content().await.map_err(to_execution_failed)?)
+        } else {
+            None
+        };
+        let text = page_body_text(&page).await.unwrap_or_default();
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Opened URL: {}", current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "url": { "0": current_url },
+                "title": title,
+                "content": text,
+                "html_source": html_source,
+                "captured_at": chrono::Utc::now(),
+                "artifact_id": null
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn extract_content(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserExtractContentInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+        let text = page_body_text(&page).await.unwrap_or_default();
+        let links = page_string_array(&page, LINK_EXTRACTION_JS)
+            .await
+            .unwrap_or_default();
+        let images = page_string_array(&page, IMAGE_EXTRACTION_JS)
+            .await
+            .unwrap_or_default();
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!("Extracted content from URL: {}", current_url),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "source_url": { "0": current_url },
+                "text": text,
+                "links": links,
+                "images": images,
+                "extracted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
+}
+
+const PAGE_TITLE_JS: &str = "document.title || ''";
+const PAGE_URL_JS: &str = "window.location.href || ''";
+const BODY_TEXT_JS: &str = "document.body ? document.body.innerText : ''";
+const LINK_EXTRACTION_JS: &str =
+    "Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)";
+const IMAGE_EXTRACTION_JS: &str =
+    "Array.from(document.querySelectorAll('img[src]')).map(img => img.src).filter(Boolean)";
+
+async fn page_title(page: &chromiumoxide::Page) -> Result<String, BrowserKernelError> {
+    page_string(page, PAGE_TITLE_JS).await
+}
+
+async fn page_url(page: &chromiumoxide::Page) -> Result<String, BrowserKernelError> {
+    page_string(page, PAGE_URL_JS).await
+}
+
+async fn page_body_text(page: &chromiumoxide::Page) -> Result<String, BrowserKernelError> {
+    page_string(page, BODY_TEXT_JS).await
+}
+
+async fn page_string(
+    page: &chromiumoxide::Page,
+    expression: &str,
+) -> Result<String, BrowserKernelError> {
+    page.evaluate(expression)
+        .await
+        .map_err(to_browser_action_failed)?
+        .into_value()
+        .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))
+}
+
+async fn page_string_array(
+    page: &chromiumoxide::Page,
+    expression: &str,
+) -> Result<Vec<String>, BrowserKernelError> {
+    page.evaluate(expression)
+        .await
+        .map_err(to_browser_action_failed)?
+        .into_value()
+        .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))
+}
+
+fn to_browser_action_failed(error: impl std::fmt::Display) -> BrowserKernelError {
+    BrowserKernelError::ActionFailed(error.to_string())
+}
+
+fn to_execution_failed(error: impl std::fmt::Display) -> action_core::ActionExecutorError {
+    action_core::ActionExecutorError::ExecutionFailed(error.to_string())
+}
+
+fn to_invalid_input(error: impl std::fmt::Display) -> action_core::ActionExecutorError {
+    action_core::ActionExecutorError::InvalidInput(error.to_string())
 }
 
 const KNOWN_BROWSER_ACTIONS: &[&str] = &[
@@ -843,23 +993,29 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
         }
 
         // Get browser reference
-        let _browser = self.browser().ok_or_else(|| {
+        let browser = self.browser().ok_or_else(|| {
             action_core::ActionExecutorError::ExecutionFailed(
                 BrowserKernelError::ChromiumNotAvailable.to_string(),
             )
         })?;
 
-        // TODO: Implement real browser actions
-        // For now, return a placeholder result
-        Ok(action_core::ActionResult {
-            status: action_core::ActionStatus::Completed,
-            summary: format!("Action '{}' executed (placeholder)", kind),
-            payload: action_core::ActionResultPayload::Json(serde_json::json!({
-                "success": true,
-                "message": format!("Action '{}' executed", kind)
-            })),
-            completed_at: chrono::Utc::now(),
-        })
+        match kind {
+            "browser.open_url" => {
+                let input: BrowserOpenUrlInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.open_url(browser, input).await
+            }
+            "browser.extract_content" => {
+                let input: BrowserExtractContentInput =
+                    serde_json::from_value(request.input.clone()).map_err(|e| {
+                        action_core::ActionExecutorError::InvalidInput(e.to_string())
+                    })?;
+                self.extract_content(browser, input).await
+            }
+            _ => Err(action_core::ActionExecutorError::NotSupported(
+                request.action_kind.clone(),
+            )),
+        }
     }
 }
 
@@ -1139,6 +1295,45 @@ mod tests {
                 assert!(msg.contains("chromium browser is not available"));
             }
             other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_open_url_input_defaults_take_snapshot_false() {
+        let input: BrowserOpenUrlInput =
+            serde_json::from_value(serde_json::json!({"url": "https://example.com"})).unwrap();
+
+        assert_eq!(input.url, "https://example.com");
+        assert!(!input.take_snapshot);
+    }
+
+    #[test]
+    fn cdp_browser_executor_validate_url_trims_and_rejects_empty() {
+        assert_eq!(
+            CdpBrowserExecutor::validate_url("  https://example.com  ").unwrap(),
+            "https://example.com"
+        );
+        assert!(matches!(
+            CdpBrowserExecutor::validate_url("   "),
+            Err(BrowserKernelError::EmptyUrl)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cdp_browser_executor_rejects_unimplemented_known_browser_action_even_if_available_check_would_apply()
+     {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+
+        let request = action_request("browser.click_element");
+
+        let result = executor.execute(&request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActionExecutorError::ExecutionFailed(msg) => {
+                assert!(msg.contains("chromium browser is not available"));
+            }
+            other => panic!("expected ExecutionFailed before dispatch, got: {other:?}"),
         }
     }
 
