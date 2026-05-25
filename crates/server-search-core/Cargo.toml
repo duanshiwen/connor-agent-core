@@ -1,0 +1,18 @@
+[package]
+name = "server-search-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Authorized search with permission filtering for AgentOS enterprise."
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+enterprise-permission-core = { path = "../enterprise-permission-core" }
+
+[dev-dependencies]
+tokio.workspace = true
