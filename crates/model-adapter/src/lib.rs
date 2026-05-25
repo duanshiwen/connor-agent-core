@@ -7,6 +7,7 @@
 //! early runtime work. The [`openai`] module supplies a concrete adapter for
 //! any OpenAI-compatible Chat Completions endpoint (DeepSeek, Qwen, vLLM, etc.).
 
+pub mod anthropic;
 pub mod openai;
 pub mod token_budget;
 pub use openai::{OpenAiCompatibleAdapter, OpenAiProviderConfig};
@@ -253,6 +254,21 @@ pub enum ModelAdapterError {
 
     #[error("missing tool call id")]
     MissingToolCallId,
+
+    #[error("config error: {0}")]
+    ConfigError(String),
+
+    #[error("HTTP error: {0}")]
+    HttpError(String),
+
+    #[error("auth error: {0}")]
+    AuthError(String),
+
+    #[error("rate limit exceeded")]
+    RateLimitExceeded,
+
+    #[error("empty response")]
+    EmptyResponse,
 }
 
 /// Async model adapter trait — text-only completion.
