@@ -8,6 +8,7 @@
 //! any OpenAI-compatible Chat Completions endpoint (DeepSeek, Qwen, vLLM, etc.).
 
 pub mod openai;
+pub mod token_budget;
 pub use openai::{OpenAiCompatibleAdapter, OpenAiProviderConfig};
 
 use async_trait::async_trait;
