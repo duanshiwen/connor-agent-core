@@ -25,6 +25,7 @@ members = [
     "crates/server-account-core",
     "crates/connector-runtime",
     "crates/mail-entity",
+    "crates/device-pairing-core",
 ]
 resolver = "2"
 
