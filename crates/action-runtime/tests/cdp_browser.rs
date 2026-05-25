@@ -103,7 +103,7 @@ fn browser_registry() -> ActionRegistry {
 fn cdp_executor() -> CdpBrowserExecutor {
     let config = CdpBrowserConfig::default();
     let lifecycle = ChromiumLifecycleManager::new(config);
-    CdpBrowserExecutor::new(lifecycle, Utc::now())
+    CdpBrowserExecutor::new(lifecycle, Utc::now(), None)
 }
 
 fn browser_action_request(kind_str: &str) -> ActionRequest {

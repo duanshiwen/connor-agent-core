@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Browser profile types
@@ -899,14 +900,33 @@ struct RawInteractiveElement {
 /// Unknown action kinds return [`ActionExecutorError::NotSupported`]. Known
 /// actions still return [`ActionExecutorError::ExecutionFailed`] when Chromium
 /// is not available.
-#[derive(Debug)]
 pub struct CdpBrowserExecutor {
     lifecycle: ChromiumLifecycleManager,
+    artifact_store: Option<Arc<dyn artifact_core::ArtifactStore>>,
+}
+
+impl std::fmt::Debug for CdpBrowserExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CdpBrowserExecutor")
+            .field("lifecycle", &self.lifecycle)
+            .field(
+                "artifact_store",
+                &self.artifact_store.as_ref().map(|_| "<ArtifactStore>"),
+            )
+            .finish()
+    }
 }
 
 impl CdpBrowserExecutor {
-    pub fn new(lifecycle: ChromiumLifecycleManager, _now: DateTime<Utc>) -> Self {
-        Self { lifecycle }
+    pub fn new(
+        lifecycle: ChromiumLifecycleManager,
+        _now: DateTime<Utc>,
+        artifact_store: Option<Arc<dyn artifact_core::ArtifactStore>>,
+    ) -> Self {
+        Self {
+            lifecycle,
+            artifact_store,
+        }
     }
 
     pub fn lifecycle(&self) -> &ChromiumLifecycleManager {
@@ -1552,7 +1572,6 @@ impl CdpBrowserExecutor {
                 .await
                 .map_err(to_execution_failed)?
         } else {
-            use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
             use chromiumoxide::page::ScreenshotParams;
 
             let format = if input.quality.is_some() {
@@ -1575,7 +1594,7 @@ impl CdpBrowserExecutor {
             "png"
         };
 
-        Ok(action_core::ActionResult {
+        let result = action_core::ActionResult {
             status: action_core::ActionStatus::Completed,
             summary: format!(
                 "Screenshot captured from {} ({} format, {} bytes)",
@@ -1592,7 +1611,39 @@ impl CdpBrowserExecutor {
                 "interacted_at": chrono::Utc::now()
             })),
             completed_at: chrono::Utc::now(),
-        })
+        };
+
+        // Persist to ArtifactStore if available
+        if let Some(ref store) = self.artifact_store {
+            use artifact_core::{ArtifactDescriptor, ArtifactKind};
+
+            let artifact_id = artifact_core::ArtifactId(format!(
+                "screenshot-{}",
+                chrono::Utc::now().timestamp_millis()
+            ));
+            let descriptor = ArtifactDescriptor {
+                id: artifact_id.clone(),
+                kind: ArtifactKind::Image,
+                title: Some(format!("Screenshot of {}", current_url)),
+                source_uri: Some(current_url.clone()),
+                mime_type: Some(if format_str == "jpeg" {
+                    "image/jpeg".to_string()
+                } else {
+                    "image/png".to_string()
+                }),
+                metadata: serde_json::json!({
+                    "size_bytes": screenshot_bytes.len(),
+                    "format": format_str,
+                    "full_page": input.full_page,
+                    "source": "browser_screenshot"
+                }),
+                created_at: chrono::Utc::now(),
+            };
+
+            let _ = store.put(descriptor).await;
+        }
+
+        Ok(result)
     }
 }
 
@@ -2123,7 +2174,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_executor_rejects_unknown_action_kind() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request("system.shutdown");
 
@@ -2140,7 +2191,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_executor_returns_chromium_not_available_for_known_action() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request("browser.open_url");
 
@@ -2179,7 +2230,7 @@ mod tests {
     async fn cdp_browser_executor_rejects_unimplemented_known_browser_action_even_if_available_check_would_apply()
      {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request("browser.click_element");
 
@@ -2289,7 +2340,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_click_element_returns_chromium_not_available() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request_with_input(
             "browser.click_element",
@@ -2308,7 +2359,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_type_text_returns_chromium_not_available() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request_with_input(
             "browser.type_text",
@@ -2327,7 +2378,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_fill_form_returns_chromium_not_available() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request_with_input(
             "browser.fill_form",
@@ -2346,7 +2397,7 @@ mod tests {
     #[tokio::test]
     async fn cdp_browser_select_option_returns_chromium_not_available() {
         let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
-        let executor = CdpBrowserExecutor::new(lifecycle, ts());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
 
         let request = action_request_with_input(
             "browser.select_option",
