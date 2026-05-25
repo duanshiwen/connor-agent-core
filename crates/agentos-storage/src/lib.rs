@@ -1,5 +1,6 @@
 //! AgentOS durable storage layout primitives.
 
+pub mod lock;
 pub mod migration;
 
 use std::fs;
@@ -9,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
     MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
     StorageMigration, StorageMigrationRegistry,
@@ -44,6 +46,20 @@ pub enum StorageError {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+
+    #[error("storage lock serialization failed at {path}: {source}")]
+    LockSerde {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("storage lock already held at {path} by {owner_id} until {expires_at}")]
+    LockAlreadyHeld {
+        path: PathBuf,
+        owner_id: String,
+        expires_at: DateTime<Utc>,
     },
 
     #[error("unsupported storage version {found}, expected {expected}")]
@@ -151,6 +167,10 @@ impl AgentOsStorage {
 
     pub fn path_for(&self, layout_dir: &str) -> PathBuf {
         self.root.join(layout_dir)
+    }
+
+    pub fn acquire_lock(&self, options: StorageLockOptions) -> StorageResult<StorageLockGuard> {
+        StorageLockGuard::acquire(&self.root, options)
     }
 }
 
