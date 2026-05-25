@@ -787,6 +787,21 @@ struct BrowserExtractContentInput {
     url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserInteractiveSnapshotInput {
+    url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RawInteractiveElement {
+    id: String,
+    kind: String,
+    selector: Option<String>,
+    text: Option<String>,
+    aria_label: Option<String>,
+    bounding_box: Option<ElementBoundingBox>,
+}
+
 /// Real CDP browser executor.
 ///
 /// This executor implements [`ActionExecutor`] for browser actions backed by a
@@ -896,6 +911,45 @@ impl CdpBrowserExecutor {
             completed_at: chrono::Utc::now(),
         })
     }
+
+    async fn get_interactive_snapshot(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserInteractiveSnapshotInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+        let title = page_title(&page).await.unwrap_or_default();
+        let elements = page_interactive_elements(&page)
+            .await
+            .map_err(to_execution_failed)?;
+        let snapshot = InteractiveSnapshot {
+            url: current_url.clone(),
+            title,
+            elements,
+            screenshot_artifact_id: None,
+            captured_at: chrono::Utc::now(),
+        };
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Captured interactive snapshot for URL: {} ({} elements)",
+                current_url,
+                snapshot.elements.len()
+            ),
+            payload: action_core::ActionResultPayload::Json(
+                serde_json::to_value(snapshot).map_err(to_execution_failed)?,
+            ),
+            completed_at: chrono::Utc::now(),
+        })
+    }
 }
 
 const PAGE_TITLE_JS: &str = "document.title || ''";
@@ -905,6 +959,58 @@ const LINK_EXTRACTION_JS: &str =
     "Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)";
 const IMAGE_EXTRACTION_JS: &str =
     "Array.from(document.querySelectorAll('img[src]')).map(img => img.src).filter(Boolean)";
+const INTERACTIVE_ELEMENTS_JS: &str = r#"
+(() => {
+  const selectorFor = (el) => {
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
+    if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+    const tag = el.tagName.toLowerCase();
+    const name = el.getAttribute('name');
+    if (name) return `${tag}[name="${CSS.escape(name)}"]`;
+    const parent = el.parentElement;
+    if (!parent) return tag;
+    const siblings = Array.from(parent.children).filter(child => child.tagName === el.tagName);
+    const index = siblings.indexOf(el) + 1;
+    return siblings.length > 1 ? `${tag}:nth-of-type(${index})` : tag;
+  };
+  const kindFor = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'a') return 'link';
+    if (tag === 'button' || role === 'button' || type === 'button' || type === 'submit') return 'button';
+    if (tag === 'select') return 'select';
+    if (tag === 'textarea') return 'text_area';
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    if (tag === 'input') return 'input';
+    return 'other';
+  };
+  const candidates = Array.from(document.querySelectorAll(
+    'a[href],button,input,select,textarea,[role="button"],[onclick],[tabindex]'
+  ));
+  return candidates
+    .filter(el => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    })
+    .slice(0, 200)
+    .map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const text = (el.innerText || el.value || el.getAttribute('title') || '').trim();
+      return {
+        id: `e${index + 1}`,
+        kind: kindFor(el),
+        selector: selectorFor(el),
+        text: text ? text.slice(0, 200) : null,
+        aria_label: el.getAttribute('aria-label'),
+        bounding_box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      };
+    });
+})()
+"#;
 
 async fn page_title(page: &chromiumoxide::Page) -> Result<String, BrowserKernelError> {
     page_string(page, PAGE_TITLE_JS).await
@@ -938,6 +1044,42 @@ async fn page_string_array(
         .map_err(to_browser_action_failed)?
         .into_value()
         .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))
+}
+
+async fn page_interactive_elements(
+    page: &chromiumoxide::Page,
+) -> Result<Vec<InteractiveElement>, BrowserKernelError> {
+    let raw: Vec<RawInteractiveElement> = page
+        .evaluate(INTERACTIVE_ELEMENTS_JS)
+        .await
+        .map_err(to_browser_action_failed)?
+        .into_value()
+        .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))?;
+
+    Ok(raw
+        .into_iter()
+        .map(|element| InteractiveElement {
+            id: element.id,
+            kind: interactive_kind_from_str(&element.kind),
+            selector: element.selector.map(ElementSelector::Css),
+            text: element.text,
+            aria_label: element.aria_label,
+            bounding_box: element.bounding_box,
+        })
+        .collect())
+}
+
+fn interactive_kind_from_str(kind: &str) -> InteractiveElementKind {
+    match kind {
+        "link" => InteractiveElementKind::Link,
+        "button" => InteractiveElementKind::Button,
+        "input" => InteractiveElementKind::Input,
+        "select" => InteractiveElementKind::Select,
+        "text_area" => InteractiveElementKind::TextArea,
+        "checkbox" => InteractiveElementKind::Checkbox,
+        "radio" => InteractiveElementKind::Radio,
+        _ => InteractiveElementKind::Other,
+    }
 }
 
 fn to_browser_action_failed(error: impl std::fmt::Display) -> BrowserKernelError {
@@ -1011,6 +1153,13 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                         action_core::ActionExecutorError::InvalidInput(e.to_string())
                     })?;
                 self.extract_content(browser, input).await
+            }
+            "browser.get_interactive_snapshot" => {
+                let input: BrowserInteractiveSnapshotInput =
+                    serde_json::from_value(request.input.clone()).map_err(|e| {
+                        action_core::ActionExecutorError::InvalidInput(e.to_string())
+                    })?;
+                self.get_interactive_snapshot(browser, input).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
@@ -1335,6 +1484,86 @@ mod tests {
             }
             other => panic!("expected ExecutionFailed before dispatch, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn browser_interactive_snapshot_input_parses_url() {
+        let input: BrowserInteractiveSnapshotInput =
+            serde_json::from_value(serde_json::json!({"url": "https://example.com/app"})).unwrap();
+
+        assert_eq!(input.url, "https://example.com/app");
+    }
+
+    #[test]
+    fn interactive_kind_from_str_maps_known_kinds() {
+        assert_eq!(
+            interactive_kind_from_str("link"),
+            InteractiveElementKind::Link
+        );
+        assert_eq!(
+            interactive_kind_from_str("button"),
+            InteractiveElementKind::Button
+        );
+        assert_eq!(
+            interactive_kind_from_str("input"),
+            InteractiveElementKind::Input
+        );
+        assert_eq!(
+            interactive_kind_from_str("select"),
+            InteractiveElementKind::Select
+        );
+        assert_eq!(
+            interactive_kind_from_str("text_area"),
+            InteractiveElementKind::TextArea
+        );
+        assert_eq!(
+            interactive_kind_from_str("checkbox"),
+            InteractiveElementKind::Checkbox
+        );
+        assert_eq!(
+            interactive_kind_from_str("radio"),
+            InteractiveElementKind::Radio
+        );
+        assert_eq!(
+            interactive_kind_from_str("unknown"),
+            InteractiveElementKind::Other
+        );
+    }
+
+    #[test]
+    fn raw_interactive_element_maps_to_interactive_element_shape() {
+        let raw = RawInteractiveElement {
+            id: "e1".to_string(),
+            kind: "button".to_string(),
+            selector: Some("#submit".to_string()),
+            text: Some("Submit".to_string()),
+            aria_label: Some("Submit form".to_string()),
+            bounding_box: Some(ElementBoundingBox {
+                x: 1.0,
+                y: 2.0,
+                width: 100.0,
+                height: 32.0,
+            }),
+        };
+
+        let element = InteractiveElement {
+            id: raw.id,
+            kind: interactive_kind_from_str(&raw.kind),
+            selector: raw.selector.map(ElementSelector::Css),
+            text: raw.text,
+            aria_label: raw.aria_label,
+            bounding_box: raw.bounding_box,
+        };
+
+        assert_eq!(element.id, "e1");
+        assert_eq!(element.kind, InteractiveElementKind::Button);
+        assert_eq!(
+            element.selector,
+            Some(ElementSelector::Css("#submit".to_string()))
+        );
+        assert_eq!(element.text, Some("Submit".to_string()));
+        assert_eq!(element.aria_label, Some("Submit form".to_string()));
+        assert_eq!(element.bounding_box.unwrap().width, 100.0);
     }
 
     // ---- BrowserProfileMode tests ----
