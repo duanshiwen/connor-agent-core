@@ -81,6 +81,7 @@ pub enum ModelRole {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 /// Text-only message sent to a model adapter.

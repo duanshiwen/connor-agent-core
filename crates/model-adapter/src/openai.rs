@@ -220,6 +220,7 @@ impl OpenAiCompatibleAdapter {
             ModelRole::System => "system",
             ModelRole::User => "user",
             ModelRole::Assistant => "assistant",
+            ModelRole::Tool => "tool",
         }
     }
 

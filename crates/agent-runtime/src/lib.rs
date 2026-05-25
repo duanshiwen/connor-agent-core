@@ -721,6 +721,202 @@ impl AgentRuntime {
 // Tests
 // ────────────────────────────────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────────────────────────────────
+// PR 59: AgentToolLoop — LLM Tool Loop Runtime
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Maps a model-returned `ToolCall` to an `ActionRequest` for execution.
+pub trait ToolCallMapper: Send + Sync {
+    fn map_to_action_request(
+        &self,
+        tool_call: &ToolCall,
+        run_id: &str,
+        conversation_id: &str,
+    ) -> Result<ActionRequest>;
+}
+
+/// Configuration for the tool loop.
+#[derive(Debug, Clone)]
+pub struct ToolLoopConfig {
+    /// Maximum number of model-call turns before stopping.
+    pub max_turns: u32,
+}
+
+impl Default for ToolLoopConfig {
+    fn default() -> Self {
+        Self { max_turns: 10 }
+    }
+}
+
+/// Result of a tool loop execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolLoopOutcome {
+    Completed {
+        response_text: String,
+        turns_used: u32,
+        tool_calls_made: u32,
+    },
+    MaxTurnsReached {
+        last_tool_calls: Vec<ToolCall>,
+        turns_used: u32,
+    },
+    Failed {
+        error: String,
+        turns_used: u32,
+    },
+}
+
+/// Request to run the tool loop.
+pub struct ToolLoopRequest<'a> {
+    pub adapter: &'a dyn ToolCallingModelAdapter,
+    pub action_runtime: &'a ActionRuntime<'a>,
+    pub mapper: &'a dyn ToolCallMapper,
+    pub config: &'a ToolLoopConfig,
+    pub initial_request: ModelRequest,
+    pub tools: Vec<ToolDefinition>,
+    pub tool_choice: ToolChoice,
+    pub run_id: &'a str,
+    pub conversation_id: &'a str,
+}
+
+/// Orchestrates the LLM tool loop.
+pub struct AgentToolLoop;
+
+impl AgentToolLoop {
+    pub async fn run(req: ToolLoopRequest<'_>) -> ToolLoopOutcome {
+        let mut turns_used: u32 = 0;
+        let mut tool_calls_made: u32 = 0;
+        let mut current_request = req.initial_request;
+
+        loop {
+            turns_used += 1;
+
+            if turns_used > req.config.max_turns {
+                return ToolLoopOutcome::MaxTurnsReached {
+                    last_tool_calls: vec![],
+                    turns_used: turns_used - 1,
+                };
+            }
+
+            let output = match req
+                .adapter
+                .complete_with_tools(
+                    current_request.clone(),
+                    req.tools.clone(),
+                    req.tool_choice.clone(),
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    return ToolLoopOutcome::Failed {
+                        error: format!("model call failed: {e}"),
+                        turns_used: turns_used - 1,
+                    };
+                }
+            };
+
+            match output {
+                ModelOutput::Text { text, .. } => {
+                    return ToolLoopOutcome::Completed {
+                        response_text: text,
+                        turns_used: turns_used - 1,
+                        tool_calls_made,
+                    };
+                }
+                ModelOutput::ToolCalls {
+                    content,
+                    tool_calls,
+                    ..
+                } => {
+                    let last_tool_calls = tool_calls.clone();
+                    let mut tool_results: Vec<(String, String)> = Vec::new();
+
+                    for tc in &tool_calls {
+                        tool_calls_made += 1;
+                        let action_request = match req.mapper.map_to_action_request(
+                            tc,
+                            req.run_id,
+                            req.conversation_id,
+                        ) {
+                            Ok(ar) => ar,
+                            Err(e) => {
+                                tool_results.push((tc.id.clone(), format!("error: {e}")));
+                                continue;
+                            }
+                        };
+
+                        let outcome = match req
+                            .action_runtime
+                            .process(ProcessActionRequest {
+                                conversation_id: &ConversationId::from(req.conversation_id),
+                                action_request,
+                                requested_by: Some(ParticipantId::from("agent")),
+                                runtime_actor: Some(ParticipantId::from("tool_loop")),
+                            })
+                            .await
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                tool_results.push((tc.id.clone(), format!("error: {e}")));
+                                continue;
+                            }
+                        };
+
+                        let result_text = match outcome {
+                            ActionRuntimeOutcome::Completed { result, .. } => result.summary,
+                            ActionRuntimeOutcome::Denied { reason, .. } => {
+                                format!("denied: {reason}")
+                            }
+                            ActionRuntimeOutcome::ApprovalRequired { action_id, .. } => {
+                                format!("approval_required: {action_id}")
+                            }
+                            ActionRuntimeOutcome::Failed {
+                                action_id,
+                                error_message,
+                                ..
+                            } => format!("failed ({action_id}): {error_message}"),
+                        };
+                        tool_results.push((tc.id.clone(), result_text));
+                    }
+
+                    let mut messages = current_request.messages;
+                    let mut assistant_content = content.unwrap_or_default();
+                    if assistant_content.is_empty() && !tool_calls.is_empty() {
+                        assistant_content = "calling tools".to_string();
+                    }
+                    messages.push(ModelMessage {
+                        role: ModelRole::Assistant,
+                        text: assistant_content,
+                    });
+
+                    for (tool_call_id, result) in &tool_results {
+                        messages.push(ModelMessage {
+                            role: ModelRole::Tool,
+                            text: format!("tool_call_id: {tool_call_id}\nresult: {result}"),
+                        });
+                    }
+
+                    current_request = ModelRequest {
+                        model_id: current_request.model_id.clone(),
+                        messages,
+                        max_output_tokens: current_request.max_output_tokens,
+                        temperature_millis: current_request.temperature_millis,
+                        metadata: current_request.metadata.clone(),
+                    };
+
+                    if turns_used >= req.config.max_turns {
+                        return ToolLoopOutcome::MaxTurnsReached {
+                            last_tool_calls,
+                            turns_used,
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2099,5 +2295,232 @@ mod tests {
             audit.list().await.unwrap()[0].result_status,
             "approval_required"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PR 59: AgentToolLoop tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct FakeToolAdapter {
+        responses: tokio::sync::Mutex<Vec<ModelOutput>>,
+        call_count: AtomicU32,
+    }
+
+    impl FakeToolAdapter {
+        fn new(responses: Vec<ModelOutput>) -> Self {
+            Self {
+                responses: tokio::sync::Mutex::new(responses),
+                call_count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelAdapter for FakeToolAdapter {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+        ) -> std::result::Result<ModelOutput, ModelAdapterError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut r = self.responses.lock().await;
+            if r.is_empty() {
+                return Err(ModelAdapterError::ExecutorFailed("empty".into()));
+            }
+            Ok(r.remove(0))
+        }
+    }
+
+    #[async_trait]
+    impl ToolCallingModelAdapter for FakeToolAdapter {
+        async fn complete_with_tools(
+            &self,
+            _request: ModelRequest,
+            _tools: Vec<ToolDefinition>,
+            _choice: ToolChoice,
+        ) -> std::result::Result<ModelOutput, ModelAdapterError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut r = self.responses.lock().await;
+            if r.is_empty() {
+                return Err(ModelAdapterError::ExecutorFailed("empty".into()));
+            }
+            Ok(r.remove(0))
+        }
+    }
+
+    struct TestMapper;
+    impl ToolCallMapper for TestMapper {
+        fn map_to_action_request(
+            &self,
+            tc: &ToolCall,
+            run_id: &str,
+            conv_id: &str,
+        ) -> Result<ActionRequest> {
+            Ok(ActionRequest {
+                action_id: ActionId(format!("{run_id}-{}", tc.id)),
+                action_kind: ActionKind(tc.name.clone()),
+                input: tc.arguments.clone(),
+                requested_by: "agent".to_string(),
+                conversation_id: Some(conv_id.to_string()),
+                message_id: None,
+                requested_at: chrono::Utc::now(),
+            })
+        }
+    }
+
+    macro_rules! with_tool_runtime {
+        ($k:ident, $rt:ident, $body:block) => {{
+            let $k = test_kernel();
+            let registry = action_registry();
+            let executor = action_core::FakeActionExecutor::new("ok");
+            let audit = audit_log::MemoryAuditSink::new();
+            let policy = capability_policy::CapabilityPolicy::default_safe();
+            let $rt = ActionRuntime {
+                kernel: &$k,
+                registry: &registry,
+                policy: &policy,
+                executor: &executor,
+                audit_log: &audit,
+                artifact_resolver: None,
+            };
+            $body
+        }};
+    }
+
+    #[tokio::test]
+    async fn tool_loop_text_only_completes() {
+        let adapter = FakeToolAdapter::new(vec![ModelOutput::Text {
+            text: "Hello!".to_string(),
+            usage: Some(ModelUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            }),
+        }]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run(ToolLoopRequest {
+                adapter: &adapter,
+                action_runtime: &rt,
+                mapper: &TestMapper,
+                config: &ToolLoopConfig::default(),
+                initial_request: ModelRequest::new("test", vec![ModelMessage::user("hi")]),
+                tools: vec![],
+                tool_choice: ToolChoice::Auto,
+                run_id: "run-1",
+                conversation_id: "conv-1",
+            })
+            .await;
+            assert!(matches!(outcome, ToolLoopOutcome::Completed {
+                response_text, turns_used: 0, tool_calls_made: 0
+            } if response_text == "Hello!"));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_executes_and_returns_text() {
+        let adapter = FakeToolAdapter::new(vec![
+            ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_001".into(),
+                    name: "knowledge.search".into(),
+                    arguments: serde_json::json!({"q": "test"}),
+                    raw_arguments: r#"{"q":"test"}"#.into(),
+                }],
+                usage: None,
+            },
+            ModelOutput::Text {
+                text: "Found it!".to_string(),
+                usage: None,
+            },
+        ]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run(ToolLoopRequest {
+                adapter: &adapter,
+                action_runtime: &rt,
+                mapper: &TestMapper,
+                config: &ToolLoopConfig::default(),
+                initial_request: ModelRequest::new("test", vec![ModelMessage::user("search")]),
+                tools: vec![ToolDefinition {
+                    name: "knowledge.search".into(),
+                    description: "Search".into(),
+                    input_schema: serde_json::json!({}),
+                }],
+                tool_choice: ToolChoice::Auto,
+                run_id: "run-2",
+                conversation_id: "conv-2",
+            })
+            .await;
+            assert!(matches!(outcome, ToolLoopOutcome::Completed {
+                response_text, turns_used: 1, tool_calls_made: 1
+            } if response_text == "Found it!"));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_respects_max_turns() {
+        let adapter = FakeToolAdapter::new(vec![
+            ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "knowledge.search".into(),
+                    arguments: serde_json::json!({}),
+                    raw_arguments: "{}".into(),
+                }],
+                usage: None,
+            },
+            ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c2".into(),
+                    name: "knowledge.search".into(),
+                    arguments: serde_json::json!({}),
+                    raw_arguments: "{}".into(),
+                }],
+                usage: None,
+            },
+        ]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run(ToolLoopRequest {
+                adapter: &adapter,
+                action_runtime: &rt,
+                mapper: &TestMapper,
+                config: &ToolLoopConfig { max_turns: 2 },
+                initial_request: ModelRequest::new("test", vec![ModelMessage::user("loop")]),
+                tools: vec![],
+                tool_choice: ToolChoice::Auto,
+                run_id: "run-3",
+                conversation_id: "conv-3",
+            })
+            .await;
+            assert!(matches!(
+                outcome,
+                ToolLoopOutcome::MaxTurnsReached { turns_used: 2, .. }
+            ));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_handles_model_error() {
+        let adapter = FakeToolAdapter::new(vec![]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run(ToolLoopRequest {
+                adapter: &adapter,
+                action_runtime: &rt,
+                mapper: &TestMapper,
+                config: &ToolLoopConfig::default(),
+                initial_request: ModelRequest::new("test", vec![ModelMessage::user("fail")]),
+                tools: vec![],
+                tool_choice: ToolChoice::Auto,
+                run_id: "run-4",
+                conversation_id: "conv-4",
+            })
+            .await;
+            assert!(
+                matches!(outcome, ToolLoopOutcome::Failed { error, turns_used: 0 }
+                if error.contains("empty"))
+            );
+        });
     }
 }
