@@ -23,6 +23,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 browser-entity = { path = "../browser-entity" }
+browser-kernel-core = { path = "../browser-kernel-core" }
 conversation-journal = { path = "../conversation-journal" }
 knowledge-entity = { path = "../knowledge-entity" }
 reminder-core = { path = "../reminder-core" }

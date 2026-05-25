@@ -26,6 +26,7 @@ dependencies = [
  "async-trait",
  "audit-log",
  "browser-entity",
+ "browser-kernel-core",
  "capability-policy",
  "chrono",
  "conversation-core",
