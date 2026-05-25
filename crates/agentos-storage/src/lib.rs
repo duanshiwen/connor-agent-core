@@ -1,5 +1,6 @@
 //! AgentOS durable storage layout primitives.
 
+pub mod artifact_store;
 pub mod lock;
 pub mod migration;
 
@@ -10,6 +11,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use artifact_store::{
+    ArtifactContentMetadata, ArtifactVerificationIssue, ArtifactVerificationReport,
+    FsArtifactRecord, FsArtifactStore,
+};
 pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
     MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
@@ -54,6 +59,19 @@ pub enum StorageError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("artifact serialization failed at {path}: {source}")]
+    ArtifactSerde {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("artifact already exists: {artifact_id}")]
+    ArtifactAlreadyExists { artifact_id: String },
+
+    #[error("invalid artifact id for filesystem path: {artifact_id}")]
+    InvalidArtifactIdPath { artifact_id: String },
 
     #[error("storage lock already held at {path} by {owner_id} until {expires_at}")]
     LockAlreadyHeld {
@@ -174,7 +192,7 @@ impl AgentOsStorage {
     }
 }
 
-fn create_dir_all(path: impl AsRef<Path>) -> StorageResult<()> {
+pub(crate) fn create_dir_all(path: impl AsRef<Path>) -> StorageResult<()> {
     let path = path.as_ref();
     fs::create_dir_all(path).map_err(|source| StorageError::Io {
         path: path.to_path_buf(),

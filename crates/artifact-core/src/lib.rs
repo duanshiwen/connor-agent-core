@@ -102,6 +102,8 @@ pub enum ArtifactStoreError {
     DuplicateArtifactId(ArtifactId),
     #[error("artifact store lock poisoned")]
     LockPoisoned,
+    #[error("artifact storage error: {0}")]
+    Storage(String),
 }
 
 /// Storage abstraction for artifact descriptors.

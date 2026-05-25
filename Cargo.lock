@@ -92,11 +92,15 @@ dependencies = [
 name = "agentos-storage"
 version = "0.1.0"
 dependencies = [
+ "artifact-core",
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

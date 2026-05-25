@@ -7,10 +7,14 @@ authors.workspace = true
 description = "AgentOS durable storage layout, manifest, migration, and integrity primitives."
 
 [dependencies]
+artifact-core = { path = "../artifact-core" }
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
