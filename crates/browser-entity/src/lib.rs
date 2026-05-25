@@ -43,6 +43,7 @@ pub const BROWSER_SCROLL_PAGE_ACTION_KIND: &str = "browser.scroll_page";
 pub const BROWSER_PRESS_KEY_ACTION_KIND: &str = "browser.press_key";
 pub const BROWSER_EXECUTE_JS_ACTION_KIND: &str = "browser.execute_js";
 pub const BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND: &str = "browser.wait_for_element";
+pub const BROWSER_GET_PAGE_SCREENSHOT_ACTION_KIND: &str = "browser.get_page_screenshot";
 
 pub fn browser_open_url_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_OPEN_URL_ACTION_KIND)
@@ -94,6 +95,10 @@ pub fn browser_execute_js_action_kind() -> ActionKind {
 
 pub fn browser_wait_for_element_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND)
+}
+
+pub fn browser_get_page_screenshot_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_GET_PAGE_SCREENSHOT_ACTION_KIND)
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +365,20 @@ fn default_wait_timeout_ms() -> u64 {
     10_000
 }
 
+/// Input for `browser.get_page_screenshot`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserScreenshotActionInput {
+    /// URL to navigate to before capturing.
+    pub url: String,
+    /// Full page screenshot (vs viewport only).
+    #[serde(default)]
+    pub full_page: bool,
+    /// JPEG quality (1-100). None = PNG.
+    pub quality: Option<u8>,
+    /// CSS selector of specific element to screenshot.
+    pub element_selector: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Validation errors
 // ---------------------------------------------------------------------------
@@ -478,6 +497,14 @@ pub fn register_browser_action_schemas(
         kind: browser_wait_for_element_action_kind(),
         display_name: "Wait For Element".to_string(),
         description: "Wait for an element to appear on a web page.".to_string(),
+        side_effect: SideEffectKind::ReadOnly,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_get_page_screenshot_action_kind(),
+        display_name: "Get Page Screenshot".to_string(),
+        description: "Capture a screenshot of a web page or element.".to_string(),
         side_effect: SideEffectKind::ReadOnly,
         input_schema: None,
         output_schema: None,
@@ -736,6 +763,29 @@ impl ActionExecutor for FakeBrowserExecutor {
                     element_description: Some(format!(
                         "Element '{}' appeared within {}ms",
                         input.selector, input.timeout_ms
+                    )),
+                    interacted_at: self.now,
+                };
+                ActionResultPayload::Json(
+                    serde_json::to_value(result)
+                        .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
+                )
+            }
+            BROWSER_GET_PAGE_SCREENSHOT_ACTION_KIND => {
+                let input: BrowserScreenshotActionInput =
+                    serde_json::from_value(request.input.clone())
+                        .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
+                let result = BrowserInteractionResult {
+                    success: true,
+                    url: input.url.clone(),
+                    element_description: Some(format!(
+                        "Screenshot captured from {} ({})",
+                        input.url,
+                        if input.full_page {
+                            "full page"
+                        } else {
+                            "viewport"
+                        }
                     )),
                     interacted_at: self.now,
                 };

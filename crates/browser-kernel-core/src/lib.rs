@@ -873,6 +873,15 @@ fn default_wait_timeout_ms() -> u64 {
     10_000
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserScreenshotInput {
+    url: String,
+    #[serde(default)]
+    full_page: bool,
+    quality: Option<u8>,
+    element_selector: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RawInteractiveElement {
     id: String,
@@ -1507,6 +1516,84 @@ impl CdpBrowserExecutor {
             tokio::time::sleep(poll_interval).await;
         }
     }
+
+    async fn get_page_screenshot(
+        &self,
+        browser: &chromiumoxide::Browser,
+        input: BrowserScreenshotInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(to_execution_failed)?;
+        page.goto(url.clone()).await.map_err(to_execution_failed)?;
+
+        let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+
+        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+
+        let screenshot_bytes = if let Some(ref element_selector) = input.element_selector {
+            let sel = element_selector.trim();
+            if sel.is_empty() {
+                return Err(to_invalid_input(BrowserKernelError::EmptySelector));
+            }
+            let element = page.find_element(sel).await.map_err(|e| {
+                to_execution_failed(format!("Element not found with selector '{}': {}", sel, e))
+            })?;
+            let format = if input.quality.is_some() {
+                CaptureScreenshotFormat::Jpeg
+            } else {
+                CaptureScreenshotFormat::Png
+            };
+            element
+                .screenshot(format)
+                .await
+                .map_err(to_execution_failed)?
+        } else {
+            use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+            use chromiumoxide::page::ScreenshotParams;
+
+            let format = if input.quality.is_some() {
+                CaptureScreenshotFormat::Jpeg
+            } else {
+                CaptureScreenshotFormat::Png
+            };
+
+            let params = ScreenshotParams::builder()
+                .format(format)
+                .full_page(input.full_page)
+                .build();
+
+            page.screenshot(params).await.map_err(to_execution_failed)?
+        };
+
+        let format_str = if input.quality.is_some() {
+            "jpeg"
+        } else {
+            "png"
+        };
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Screenshot captured from {} ({} format, {} bytes)",
+                current_url,
+                format_str,
+                screenshot_bytes.len()
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "url": current_url,
+                "format": format_str,
+                "size_bytes": screenshot_bytes.len(),
+                "full_page": input.full_page,
+                "interacted_at": chrono::Utc::now()
+            })),
+            completed_at: chrono::Utc::now(),
+        })
+    }
 }
 
 const PAGE_TITLE_JS: &str = "document.title || ''";
@@ -1761,6 +1848,13 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                         action_core::ActionExecutorError::InvalidInput(e.to_string())
                     })?;
                 self.wait_for_element(browser, input).await
+            }
+            "browser.get_page_screenshot" => {
+                let input: BrowserScreenshotInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| {
+                    action_core::ActionExecutorError::InvalidInput(e.to_string())
+                })?;
+                self.get_page_screenshot(browser, input).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
