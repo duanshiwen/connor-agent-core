@@ -1,0 +1,19 @@
+[package]
+name = "browser-kernel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Browser kernel domain types and CDP executor skeleton for AgentOS."
+
+[dependencies]
+action-core = { path = "../action-core" }
+artifact-core = { path = "../artifact-core" }
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

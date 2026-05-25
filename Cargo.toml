@@ -18,6 +18,7 @@ members = [
     "crates/asset-index",
     "crates/knowledge-entity",
     "crates/browser-entity",
+    "crates/browser-kernel-core",
     "crates/reminder-core",
     "crates/notification-core",
     "crates/scheduler",
