@@ -1,0 +1,18 @@
+[package]
+name = "sync-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Sync domain types, manifest diff, and merge strategies for AgentOS P2P sync."
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+device-pairing-core = { path = "../device-pairing-core" }
+
+[dev-dependencies]
+tokio.workspace = true
