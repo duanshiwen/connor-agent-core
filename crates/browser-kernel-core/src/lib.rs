@@ -7,6 +7,7 @@
 
 use artifact_core::ArtifactId;
 use chrono::{DateTime, Utc};
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -590,16 +591,19 @@ pub struct BrowserActionResult {
 }
 
 // ---------------------------------------------------------------------------
-// Chromium lifecycle manager skeleton
+// Chromium lifecycle manager
 // ---------------------------------------------------------------------------
 
-/// Skeleton manager for Chromium process lifecycle.
+/// Manager for Chromium process lifecycle.
 ///
-/// In this skeleton, Chromium is never actually launched.
-/// The manager records the intended config and reports unavailability.
+/// Can operate in two modes:
+/// - Skeleton mode: no real Chromium, always reports unavailability
+/// - Real mode: launches/connects to Chromium via CDP
 pub struct ChromiumLifecycleManager {
     config: CdpBrowserConfig,
     storage: Option<std::sync::Arc<dyn BrowserStorage>>,
+    browser: Option<chromiumoxide::Browser>,
+    handler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for ChromiumLifecycleManager {
@@ -607,6 +611,7 @@ impl std::fmt::Debug for ChromiumLifecycleManager {
         f.debug_struct("ChromiumLifecycleManager")
             .field("config", &self.config)
             .field("storage", &self.storage.is_some())
+            .field("browser", &self.browser.is_some())
             .finish()
     }
 }
@@ -616,6 +621,8 @@ impl ChromiumLifecycleManager {
         Self {
             config,
             storage: None,
+            browser: None,
+            handler: None,
         }
     }
 
@@ -630,9 +637,133 @@ impl ChromiumLifecycleManager {
     }
 
     /// Returns `true` when a real Chromium instance is available.
-    /// In the skeleton implementation this always returns `false`.
     pub fn is_available(&self) -> bool {
-        false
+        self.browser.is_some()
+    }
+
+    /// Launch a new Chromium instance with the configured settings.
+    pub async fn launch(&mut self) -> Result<(), BrowserKernelError> {
+        use chromiumoxide::{Browser, BrowserConfig};
+
+        let mut builder = BrowserConfig::builder();
+
+        // Set launch mode
+        match &self.config.launch_mode {
+            ChromiumLaunchMode::Headless => {
+                // Default is headless
+            }
+            ChromiumLaunchMode::Headful => {
+                builder = builder.with_head();
+            }
+            ChromiumLaunchMode::Connect { .. } => {
+                return Err(BrowserKernelError::InvalidConfig(
+                    "use connect() for Connect mode".to_string(),
+                ));
+            }
+        }
+
+        // Set viewport
+        builder = builder.window_size(self.config.viewport.width, self.config.viewport.height);
+
+        // Resolve profile path
+        let user_data_dir = match &self.config.profile {
+            BrowserProfileMode::Named(name) => {
+                if let Some(ref storage) = self.storage {
+                    storage
+                        .resolve_profile(name)?
+                        .map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            }
+            BrowserProfileMode::Temporary => {
+                // Create temporary profile if storage available
+                // For FsBrowserStorage, we need to call create_temporary
+                // but BrowserStorage trait doesn't have this method
+                // So we skip for now
+                None
+            }
+            BrowserProfileMode::Ephemeral => None,
+        };
+
+        // Add user-data-dir argument if available
+        if let Some(ref dir) = user_data_dir {
+            builder = builder.arg(format!("--user-data-dir={}", dir));
+        }
+
+        let config = builder.build().map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!("failed to build browser config: {}", e))
+        })?;
+
+        let (browser, handler) = Browser::launch(config).await.map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!("failed to launch chromium: {}", e))
+        })?;
+
+        // The handler needs to be polled to drive the browser.
+        // We spawn it in the background.
+        let handle = tokio::spawn(async move {
+            let mut handler = handler;
+            loop {
+                if handler.next().await.is_none() {
+                    break;
+                }
+            }
+        });
+
+        self.browser = Some(browser);
+        self.handler = Some(handle);
+
+        Ok(())
+    }
+
+    /// Connect to an existing Chromium instance via websocket URL.
+    pub async fn connect(&mut self, websocket_url: &str) -> Result<(), BrowserKernelError> {
+        use chromiumoxide::Browser;
+
+        let (browser, handler) = Browser::connect(websocket_url).await.map_err(|e| {
+            BrowserKernelError::InvalidConfig(format!("failed to connect to chromium: {}", e))
+        })?;
+
+        // The handler needs to be polled to drive the browser.
+        let handle = tokio::spawn(async move {
+            let mut handler = handler;
+            loop {
+                if handler.next().await.is_none() {
+                    break;
+                }
+            }
+        });
+
+        self.browser = Some(browser);
+        self.handler = Some(handle);
+
+        Ok(())
+    }
+
+    /// Get a reference to the browser (if available).
+    pub fn browser(&self) -> Option<&chromiumoxide::Browser> {
+        self.browser.as_ref()
+    }
+
+    /// Shutdown the Chromium instance gracefully.
+    pub async fn shutdown(&mut self) -> Result<(), BrowserKernelError> {
+        if let Some(mut browser) = self.browser.take() {
+            browser.close().await.map_err(|e| {
+                BrowserKernelError::InvalidConfig(format!("failed to close browser: {}", e))
+            })?;
+        }
+        if let Some(handler) = self.handler.take() {
+            handler.abort();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ChromiumLifecycleManager {
+    fn drop(&mut self) {
+        if let Some(handler) = self.handler.take() {
+            handler.abort();
+        }
     }
 }
 

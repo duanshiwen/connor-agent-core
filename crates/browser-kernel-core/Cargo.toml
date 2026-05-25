@@ -14,6 +14,9 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+chromiumoxide.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

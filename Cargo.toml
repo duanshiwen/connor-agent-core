@@ -58,5 +58,9 @@ serde_yml = "0.0.12"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
+# Browser automation
+chromiumoxide = "0.9"
+futures-util = "0.3"
+
 # Testing
 tempfile = "3"
