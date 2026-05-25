@@ -401,6 +401,7 @@ impl P2pSyncOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use device_pairing_core::TrustLevel;
     use sync_runtime::{MergePolicy, SyncObjectKind};
 
     fn ts(offset: i64) -> DateTime<Utc> {
