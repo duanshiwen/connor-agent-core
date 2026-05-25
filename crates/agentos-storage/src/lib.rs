@@ -1,0 +1,160 @@
+//! AgentOS durable storage layout primitives.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const STORAGE_LAYOUT_VERSION: u32 = 1;
+
+pub const STORAGE_LAYOUT_DIRECTORIES: [&str; 11] = [
+    "config",
+    "conversations",
+    "runs",
+    "actions",
+    "approvals",
+    "audit",
+    "artifacts",
+    "knowledge",
+    "indexes",
+    "identity",
+    "connectors",
+];
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("storage io error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("storage manifest serialization failed at {path}: {source}")]
+    ManifestSerde {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("unsupported storage version {found}, expected {expected}")]
+    UnsupportedVersion { found: u32, expected: u32 },
+}
+
+pub type StorageResult<T> = Result<T, StorageError>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageManifest {
+    pub storage_version: u32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub layout_directories: Vec<String>,
+}
+
+impl StorageManifest {
+    pub fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            storage_version: STORAGE_LAYOUT_VERSION,
+            created_at: now,
+            updated_at: now,
+            layout_directories: STORAGE_LAYOUT_DIRECTORIES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        }
+    }
+
+    fn refreshed(mut self, now: DateTime<Utc>) -> Self {
+        self.updated_at = now;
+        self.layout_directories = STORAGE_LAYOUT_DIRECTORIES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentOsStorage {
+    root: PathBuf,
+    manifest: StorageManifest,
+}
+
+impl AgentOsStorage {
+    pub fn init(root: impl AsRef<Path>) -> StorageResult<Self> {
+        let root = root.as_ref().to_path_buf();
+        create_dir_all(&root)?;
+
+        for dir in STORAGE_LAYOUT_DIRECTORIES {
+            create_dir_all(root.join(dir))?;
+        }
+
+        let manifest_path = root.join("manifest.json");
+        let now = Utc::now();
+        let manifest = if manifest_path.exists() {
+            read_manifest(&manifest_path)?.refreshed(now)
+        } else {
+            StorageManifest::new(now)
+        };
+
+        if manifest.storage_version != STORAGE_LAYOUT_VERSION {
+            return Err(StorageError::UnsupportedVersion {
+                found: manifest.storage_version,
+                expected: STORAGE_LAYOUT_VERSION,
+            });
+        }
+
+        write_manifest(&manifest_path, &manifest)?;
+
+        Ok(Self { root, manifest })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn manifest(&self) -> &StorageManifest {
+        &self.manifest
+    }
+
+    pub fn manifest_path(&self) -> PathBuf {
+        self.root.join("manifest.json")
+    }
+
+    pub fn path_for(&self, layout_dir: &str) -> PathBuf {
+        self.root.join(layout_dir)
+    }
+}
+
+fn create_dir_all(path: impl AsRef<Path>) -> StorageResult<()> {
+    let path = path.as_ref();
+    fs::create_dir_all(path).map_err(|source| StorageError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_manifest(path: &Path) -> StorageResult<StorageManifest> {
+    let bytes = fs::read(path).map_err(|source| StorageError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|source| StorageError::ManifestSerde {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_manifest(path: &Path, manifest: &StorageManifest) -> StorageResult<()> {
+    let bytes =
+        serde_json::to_vec_pretty(manifest).map_err(|source| StorageError::ManifestSerde {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    fs::write(path, bytes).map_err(|source| StorageError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
