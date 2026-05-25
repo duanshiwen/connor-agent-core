@@ -1,6 +1,7 @@
 //! AgentOS durable storage layout primitives.
 
 pub mod artifact_store;
+pub mod backup;
 pub mod lock;
 pub mod migration;
 
@@ -15,6 +16,7 @@ pub use artifact_store::{
     ArtifactContentMetadata, ArtifactVerificationIssue, ArtifactVerificationReport,
     FsArtifactRecord, FsArtifactStore,
 };
+pub use backup::{BackupFileEntry, BackupManifest, BackupReport, RestoreReport, StorageBackup};
 pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
     MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
@@ -72,6 +74,29 @@ pub enum StorageError {
 
     #[error("invalid artifact id for filesystem path: {artifact_id}")]
     InvalidArtifactIdPath { artifact_id: String },
+
+    #[error("backup manifest serialization failed at {path}: {source}")]
+    BackupManifestSerde {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("backup/restore target is not empty: {path}")]
+    BackupTargetNotEmpty { path: PathBuf },
+
+    #[error("backup file missing: {path}")]
+    BackupFileMissing { path: String },
+
+    #[error("backup integrity mismatch at {path}: expected {expected}, actual {actual}")]
+    BackupIntegrityMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("restore integrity failed: {message}")]
+    RestoreIntegrityFailed { message: String },
 
     #[error("storage lock already held at {path} by {owner_id} until {expires_at}")]
     LockAlreadyHeld {
