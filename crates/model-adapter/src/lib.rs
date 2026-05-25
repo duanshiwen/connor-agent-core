@@ -148,12 +148,81 @@ impl ModelUsage {
     }
 }
 
-/// Text-only model response.
+/// Provider-neutral tool definition exposed to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelResponse {
-    pub text: String,
-    pub usage: Option<ModelUsage>,
-    pub model_id: ModelId,
+pub struct ToolDefinition {
+    /// Tool name, typically matching an `ActionKind` (e.g. `knowledge.search`).
+    pub name: String,
+    /// Short human-readable description for the model.
+    pub description: String,
+    /// JSON Schema describing the tool's input parameters.
+    pub input_schema: serde_json::Value,
+}
+
+/// A single tool call returned by the model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned call identifier (e.g. `call_abc123`).
+    pub id: String,
+    /// Tool name requested by the model.
+    pub name: String,
+    /// Parsed JSON arguments.
+    pub arguments: serde_json::Value,
+    /// Original raw JSON string from the provider (for debugging / audit).
+    pub raw_arguments: String,
+}
+
+/// Controls whether the model can or must use tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// Model decides whether to call a tool.
+    Auto,
+    /// Model must not call any tool.
+    None,
+    /// Model must call at least one tool.
+    Required,
+    /// Model must call the named tool.
+    Named(String),
+}
+
+/// Unified model output — either text-only or tool calls.
+///
+/// Replaces the former `ModelResponse` struct. Text-only responses map to
+/// `ModelOutput::Text`; responses that include tool/function calls map to
+/// `ModelOutput::ToolCalls`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelOutput {
+    Text {
+        text: String,
+        usage: Option<ModelUsage>,
+    },
+    ToolCalls {
+        /// Optional text content emitted alongside tool calls.
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        usage: Option<ModelUsage>,
+    },
+}
+
+impl ModelOutput {
+    /// Returns the text content if this is a text-only output.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            ModelOutput::Text { text, .. } => Some(text),
+            ModelOutput::ToolCalls { content, .. } => content.as_deref(),
+        }
+    }
+
+    /// Returns usage regardless of output variant.
+    pub fn usage(&self) -> Option<&ModelUsage> {
+        match self {
+            ModelOutput::Text { usage, .. } | ModelOutput::ToolCalls { usage, .. } => {
+                usage.as_ref()
+            }
+        }
+    }
 }
 
 /// Typed model adapter errors.
@@ -173,12 +242,36 @@ pub enum ModelAdapterError {
 
     #[error("executor failed: {0}")]
     ExecutorFailed(String),
+
+    #[error("malformed tool call arguments: {0}")]
+    MalformedToolCallArguments(String),
+
+    #[error("missing tool call function name")]
+    MissingToolCallName,
+
+    #[error("missing tool call id")]
+    MissingToolCallId,
 }
 
-/// Async text-only model adapter trait.
+/// Async model adapter trait — text-only completion.
 #[async_trait]
 pub trait ModelAdapter: Send + Sync {
-    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelAdapterError>;
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError>;
+}
+
+/// Extended adapter that supports tool / function calling.
+///
+/// Implementors translate provider-neutral [`ToolDefinition`]s into the
+/// provider's native wire format and parse tool call responses back into
+/// [`ModelOutput::ToolCalls`].
+#[async_trait]
+pub trait ToolCallingModelAdapter: ModelAdapter {
+    async fn complete_with_tools(
+        &self,
+        request: ModelRequest,
+        tools: Vec<ToolDefinition>,
+        tool_choice: ToolChoice,
+    ) -> Result<ModelOutput, ModelAdapterError>;
 }
 
 /// Deterministic fake adapter for tests and early runtime integration.
@@ -205,7 +298,7 @@ impl FakeModelAdapter {
 
 #[async_trait]
 impl ModelAdapter for FakeModelAdapter {
-    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelAdapterError> {
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
         if request.messages.is_empty() {
             return Err(ModelAdapterError::EmptyRequest);
         }
@@ -218,7 +311,7 @@ impl ModelAdapter for FakeModelAdapter {
             .map(|message| message.text.as_str())
             .unwrap_or("");
 
-        Ok(ModelResponse {
+        Ok(ModelOutput::Text {
             text: format!(
                 "{} for {} with {} message(s): {}",
                 self.response_prefix,
@@ -234,7 +327,6 @@ impl ModelAdapter for FakeModelAdapter {
                     .sum(),
                 output_tokens: count_words(&self.response_prefix) + count_words(last_user_text),
             }),
-            model_id: request.model_id,
         })
     }
 }
@@ -347,13 +439,18 @@ mod tests {
             ],
         );
 
-        let response = adapter.complete(request).await.unwrap();
+        let output = adapter.complete(request).await.unwrap();
 
-        assert_eq!(
-            response.text,
-            "Fake model response for fake/default with 2 message(s): Summarize this text"
-        );
-        assert_eq!(response.model_id, ModelId::from("fake/default"));
+        match output {
+            ModelOutput::Text { text, usage } => {
+                assert_eq!(
+                    text,
+                    "Fake model response for fake/default with 2 message(s): Summarize this text"
+                );
+                assert!(usage.is_some());
+            }
+            _ => panic!("expected text output"),
+        }
     }
 
     #[tokio::test]
@@ -420,5 +517,137 @@ mod tests {
             error,
             ModelAdapterError::ModelNotFound(ModelId::from("missing"))
         );
+    }
+
+    // ---- PR 58: Tool calling type roundtrip tests ----
+
+    #[test]
+    fn tool_definition_serde_roundtrip() {
+        let def = ToolDefinition {
+            name: "knowledge.search".to_string(),
+            description: "Search the knowledge base".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }),
+        };
+
+        let json = serde_json::to_string(&def).unwrap();
+        let decoded: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, def);
+    }
+
+    #[test]
+    fn tool_call_serde_roundtrip() {
+        let call = ToolCall {
+            id: "call_abc123".to_string(),
+            name: "knowledge.search".to_string(),
+            arguments: serde_json::json!({"query": "agent os"}),
+            raw_arguments: r#"{"query":"agent os"}"#.to_string(),
+        };
+
+        let json = serde_json::to_string(&call).unwrap();
+        let decoded: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, call);
+    }
+
+    #[test]
+    fn tool_choice_serde_variants() {
+        let auto = ToolChoice::Auto;
+        assert_eq!(serde_json::to_string(&auto).unwrap(), r#""auto""#);
+
+        let none = ToolChoice::None;
+        assert_eq!(serde_json::to_string(&none).unwrap(), r#""none""#);
+
+        let required = ToolChoice::Required;
+        assert_eq!(serde_json::to_string(&required).unwrap(), r#""required""#);
+
+        let named = ToolChoice::Named("knowledge.search".to_string());
+        let named_json = serde_json::to_string(&named).unwrap();
+        let named_val: serde_json::Value = serde_json::from_str(&named_json).unwrap();
+        assert_eq!(named_val["named"].as_str().unwrap(), "knowledge.search");
+    }
+
+    #[test]
+    fn model_output_text_serde_roundtrip() {
+        let output = ModelOutput::Text {
+            text: "Hello!".to_string(),
+            usage: Some(ModelUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            }),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        let decoded: ModelOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn model_output_tool_calls_serde_roundtrip() {
+        let output = ModelOutput::ToolCalls {
+            content: Some("I'll search for you.".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "call_001".to_string(),
+                name: "knowledge.search".to_string(),
+                arguments: serde_json::json!({"query": "agent os"}),
+                raw_arguments: r#"{"query":"agent os"}"#.to_string(),
+            }],
+            usage: Some(ModelUsage {
+                input_tokens: 50,
+                output_tokens: 15,
+            }),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        let decoded: ModelOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn model_output_text_accessor() {
+        let output = ModelOutput::Text {
+            text: "Hello".to_string(),
+            usage: None,
+        };
+        assert_eq!(output.text(), Some("Hello"));
+        assert!(output.usage().is_none());
+    }
+
+    #[test]
+    fn model_output_tool_calls_content_accessor() {
+        let output = ModelOutput::ToolCalls {
+            content: Some("Thinking...".to_string()),
+            tool_calls: vec![],
+            usage: None,
+        };
+        assert_eq!(output.text(), Some("Thinking..."));
+    }
+
+    #[test]
+    fn model_output_tool_calls_none_content_accessor() {
+        let output = ModelOutput::ToolCalls {
+            content: None,
+            tool_calls: vec![],
+            usage: None,
+        };
+        assert_eq!(output.text(), None);
+    }
+
+    #[test]
+    fn tool_call_empty_arguments_json_object() {
+        // Some models return "{}" for no-arg tools
+        let call = ToolCall {
+            id: "call_empty".to_string(),
+            name: "tool.no_args".to_string(),
+            arguments: serde_json::json!({}),
+            raw_arguments: "{}".to_string(),
+        };
+        let json = serde_json::to_string(&call).unwrap();
+        let decoded: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.arguments, serde_json::json!({}));
     }
 }

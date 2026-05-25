@@ -196,7 +196,7 @@ pub trait ActionProposalDetector: Send + Sync {
     fn detect(
         &self,
         context: &AgentContext,
-        model_response: &ModelResponse,
+        model_output: &ModelOutput,
     ) -> Option<AgentActionProposal>;
 }
 
@@ -208,7 +208,7 @@ impl ActionProposalDetector for NoopActionProposalDetector {
     fn detect(
         &self,
         _context: &AgentContext,
-        _model_response: &ModelResponse,
+        _model_output: &ModelOutput,
     ) -> Option<AgentActionProposal> {
         None
     }
@@ -269,9 +269,10 @@ impl ActionProposalDetector for KeywordActionProposalDetector {
     fn detect(
         &self,
         context: &AgentContext,
-        model_response: &ModelResponse,
+        model_output: &ModelOutput,
     ) -> Option<AgentActionProposal> {
-        let parsed = parse_action_marker(&model_response.text)?;
+        let text = model_output.text().unwrap_or("");
+        let parsed = parse_action_marker(text)?;
         let input = if parsed.input_text.is_empty() {
             serde_json::json!({})
         } else {
@@ -304,9 +305,10 @@ impl ActionProposalDetector for RegistryActionProposalDetector<'_> {
     fn detect(
         &self,
         context: &AgentContext,
-        model_response: &ModelResponse,
+        model_output: &ModelOutput,
     ) -> Option<AgentActionProposal> {
-        let parsed = parse_action_marker(&model_response.text)?;
+        let text = model_output.text().unwrap_or("");
+        let parsed = parse_action_marker(text)?;
         let action_kind = ActionKind::from(parsed.kind);
         self.registry.get(&action_kind)?;
         let input = if parsed.input_text.is_empty() {
@@ -480,7 +482,7 @@ impl AgentRunProcessor {
                 conversation_id: conversation_id.clone(),
                 sender_id: agent_participant_id.clone(),
                 content: MessageContent::Text {
-                    text: response.text.clone(),
+                    text: response.text().unwrap_or("").to_string(),
                 },
                 reply_to: Some(trigger_message_id.clone()),
                 thread_id: None,
@@ -501,7 +503,7 @@ impl AgentRunProcessor {
         Ok(AgentRunOutcome::Completed {
             run_id: run_id.to_string(),
             output_message_id,
-            response_text: response.text,
+            response_text: response.text().unwrap_or("").to_string(),
         })
     }
 
@@ -601,10 +603,10 @@ impl AgentRunProcessor {
                 "{}
 
 [Action outcome] {}",
-                response.text,
+                response.text().unwrap_or(""),
                 summarize_action_outcome(outcome)
             ),
-            None => response.text.clone(),
+            None => response.text().unwrap_or("").to_string(),
         };
 
         let output_message_id = kernel
@@ -1170,7 +1172,7 @@ mod tests {
             async fn complete(
                 &self,
                 _request: ModelRequest,
-            ) -> Result<ModelResponse, ModelAdapterError> {
+            ) -> Result<ModelOutput, ModelAdapterError> {
                 Err(ModelAdapterError::ExecutorFailed(
                     "simulated failure".to_string(),
                 ))
@@ -1284,14 +1286,10 @@ mod tests {
 
     #[async_trait]
     impl ModelAdapter for StaticAdapter {
-        async fn complete(
-            &self,
-            request: ModelRequest,
-        ) -> Result<ModelResponse, ModelAdapterError> {
-            Ok(ModelResponse {
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+            Ok(ModelOutput::Text {
                 text: self.text.clone(),
                 usage: None,
-                model_id: request.model_id,
             })
         }
     }
@@ -1789,11 +1787,10 @@ mod tests {
         }
     }
 
-    fn detector_response(text: &str) -> ModelResponse {
-        ModelResponse {
+    fn detector_response(text: &str) -> ModelOutput {
+        ModelOutput::Text {
             text: text.to_string(),
             usage: None,
-            model_id: ModelId::from("test-model"),
         }
     }
 

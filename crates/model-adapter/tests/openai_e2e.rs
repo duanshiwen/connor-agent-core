@@ -174,13 +174,9 @@ async fn complete_returns_text_and_usage() {
     );
 
     let response = adapter.complete(request).await.unwrap();
-    assert_eq!(response.text, "Hello! I am a helpful assistant.");
-    assert_eq!(
-        response.model_id,
-        model_adapter::ModelId("test-model".to_string())
-    );
+    assert_eq!(response.text().unwrap(), "Hello! I am a helpful assistant.");
 
-    let usage = response.usage.unwrap();
+    let usage = response.usage().unwrap();
     assert_eq!(usage.input_tokens, 15);
     assert_eq!(usage.output_tokens, 10);
 
@@ -195,7 +191,7 @@ async fn complete_passes_auth_header_and_model_in_body() {
     let request = ModelRequest::new("test-model", vec![ModelMessage::user("test")]);
 
     let response = adapter.complete(request).await.unwrap();
-    assert_eq!(response.text, "Short.");
+    assert_eq!(response.text().unwrap(), "Short.");
 
     let (headers, body) = handle.await.unwrap();
 
@@ -230,7 +226,7 @@ async fn complete_passes_temperature_and_max_tokens() {
     request.max_output_tokens = Some(256);
 
     let response = adapter.complete(request).await.unwrap();
-    assert_eq!(response.text, "Short.");
+    assert_eq!(response.text().unwrap(), "Short.");
 
     let (_headers, body) = handle.await.unwrap();
     assert!(
@@ -260,7 +256,7 @@ async fn complete_preserves_multi_turn_order() {
     );
 
     let response = adapter.complete(request).await.unwrap();
-    assert_eq!(response.text, "Summary of the conversation.");
+    assert_eq!(response.text().unwrap(), "Summary of the conversation.");
 
     let (_headers, body) = handle.await.unwrap();
     assert!(body.contains("You are concise."));
@@ -379,8 +375,8 @@ async fn complete_without_usage_field() {
     let request = ModelRequest::new("test-model", vec![ModelMessage::user("test")]);
 
     let response = adapter.complete(request).await.unwrap();
-    assert_eq!(response.text, "OK");
-    assert!(response.usage.is_none());
+    assert_eq!(response.text().unwrap(), "OK");
+    assert!(response.usage().is_none());
 
     handle.await.unwrap();
 }
