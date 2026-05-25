@@ -15,9 +15,15 @@
 //! ```
 
 mod action_store;
+mod approval_queue;
 mod run_queue;
 mod run_store;
 mod tool_loop_checkpoint;
+
+pub use approval_queue::{
+    ApprovalDecision, ApprovalDecisionKind, ApprovalQueue, ApprovalQueueError, ApprovalQueueResult,
+    ApprovalRecord, ApprovalRequest, ApprovalStatus, JsonlApprovalQueue, MemoryApprovalQueue,
+};
 
 pub use action_store::{
     ActionRecord, ActionStore, ActionStoreError, ActionStoreResult, JsonlActionStore,
