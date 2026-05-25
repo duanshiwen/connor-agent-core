@@ -50,6 +50,11 @@ use entity_core::EntityDescriptor;
 use model_adapter::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -787,10 +792,92 @@ pub enum ToolLoopOutcome {
         last_tool_calls: Vec<ToolCall>,
         turns_used: u32,
     },
+    Cancelled {
+        reason: String,
+        turns_used: u32,
+    },
+    TimedOut {
+        operation: TimeoutOperation,
+        timeout_ms: u64,
+        turns_used: u32,
+    },
     Failed {
         error: String,
         turns_used: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutOperation {
+    ModelCall,
+    Action,
+    BrowserOperation,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RunCancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolLoopExecutionControls {
+    pub cancellation_token: Option<RunCancellationToken>,
+    pub model_call_timeout: Option<Duration>,
+    pub action_timeout: Option<Duration>,
+    pub browser_operation_timeout: Option<Duration>,
+}
+
+impl ToolLoopExecutionControls {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_cancellation_token(mut self, token: RunCancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    pub fn with_model_call_timeout(mut self, timeout: Duration) -> Self {
+        self.model_call_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_action_timeout(mut self, timeout: Duration) -> Self {
+        self.action_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_browser_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.browser_operation_timeout = Some(timeout);
+        self
+    }
+
+    pub fn cancel(&self) {
+        if let Some(token) = &self.cancellation_token {
+            token.cancel();
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token
+            .as_ref()
+            .is_some_and(RunCancellationToken::is_cancelled)
+    }
 }
 
 /// Request to run the tool loop.
@@ -811,19 +898,40 @@ pub struct AgentToolLoop;
 
 impl AgentToolLoop {
     pub async fn run(req: ToolLoopRequest<'_>) -> ToolLoopOutcome {
-        Self::run_inner(req, None).await
+        Self::run_inner(req, None, ToolLoopExecutionControls::default()).await
     }
 
     pub async fn run_with_checkpoints(
         req: ToolLoopRequest<'_>,
         checkpoint_store: &dyn ToolLoopCheckpointStore,
     ) -> ToolLoopOutcome {
-        Self::run_inner(req, Some(checkpoint_store)).await
+        Self::run_inner(
+            req,
+            Some(checkpoint_store),
+            ToolLoopExecutionControls::default(),
+        )
+        .await
+    }
+
+    pub async fn run_with_controls(
+        req: ToolLoopRequest<'_>,
+        controls: ToolLoopExecutionControls,
+    ) -> ToolLoopOutcome {
+        Self::run_inner(req, None, controls).await
+    }
+
+    pub async fn run_with_checkpoints_and_controls(
+        req: ToolLoopRequest<'_>,
+        checkpoint_store: &dyn ToolLoopCheckpointStore,
+        controls: ToolLoopExecutionControls,
+    ) -> ToolLoopOutcome {
+        Self::run_inner(req, Some(checkpoint_store), controls).await
     }
 
     async fn run_inner(
         req: ToolLoopRequest<'_>,
         checkpoint_store: Option<&dyn ToolLoopCheckpointStore>,
+        controls: ToolLoopExecutionControls,
     ) -> ToolLoopOutcome {
         let mut turns_used: u32 = 0;
         let mut tool_calls_made: u32 = 0;
@@ -843,6 +951,12 @@ impl AgentToolLoop {
         };
 
         loop {
+            if controls.is_cancelled() {
+                return ToolLoopOutcome::Cancelled {
+                    reason: "run cancelled".to_string(),
+                    turns_used,
+                };
+            }
             turns_used += 1;
 
             if turns_used > req.config.max_turns {
@@ -866,17 +980,22 @@ impl AgentToolLoop {
                 }
             }
 
-            let output = match req
-                .adapter
-                .complete_with_tools(
-                    current_request.clone(),
-                    req.tools.clone(),
-                    req.tool_choice.clone(),
-                )
-                .await
+            let model_call = req.adapter.complete_with_tools(
+                current_request.clone(),
+                req.tools.clone(),
+                req.tool_choice.clone(),
+            );
+            let output = match with_optional_timeout(model_call, controls.model_call_timeout).await
             {
-                Ok(o) => o,
-                Err(e) => {
+                Ok(Ok(o)) => o,
+                Err(timeout) => {
+                    return ToolLoopOutcome::TimedOut {
+                        operation: TimeoutOperation::ModelCall,
+                        timeout_ms: duration_millis(timeout),
+                        turns_used: turns_used - 1,
+                    };
+                }
+                Ok(Err(e)) => {
                     return ToolLoopOutcome::Failed {
                         error: format!("model call failed: {e}"),
                         turns_used: turns_used - 1,
@@ -913,6 +1032,12 @@ impl AgentToolLoop {
                     let mut tool_results: Vec<(String, String)> = Vec::new();
 
                     for tc in &tool_calls {
+                        if controls.is_cancelled() {
+                            return ToolLoopOutcome::Cancelled {
+                                reason: "run cancelled".to_string(),
+                                turns_used,
+                            };
+                        }
                         if resume_plan.should_skip_tool_call(&tc.id) {
                             if let Some(result) = resume_plan.completed_tool_result(&tc.id) {
                                 tool_results.push((tc.id.clone(), result.to_string()));
@@ -935,18 +1060,29 @@ impl AgentToolLoop {
                         let action_id = action_request.action_id.to_string();
                         let read_only = is_read_only_tool_action(&action_request.action_kind.0);
 
-                        let outcome = match req
-                            .action_runtime
-                            .process(ProcessActionRequest {
-                                conversation_id: &ConversationId::from(req.conversation_id),
-                                action_request,
-                                requested_by: Some(ParticipantId::from("agent")),
-                                runtime_actor: Some(ParticipantId::from("tool_loop")),
-                            })
-                            .await
-                        {
-                            Ok(o) => o,
-                            Err(e) => {
+                        let action_timeout =
+                            action_timeout_for(&controls, &action_request.action_kind.0);
+                        let conversation_id = ConversationId::from(req.conversation_id);
+                        let action = req.action_runtime.process(ProcessActionRequest {
+                            conversation_id: &conversation_id,
+                            action_request,
+                            requested_by: Some(ParticipantId::from("agent")),
+                            runtime_actor: Some(ParticipantId::from("tool_loop")),
+                        });
+                        let outcome = match with_optional_timeout(action, action_timeout).await {
+                            Ok(Ok(o)) => o,
+                            Err(timeout) => {
+                                return ToolLoopOutcome::TimedOut {
+                                    operation: if is_browser_tool_action(tc.name.as_str()) {
+                                        TimeoutOperation::BrowserOperation
+                                    } else {
+                                        TimeoutOperation::Action
+                                    },
+                                    timeout_ms: duration_millis(timeout),
+                                    turns_used,
+                                };
+                            }
+                            Ok(Err(e)) => {
                                 tool_results.push((tc.id.clone(), format!("error: {e}")));
                                 continue;
                             }
@@ -1025,6 +1161,37 @@ impl AgentToolLoop {
             }
         }
     }
+}
+
+async fn with_optional_timeout<F, T>(future: F, timeout: Option<Duration>) -> Result<T, Duration>
+where
+    F: std::future::Future<Output = T>,
+{
+    if let Some(timeout) = timeout {
+        tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| timeout)
+    } else {
+        Ok(future.await)
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn action_timeout_for(controls: &ToolLoopExecutionControls, action_kind: &str) -> Option<Duration> {
+    if is_browser_tool_action(action_kind) {
+        controls
+            .browser_operation_timeout
+            .or(controls.action_timeout)
+    } else {
+        controls.action_timeout
+    }
+}
+
+fn is_browser_tool_action(action_kind: &str) -> bool {
+    action_kind.starts_with("browser.")
 }
 
 fn is_read_only_tool_action(action_kind: &str) -> bool {
@@ -2626,6 +2793,100 @@ mod tests {
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
                 response_text, turns_used: 1, tool_calls_made: 0
             } if response_text == "Used cached result"));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_cancelled_run_does_not_execute_followup_tool() {
+        let controls =
+            ToolLoopExecutionControls::new().with_cancellation_token(RunCancellationToken::new());
+        controls.cancel();
+        let adapter = FakeToolAdapter::new(vec![ModelOutput::ToolCalls {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_cancelled".into(),
+                name: "knowledge.search".into(),
+                arguments: serde_json::json!({"q": "skip"}),
+                raw_arguments: r#"{"q":"skip"}"#.into(),
+            }],
+            usage: None,
+        }]);
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run_with_controls(
+                ToolLoopRequest {
+                    adapter: &adapter,
+                    action_runtime: &rt,
+                    mapper: &TestMapper,
+                    config: &ToolLoopConfig::default(),
+                    initial_request: ModelRequest::new("test", vec![ModelMessage::user("search")]),
+                    tools: vec![],
+                    tool_choice: ToolChoice::Auto,
+                    run_id: "run-cancelled",
+                    conversation_id: "conv-cancelled",
+                },
+                controls,
+            )
+            .await;
+            assert!(matches!(
+                outcome,
+                ToolLoopOutcome::Cancelled { turns_used: 0, .. }
+            ));
+        });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_model_timeout_returns_typed_outcome() {
+        struct SlowToolAdapter;
+        #[async_trait]
+        impl ModelAdapter for SlowToolAdapter {
+            async fn complete(
+                &self,
+                _request: ModelRequest,
+            ) -> std::result::Result<ModelOutput, ModelAdapterError> {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(ModelOutput::Text {
+                    text: "late".into(),
+                    usage: None,
+                })
+            }
+        }
+        #[async_trait]
+        impl ToolCallingModelAdapter for SlowToolAdapter {
+            async fn complete_with_tools(
+                &self,
+                _request: ModelRequest,
+                _tools: Vec<ToolDefinition>,
+                _choice: ToolChoice,
+            ) -> std::result::Result<ModelOutput, ModelAdapterError> {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(ModelOutput::Text {
+                    text: "late".into(),
+                    usage: None,
+                })
+            }
+        }
+        let adapter = SlowToolAdapter;
+        let controls = ToolLoopExecutionControls::new()
+            .with_model_call_timeout(std::time::Duration::from_millis(1));
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run_with_controls(
+                ToolLoopRequest {
+                    adapter: &adapter,
+                    action_runtime: &rt,
+                    mapper: &TestMapper,
+                    config: &ToolLoopConfig::default(),
+                    initial_request: ModelRequest::new("test", vec![ModelMessage::user("timeout")]),
+                    tools: vec![],
+                    tool_choice: ToolChoice::Auto,
+                    run_id: "run-timeout",
+                    conversation_id: "conv-timeout",
+                },
+                controls,
+            )
+            .await;
+            assert!(
+                matches!(outcome, ToolLoopOutcome::TimedOut { operation, turns_used: 0, .. } if operation == TimeoutOperation::ModelCall)
+            );
         });
     }
 
