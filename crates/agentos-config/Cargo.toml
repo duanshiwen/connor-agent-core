@@ -1,0 +1,15 @@
+[package]
+name = "agentos-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Typed AgentOS configuration parsing, overlays, validation, and redaction."
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

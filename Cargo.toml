@@ -9,6 +9,7 @@ members = [
     "crates/model-adapter",
     "crates/agent-runtime",
     "crates/agentos-kernel",
+    "crates/agentos-config",
     "crates/agentos-storage",
     "crates/action-core",
     "crates/action-runtime",
@@ -62,6 +63,7 @@ thiserror = "2"
 
 # YAML
 serde_yml = "0.0.12"
+toml = "0.8"
 
 # Async
 tokio = { version = "1", features = ["full"] }
