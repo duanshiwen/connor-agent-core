@@ -1,5 +1,47 @@
 # Roadmap Progress
 
+## 2026-05-26 — M21 PR132: Human takeover boundary
+
+Status: implemented.
+
+### Scope
+
+- Added browser automation pause/resume boundary types:
+  - `BrowserAutomationState`
+  - `BrowserAutomationGate`
+  - `BrowserHumanTakeoverRequest`
+  - `BrowserHumanTakeoverLease`
+  - `BrowserHumanTakeoverReason`
+- Added metadata-only `BrowserHostSessionHandle` for exposing browser session/page/profile metadata to a host during human takeover.
+- Added `BrowserMutationActionKind` and action-name mapping for browser actions that mutate or may mutate browser/page state.
+- Added typed `BrowserKernelError::AutomationPaused(...)` for blocked mutation actions while takeover is active.
+- Kept real UI/browser handoff and executor-wide shared-state wiring outside this PR; PR132 defines the stable, testable policy boundary.
+
+### Acceptance coverage
+
+- Automation gate starts in `Running` state.
+- Human takeover requests pause automation and create a takeover lease.
+- Matching sessions can resume automation and clear active takeover state.
+- Wrong-session resume attempts are rejected.
+- Paused automation rejects all classified mutation actions with `AutomationPaused`.
+- Running automation allows classified mutation actions.
+- Host session handle exposes session metadata during active takeover and is rejected without active takeover.
+- Browser mutation action names map deterministically from action ids.
+
+### Verification commands
+
+```bash
+cargo test -p browser-kernel-core browser_automation_gate
+cargo test -p browser-kernel-core browser_mutation_action_kind
+cargo test -p browser-kernel-core host_session_handle
+cargo test -p browser-kernel-core paused_automation
+cargo test -p browser-kernel-core
+```
+
+### Next planned step
+
+M21 PR133: Browser security policy.
+
 ## 2026-05-26 — M21 PR131: HAR / network trace boundary
 
 Status: implemented.

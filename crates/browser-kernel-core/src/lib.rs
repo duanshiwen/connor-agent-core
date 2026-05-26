@@ -1440,10 +1440,213 @@ pub enum BrowserKernelError {
     ChromiumNotAvailable,
     #[error("browser crashed: {0}")]
     BrowserCrashed(String),
+    #[error("browser automation is paused for human takeover: {0}")]
+    AutomationPaused(String),
     #[error("unsupported browser action: {0}")]
     UnsupportedAction(String),
     #[error("browser action failed: {0}")]
     ActionFailed(String),
+}
+
+// ---------------------------------------------------------------------------
+// Human takeover boundary
+// ---------------------------------------------------------------------------
+
+/// Current automation state for a browser session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAutomationState {
+    Running,
+    PausedForHumanTakeover,
+}
+
+/// Reason automation was paused for a human takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum BrowserHumanTakeoverReason {
+    UserRequested,
+    RiskyAction,
+    AuthenticationRequired,
+    Debugging,
+    Other(String),
+}
+
+/// Request to pause browser automation and expose a session to the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHumanTakeoverRequest {
+    pub session_id: BrowserSessionId,
+    #[serde(default)]
+    pub page_id: Option<BrowserPageId>,
+    pub reason: BrowserHumanTakeoverReason,
+    pub requested_at: DateTime<Utc>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Active human takeover lease for a browser session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHumanTakeoverLease {
+    pub session_id: BrowserSessionId,
+    #[serde(default)]
+    pub page_id: Option<BrowserPageId>,
+    pub reason: BrowserHumanTakeoverReason,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata-only browser session handle exposed to the host during takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHostSessionHandle {
+    pub session_id: BrowserSessionId,
+    #[serde(default)]
+    pub active_page_id: Option<BrowserPageId>,
+    pub pages: Vec<BrowserPageInfo>,
+    pub profile: BrowserSessionProfileBinding,
+    pub takeover_started_at: DateTime<Utc>,
+}
+
+/// Browser actions that mutate or may mutate browser/page state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMutationActionKind {
+    ClickElement,
+    TypeText,
+    FillForm,
+    SelectOption,
+    ScrollPage,
+    PressKey,
+    ExecuteJs,
+    UploadFile,
+    DownloadFile,
+}
+
+impl BrowserMutationActionKind {
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::ClickElement,
+            Self::TypeText,
+            Self::FillForm,
+            Self::SelectOption,
+            Self::ScrollPage,
+            Self::PressKey,
+            Self::ExecuteJs,
+            Self::UploadFile,
+            Self::DownloadFile,
+        ]
+    }
+
+    pub fn from_action_name(action: &str) -> Option<Self> {
+        match action {
+            "browser.click_element" => Some(Self::ClickElement),
+            "browser.type_text" => Some(Self::TypeText),
+            "browser.fill_form" => Some(Self::FillForm),
+            "browser.select_option" => Some(Self::SelectOption),
+            "browser.scroll_page" => Some(Self::ScrollPage),
+            "browser.press_key" => Some(Self::PressKey),
+            "browser.execute_js" => Some(Self::ExecuteJs),
+            "browser.upload_file" => Some(Self::UploadFile),
+            "browser.download_file" => Some(Self::DownloadFile),
+            _ => None,
+        }
+    }
+}
+
+/// Automation gate that blocks mutation actions while a human takeover lease is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserAutomationGate {
+    pub state: BrowserAutomationState,
+    #[serde(default)]
+    pub active_takeover: Option<BrowserHumanTakeoverLease>,
+}
+
+impl BrowserAutomationGate {
+    pub fn running() -> Self {
+        Self {
+            state: BrowserAutomationState::Running,
+            active_takeover: None,
+        }
+    }
+
+    pub fn pause_for_takeover(
+        &mut self,
+        request: BrowserHumanTakeoverRequest,
+    ) -> Result<BrowserHumanTakeoverLease, BrowserKernelError> {
+        let lease = BrowserHumanTakeoverLease {
+            session_id: request.session_id,
+            page_id: request.page_id,
+            reason: request.reason,
+            started_at: request.requested_at,
+            expires_at: request.expires_at,
+        };
+        self.state = BrowserAutomationState::PausedForHumanTakeover;
+        self.active_takeover = Some(lease.clone());
+        Ok(lease)
+    }
+
+    pub fn resume(
+        &mut self,
+        session_id: &BrowserSessionId,
+        _resumed_at: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        let Some(lease) = &self.active_takeover else {
+            self.state = BrowserAutomationState::Running;
+            return Ok(());
+        };
+        if &lease.session_id != session_id {
+            return Err(BrowserKernelError::InvalidConfig(format!(
+                "cannot resume browser session {} while takeover is active for {}",
+                session_id.0, lease.session_id.0
+            )));
+        }
+        self.state = BrowserAutomationState::Running;
+        self.active_takeover = None;
+        Ok(())
+    }
+
+    pub fn ensure_mutation_allowed(
+        &self,
+        action: BrowserMutationActionKind,
+    ) -> Result<(), BrowserKernelError> {
+        match self.state {
+            BrowserAutomationState::Running => Ok(()),
+            BrowserAutomationState::PausedForHumanTakeover => {
+                let session = self
+                    .active_takeover
+                    .as_ref()
+                    .map(|lease| lease.session_id.0.as_str())
+                    .unwrap_or("unknown");
+                Err(BrowserKernelError::AutomationPaused(format!(
+                    "session {} is paused; mutation action {:?} is blocked",
+                    session, action
+                )))
+            }
+        }
+    }
+
+    pub fn host_session_handle(
+        &self,
+        session: &BrowserSession,
+    ) -> Result<BrowserHostSessionHandle, BrowserKernelError> {
+        let Some(lease) = &self.active_takeover else {
+            return Err(BrowserKernelError::InvalidConfig(
+                "host session handle requires active human takeover".to_string(),
+            ));
+        };
+        if lease.session_id != session.session_id {
+            return Err(BrowserKernelError::InvalidConfig(format!(
+                "takeover session {} does not match requested session {}",
+                lease.session_id.0, session.session_id.0
+            )));
+        }
+        Ok(BrowserHostSessionHandle {
+            session_id: session.session_id.clone(),
+            active_page_id: session.active_page_id.clone(),
+            pages: session.pages.clone(),
+            profile: session.profile.clone(),
+            takeover_started_at: lease.started_at,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4141,6 +4344,204 @@ mod tests {
         let error = manager.switch_page(&page_1, now).unwrap_err();
 
         assert!(matches!(error, BrowserKernelError::ActionFailed(_)));
+    }
+
+    // ---- Human takeover boundary tests ----
+
+    #[test]
+    fn browser_automation_gate_starts_running() {
+        let gate = BrowserAutomationGate::running();
+
+        assert_eq!(gate.state, BrowserAutomationState::Running);
+        assert!(gate.active_takeover.is_none());
+    }
+
+    #[test]
+    fn browser_automation_gate_pauses_for_human_takeover() {
+        let now = ts();
+        let mut gate = BrowserAutomationGate::running();
+        let request = BrowserHumanTakeoverRequest {
+            session_id: BrowserSessionId::new("session-1").unwrap(),
+            page_id: Some(BrowserPageId::new("page-1").unwrap()),
+            reason: BrowserHumanTakeoverReason::UserRequested,
+            requested_at: now,
+            expires_at: None,
+        };
+
+        let lease = gate.pause_for_takeover(request).unwrap();
+
+        assert_eq!(gate.state, BrowserAutomationState::PausedForHumanTakeover);
+        assert_eq!(lease.session_id, BrowserSessionId("session-1".to_string()));
+        assert_eq!(lease.page_id, Some(BrowserPageId("page-1".to_string())));
+        assert_eq!(lease.reason, BrowserHumanTakeoverReason::UserRequested);
+        assert_eq!(lease.started_at, now);
+        assert_eq!(gate.active_takeover, Some(lease));
+    }
+
+    #[test]
+    fn browser_automation_gate_resumes_from_matching_session() {
+        let now = ts();
+        let mut gate = BrowserAutomationGate::running();
+        gate.pause_for_takeover(BrowserHumanTakeoverRequest {
+            session_id: BrowserSessionId::new("session-1").unwrap(),
+            page_id: None,
+            reason: BrowserHumanTakeoverReason::Debugging,
+            requested_at: now,
+            expires_at: None,
+        })
+        .unwrap();
+
+        gate.resume(&BrowserSessionId::new("session-1").unwrap(), now)
+            .unwrap();
+
+        assert_eq!(gate.state, BrowserAutomationState::Running);
+        assert!(gate.active_takeover.is_none());
+    }
+
+    #[test]
+    fn browser_automation_gate_rejects_resume_for_wrong_session() {
+        let now = ts();
+        let mut gate = BrowserAutomationGate::running();
+        gate.pause_for_takeover(BrowserHumanTakeoverRequest {
+            session_id: BrowserSessionId::new("session-1").unwrap(),
+            page_id: None,
+            reason: BrowserHumanTakeoverReason::Debugging,
+            requested_at: now,
+            expires_at: None,
+        })
+        .unwrap();
+
+        let error = gate
+            .resume(&BrowserSessionId::new("session-2").unwrap(), now)
+            .unwrap_err();
+
+        assert!(matches!(error, BrowserKernelError::InvalidConfig(_)));
+        assert_eq!(gate.state, BrowserAutomationState::PausedForHumanTakeover);
+    }
+
+    #[test]
+    fn paused_automation_rejects_mutation_actions() {
+        let now = ts();
+        let mut gate = BrowserAutomationGate::running();
+        gate.pause_for_takeover(BrowserHumanTakeoverRequest {
+            session_id: BrowserSessionId::new("session-1").unwrap(),
+            page_id: None,
+            reason: BrowserHumanTakeoverReason::UserRequested,
+            requested_at: now,
+            expires_at: None,
+        })
+        .unwrap();
+
+        for action in BrowserMutationActionKind::all() {
+            let error = gate.ensure_mutation_allowed(action.clone()).unwrap_err();
+            assert!(matches!(error, BrowserKernelError::AutomationPaused(_)));
+        }
+    }
+
+    #[test]
+    fn running_automation_allows_mutation_actions() {
+        let gate = BrowserAutomationGate::running();
+
+        for action in BrowserMutationActionKind::all() {
+            assert!(gate.ensure_mutation_allowed(action).is_ok());
+        }
+    }
+
+    #[test]
+    fn host_session_handle_exposes_session_metadata_during_takeover() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        session
+            .open_page(
+                BrowserPageId::new("page-1").unwrap(),
+                Some("https://example.com".to_string()),
+                Some("Example".to_string()),
+                now,
+            )
+            .unwrap();
+        let mut gate = BrowserAutomationGate::running();
+        gate.pause_for_takeover(BrowserHumanTakeoverRequest {
+            session_id: session.session_id.clone(),
+            page_id: session.active_page_id.clone(),
+            reason: BrowserHumanTakeoverReason::AuthenticationRequired,
+            requested_at: now,
+            expires_at: None,
+        })
+        .unwrap();
+
+        let handle = gate.host_session_handle(&session).unwrap();
+
+        assert_eq!(handle.session_id, session.session_id);
+        assert_eq!(
+            handle.active_page_id,
+            Some(BrowserPageId("page-1".to_string()))
+        );
+        assert_eq!(handle.pages.len(), 1);
+        assert_eq!(handle.profile, session.profile);
+        assert_eq!(handle.takeover_started_at, now);
+    }
+
+    #[test]
+    fn host_session_handle_requires_active_takeover() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let gate = BrowserAutomationGate::running();
+
+        let error = gate.host_session_handle(&session).unwrap_err();
+
+        assert!(matches!(error, BrowserKernelError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn browser_mutation_action_kind_maps_known_mutation_actions() {
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.click_element"),
+            Some(BrowserMutationActionKind::ClickElement)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.type_text"),
+            Some(BrowserMutationActionKind::TypeText)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.fill_form"),
+            Some(BrowserMutationActionKind::FillForm)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.select_option"),
+            Some(BrowserMutationActionKind::SelectOption)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.scroll_page"),
+            Some(BrowserMutationActionKind::ScrollPage)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.press_key"),
+            Some(BrowserMutationActionKind::PressKey)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.execute_js"),
+            Some(BrowserMutationActionKind::ExecuteJs)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.upload_file"),
+            Some(BrowserMutationActionKind::UploadFile)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.download_file"),
+            Some(BrowserMutationActionKind::DownloadFile)
+        );
+        assert_eq!(
+            BrowserMutationActionKind::from_action_name("browser.extract_content"),
+            None
+        );
     }
 
     // ---- Browser crash recovery tests ----
