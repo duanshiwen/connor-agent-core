@@ -48,6 +48,44 @@ impl PolicyDecision {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Policy Explanation
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Identifies why a policy decision was selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PolicyMatchedRule {
+    /// A concrete side-effect rule matched the action.
+    Rule { side_effect: SideEffectKind },
+    /// No rule matched; the policy default was used.
+    Default,
+}
+
+/// Structured explanation for a policy evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyExplanation {
+    /// Action kind being evaluated.
+    pub action_kind: String,
+    /// Side-effect classification used for the decision.
+    pub side_effect: SideEffectKind,
+    /// Rule decision selected by policy evaluation.
+    pub decision: PolicyRuleDecision,
+    /// The matched rule, or default fallback when no rule matched.
+    pub matched_rule: PolicyMatchedRule,
+    /// Deterministic risk summary for logs, approval prompts, and diagnostics.
+    pub risk_summary: String,
+    /// User-facing reason aligned with the returned `PolicyDecision` reason.
+    pub user_facing_reason: String,
+}
+
+/// Full policy evaluation result containing both decision and explanation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEvaluation {
+    pub decision: PolicyDecision,
+    pub explanation: PolicyExplanation,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Policy Rule
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -143,24 +181,52 @@ impl CapabilityPolicy {
     /// Evaluate an action request against the policy.
     pub fn evaluate(
         &self,
-        _request: &ActionRequest,
+        request: &ActionRequest,
         side_effect: &SideEffectKind,
     ) -> PolicyDecision {
-        // Find the most specific rule for this side effect kind.
-        let rule_decision = self
-            .rules
-            .iter()
-            .find(|r| r.side_effect == *side_effect)
-            .map(|r| &r.decision)
-            .unwrap_or(&self.default_decision);
+        self.evaluate_with_explanation(request, side_effect)
+            .decision
+    }
 
-        match rule_decision {
+    /// Evaluate an action request and return a structured explanation.
+    pub fn evaluate_with_explanation(
+        &self,
+        request: &ActionRequest,
+        side_effect: &SideEffectKind,
+    ) -> PolicyEvaluation {
+        // Find the most specific rule for this side effect kind.
+        let matched_rule = self.rules.iter().find(|r| r.side_effect == *side_effect);
+        let (rule_decision, matched_rule) = matched_rule
+            .map(|rule| {
+                (
+                    rule.decision.clone(),
+                    PolicyMatchedRule::Rule {
+                        side_effect: rule.side_effect.clone(),
+                    },
+                )
+            })
+            .unwrap_or_else(|| (self.default_decision.clone(), PolicyMatchedRule::Default));
+
+        let user_facing_reason = user_facing_reason(&rule_decision, side_effect);
+        let decision = match rule_decision {
             PolicyRuleDecision::Allow => PolicyDecision::Allow,
             PolicyRuleDecision::Ask => PolicyDecision::Ask {
-                reason: format!("Action requires approval: side_effect={:?}", side_effect),
+                reason: user_facing_reason.clone(),
             },
             PolicyRuleDecision::Deny => PolicyDecision::Deny {
-                reason: format!("Action denied by policy: side_effect={:?}", side_effect),
+                reason: user_facing_reason.clone(),
+            },
+        };
+
+        PolicyEvaluation {
+            decision,
+            explanation: PolicyExplanation {
+                action_kind: request.action_kind.to_string(),
+                side_effect: side_effect.clone(),
+                decision: rule_decision,
+                matched_rule,
+                risk_summary: risk_summary(side_effect),
+                user_facing_reason,
             },
         }
     }
@@ -171,12 +237,66 @@ impl CapabilityPolicy {
         request: &ActionRequest,
         registry: &action_core::ActionRegistry,
     ) -> PolicyDecision {
+        self.evaluate_with_registry_explanation(request, registry)
+            .decision
+    }
+
+    /// Evaluate using an action registry and return a structured explanation.
+    pub fn evaluate_with_registry_explanation(
+        &self,
+        request: &ActionRequest,
+        registry: &action_core::ActionRegistry,
+    ) -> PolicyEvaluation {
         let side_effect = registry
             .side_effect(&request.action_kind)
             .cloned()
             .unwrap_or(SideEffectKind::NetworkAccess); // Default to cautious.
 
-        self.evaluate(request, &side_effect)
+        self.evaluate_with_explanation(request, &side_effect)
+    }
+}
+
+fn user_facing_reason(decision: &PolicyRuleDecision, side_effect: &SideEffectKind) -> String {
+    match decision {
+        PolicyRuleDecision::Allow => {
+            format!("Action is allowed by policy: side_effect={:?}", side_effect)
+        }
+        PolicyRuleDecision::Ask => {
+            format!("Action requires approval: side_effect={:?}", side_effect)
+        }
+        PolicyRuleDecision::Deny => {
+            format!("Action denied by policy: side_effect={:?}", side_effect)
+        }
+    }
+}
+
+fn risk_summary(side_effect: &SideEffectKind) -> String {
+    match side_effect {
+        SideEffectKind::None => "Low risk: action has no external side effects.".to_string(),
+        SideEffectKind::ReadOnly => {
+            "Low risk: action reads data without mutating external state.".to_string()
+        }
+        SideEffectKind::RuntimeStateMutation => {
+            "approval recommended: action mutates runtime state.".to_string()
+        }
+        SideEffectKind::NetworkAccess => {
+            "approval recommended: action may access the network.".to_string()
+        }
+        SideEffectKind::UiSideEffect => {
+            "approval recommended: action may change user-visible UI state.".to_string()
+        }
+        SideEffectKind::FileSystemMutation => {
+            "High risk: action may modify local filesystem data.".to_string()
+        }
+        SideEffectKind::ExternalSystemMutation => {
+            "High risk: action may mutate an external system.".to_string()
+        }
+        SideEffectKind::DeviceControl => {
+            "High risk: action may control local device hardware.".to_string()
+        }
+        SideEffectKind::SensitiveProfileMutation => {
+            "High risk: action may modify sensitive user profile data.".to_string()
+        }
     }
 }
 
@@ -313,6 +433,94 @@ mod tests {
         let request = test_request("knowledge.search");
         let decision = policy.evaluate_with_registry(&request, &registry);
         assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn policy_explanation_records_matched_rule() {
+        let policy = CapabilityPolicy::default_safe();
+        let request = test_request("knowledge.search");
+
+        let evaluation = policy.evaluate_with_explanation(&request, &SideEffectKind::ReadOnly);
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert_eq!(
+            evaluation.explanation.matched_rule,
+            PolicyMatchedRule::Rule {
+                side_effect: SideEffectKind::ReadOnly
+            }
+        );
+        assert_eq!(evaluation.explanation.action_kind, "knowledge.search");
+        assert_eq!(evaluation.explanation.side_effect, SideEffectKind::ReadOnly);
+        assert_eq!(evaluation.explanation.decision, PolicyRuleDecision::Allow);
+    }
+
+    #[test]
+    fn policy_explanation_records_default_fallback() {
+        let policy = CapabilityPolicy::new(vec![], PolicyRuleDecision::Deny);
+        let request = test_request("mail.send");
+
+        let evaluation =
+            policy.evaluate_with_explanation(&request, &SideEffectKind::ExternalSystemMutation);
+
+        assert!(evaluation.decision.is_denied());
+        assert_eq!(
+            evaluation.explanation.matched_rule,
+            PolicyMatchedRule::Default
+        );
+        assert_eq!(
+            evaluation.explanation.side_effect,
+            SideEffectKind::ExternalSystemMutation
+        );
+        assert_eq!(evaluation.explanation.decision, PolicyRuleDecision::Deny);
+    }
+
+    #[test]
+    fn policy_explanation_has_user_facing_reason_for_approval() {
+        let policy = CapabilityPolicy::default_safe();
+        let request = test_request("knowledge.save_entry");
+
+        let evaluation =
+            policy.evaluate_with_explanation(&request, &SideEffectKind::RuntimeStateMutation);
+
+        let PolicyDecision::Ask { reason } = &evaluation.decision else {
+            panic!("expected approval decision");
+        };
+        assert_eq!(evaluation.explanation.user_facing_reason, *reason);
+        assert!(evaluation.explanation.risk_summary.contains("approval"));
+    }
+
+    #[test]
+    fn registry_explanation_defaults_unknown_action_to_network_access() {
+        let policy = CapabilityPolicy::default_safe();
+        let registry = action_core::ActionRegistry::new();
+        let request = test_request("unknown.action");
+
+        let evaluation = policy.evaluate_with_registry_explanation(&request, &registry);
+
+        assert!(evaluation.decision.is_ask());
+        assert_eq!(
+            evaluation.explanation.side_effect,
+            SideEffectKind::NetworkAccess
+        );
+        assert_eq!(
+            evaluation.explanation.matched_rule,
+            PolicyMatchedRule::Rule {
+                side_effect: SideEffectKind::NetworkAccess
+            }
+        );
+    }
+
+    #[test]
+    fn policy_evaluation_serde_roundtrip() {
+        let policy = CapabilityPolicy::default_safe();
+        let request = test_request("mail.send");
+        let evaluation =
+            policy.evaluate_with_explanation(&request, &SideEffectKind::ExternalSystemMutation);
+
+        let json = serde_json::to_string(&evaluation).unwrap();
+        let decoded: PolicyEvaluation = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, evaluation);
     }
 
     #[test]
