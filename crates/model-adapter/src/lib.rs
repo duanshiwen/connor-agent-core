@@ -228,6 +228,88 @@ impl ModelOutput {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming Abstraction
+// ---------------------------------------------------------------------------
+
+/// Provider-neutral stream events emitted by streaming model adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelStreamEvent {
+    Started { model_id: ModelId },
+    TextDelta { delta: String },
+    ToolCallDelta(ModelToolCallDelta),
+    Usage { usage: ModelUsage },
+    Finished { reason: ModelStreamFinishReason },
+    Error { message: String },
+}
+
+/// Provider-neutral finish reason for model streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStreamFinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    Error,
+}
+
+/// Incremental tool call update emitted by streaming providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelToolCallDelta {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_delta: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_delta: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_delta: Option<String>,
+}
+
+impl ModelToolCallDelta {
+    pub fn arguments(index: usize, delta: impl Into<String>) -> Self {
+        Self {
+            index,
+            id_delta: None,
+            name_delta: None,
+            arguments_delta: Some(delta.into()),
+        }
+    }
+}
+
+/// Accumulates provider-neutral stream events into a simple text/usage summary.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelStreamAccumulator {
+    pub text: String,
+    pub usage: Option<ModelUsage>,
+    pub finished: Option<ModelStreamFinishReason>,
+    pub errors: Vec<String>,
+}
+
+impl ModelStreamAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply(&mut self, event: &ModelStreamEvent) {
+        match event {
+            ModelStreamEvent::TextDelta { delta } => self.text.push_str(delta),
+            ModelStreamEvent::Usage { usage } => self.usage = Some(usage.clone()),
+            ModelStreamEvent::Finished { reason } => self.finished = Some(*reason),
+            ModelStreamEvent::Error { message } => self.errors.push(message.clone()),
+            ModelStreamEvent::Started { .. } | ModelStreamEvent::ToolCallDelta(_) => {}
+        }
+    }
+
+    pub fn from_events(events: &[ModelStreamEvent]) -> Self {
+        let mut accumulator = Self::new();
+        for event in events {
+            accumulator.apply(event);
+        }
+        accumulator
+    }
+}
+
 /// Typed model adapter errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ModelAdapterError {
@@ -275,6 +357,19 @@ pub enum ModelAdapterError {
 #[async_trait]
 pub trait ModelAdapter: Send + Sync {
     async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError>;
+}
+
+/// Extended adapter that supports provider-neutral streaming events.
+///
+/// The v1 abstraction returns a deterministic event vector so providers can
+/// share event semantics before transport-specific streaming parsers are wired
+/// in PR113/PR114.
+#[async_trait]
+pub trait StreamingModelAdapter: ModelAdapter {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError>;
 }
 
 /// Extended adapter that supports tool / function calling.
@@ -349,8 +444,113 @@ impl ModelAdapter for FakeModelAdapter {
     }
 }
 
+/// Deterministic fake streaming adapter for tests and early runtime work.
+#[derive(Debug, Clone)]
+pub struct FakeStreamingModelAdapter {
+    inner: FakeModelAdapter,
+}
+
+impl Default for FakeStreamingModelAdapter {
+    fn default() -> Self {
+        Self {
+            inner: FakeModelAdapter::default(),
+        }
+    }
+}
+
+impl FakeStreamingModelAdapter {
+    pub fn new(response_prefix: impl Into<String>) -> Self {
+        Self {
+            inner: FakeModelAdapter::new(response_prefix),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelAdapter for FakeStreamingModelAdapter {
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+        self.inner.complete(request).await
+    }
+}
+
+#[async_trait]
+impl StreamingModelAdapter for FakeStreamingModelAdapter {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        let model_id = request.model_id.clone();
+        let output = self.complete(request).await?;
+        let mut events = vec![ModelStreamEvent::Started { model_id }];
+
+        match output {
+            ModelOutput::Text { text, usage } => {
+                events.extend(
+                    text_delta_chunks(&text)
+                        .into_iter()
+                        .map(|delta| ModelStreamEvent::TextDelta { delta }),
+                );
+                if let Some(usage) = usage {
+                    events.push(ModelStreamEvent::Usage { usage });
+                }
+                events.push(ModelStreamEvent::Finished {
+                    reason: ModelStreamFinishReason::Stop,
+                });
+            }
+            ModelOutput::ToolCalls {
+                content,
+                tool_calls,
+                usage,
+            } => {
+                if let Some(content) = content {
+                    events.extend(
+                        text_delta_chunks(&content)
+                            .into_iter()
+                            .map(|delta| ModelStreamEvent::TextDelta { delta }),
+                    );
+                }
+                for (index, call) in tool_calls.into_iter().enumerate() {
+                    events.push(ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                        index,
+                        id_delta: Some(call.id),
+                        name_delta: Some(call.name),
+                        arguments_delta: Some(call.raw_arguments),
+                    }));
+                }
+                if let Some(usage) = usage {
+                    events.push(ModelStreamEvent::Usage { usage });
+                }
+                events.push(ModelStreamEvent::Finished {
+                    reason: ModelStreamFinishReason::ToolCalls,
+                });
+            }
+        }
+
+        Ok(events)
+    }
+}
+
 fn count_words(text: &str) -> u32 {
     text.split_whitespace().count() as u32
+}
+
+fn text_delta_chunks(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for token in text.split_inclusive(' ') {
+        current.push_str(token);
+        if current.len() >= 16 {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// Deterministic model registry.
@@ -408,6 +608,134 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_event_serde_roundtrip() {
+        let event = ModelStreamEvent::TextDelta {
+            delta: "hello".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: ModelStreamEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn tool_call_delta_serde_roundtrip() {
+        let delta = ModelToolCallDelta {
+            index: 1,
+            id_delta: Some("call_1".to_string()),
+            name_delta: Some("knowledge.search".to_string()),
+            arguments_delta: Some(r#"{"query":"agent os"}"#.to_string()),
+        };
+
+        let json = serde_json::to_string(&delta).unwrap();
+        let decoded: ModelToolCallDelta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, delta);
+    }
+
+    #[test]
+    fn stream_finish_reason_serde() {
+        assert_eq!(
+            serde_json::to_string(&ModelStreamFinishReason::ToolCalls).unwrap(),
+            "\"tool_calls\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ModelStreamFinishReason>("\"length\"").unwrap(),
+            ModelStreamFinishReason::Length
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_streaming_adapter_emits_started_text_usage_finished() {
+        let adapter = FakeStreamingModelAdapter::default();
+        let request = ModelRequest::new(
+            "fake/default",
+            vec![ModelMessage::user("Summarize this text")],
+        );
+
+        let events = adapter.stream(request).await.unwrap();
+
+        assert!(matches!(
+            events.first(),
+            Some(ModelStreamEvent::Started { model_id }) if model_id == &ModelId::from("fake/default")
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ModelStreamEvent::TextDelta { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ModelStreamEvent::Usage { .. }))
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ModelStreamEvent::Finished {
+                reason: ModelStreamFinishReason::Stop
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_streaming_adapter_rejects_empty_request() {
+        let adapter = FakeStreamingModelAdapter::default();
+        let request = ModelRequest::new("fake/default", vec![]);
+
+        let error = adapter.stream(request).await.unwrap_err();
+
+        assert_eq!(error, ModelAdapterError::EmptyRequest);
+    }
+
+    #[test]
+    fn stream_accumulator_collects_text_and_usage() {
+        let events = vec![
+            ModelStreamEvent::Started {
+                model_id: ModelId::from("fake/default"),
+            },
+            ModelStreamEvent::TextDelta {
+                delta: "hello ".to_string(),
+            },
+            ModelStreamEvent::TextDelta {
+                delta: "world".to_string(),
+            },
+            ModelStreamEvent::Usage {
+                usage: ModelUsage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                },
+            },
+            ModelStreamEvent::Finished {
+                reason: ModelStreamFinishReason::Stop,
+            },
+        ];
+
+        let accumulator = ModelStreamAccumulator::from_events(&events);
+
+        assert_eq!(accumulator.text, "hello world");
+        assert_eq!(accumulator.usage.unwrap().total_tokens(), 5);
+        assert_eq!(accumulator.finished, Some(ModelStreamFinishReason::Stop));
+        assert!(accumulator.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_adapter_complete_matches_accumulated_text() {
+        let adapter = FakeStreamingModelAdapter::new("Streaming fake response");
+        let request = ModelRequest::new(
+            "fake/default",
+            vec![ModelMessage::user("Summarize this text")],
+        );
+
+        let complete = adapter.complete(request.clone()).await.unwrap();
+        let events = adapter.stream(request).await.unwrap();
+        let accumulator = ModelStreamAccumulator::from_events(&events);
+
+        assert_eq!(complete.text(), Some(accumulator.text.as_str()));
+        assert_eq!(complete.usage(), accumulator.usage.as_ref());
+    }
 
     #[test]
     fn model_id_display_and_serde_roundtrip() {
