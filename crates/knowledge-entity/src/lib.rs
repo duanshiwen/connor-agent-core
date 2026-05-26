@@ -1199,6 +1199,238 @@ impl QuestionLedger for MemoryQuestionLedger {
     }
 }
 
+/// Governance lifecycle status for knowledge entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeGovernanceStatus {
+    Draft,
+    Active,
+    Deprecated,
+    Archived,
+}
+
+/// Frontmatter validation errors used by the governance workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum KnowledgeGovernanceValidationError {
+    #[error("frontmatter title is required")]
+    MissingTitle,
+    #[error("frontmatter summary is required")]
+    MissingSummary,
+    #[error("frontmatter tags must contain at least one item")]
+    MissingTags,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KnowledgeGovernanceError {
+    #[error("knowledge governance lock poisoned")]
+    LockPoisoned,
+    #[error("knowledge governance record not found: {0}")]
+    NotFound(String),
+    #[error("knowledge governance validation failed: {0:?}")]
+    ValidationFailed(Vec<KnowledgeGovernanceValidationError>),
+}
+
+/// Governance metadata for a knowledge entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeGovernanceRecord {
+    pub knowledge_entry_id: KnowledgeEntryId,
+    pub status: KnowledgeGovernanceStatus,
+    pub frontmatter: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl KnowledgeGovernanceRecord {
+    pub fn new(
+        knowledge_entry_id: KnowledgeEntryId,
+        status: KnowledgeGovernanceStatus,
+        frontmatter: serde_json::Value,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            knowledge_entry_id,
+            status,
+            frontmatter,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    pub fn validation_errors(&self) -> Vec<KnowledgeGovernanceValidationError> {
+        let mut errors = Vec::new();
+        if self
+            .frontmatter
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            errors.push(KnowledgeGovernanceValidationError::MissingTitle);
+        }
+        if self
+            .frontmatter
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            errors.push(KnowledgeGovernanceValidationError::MissingSummary);
+        }
+        if self
+            .frontmatter
+            .get("tags")
+            .and_then(serde_json::Value::as_array)
+            .filter(|tags| !tags.is_empty())
+            .is_none()
+        {
+            errors.push(KnowledgeGovernanceValidationError::MissingTags);
+        }
+        errors
+    }
+
+    pub fn activate(mut self, updated_at: DateTime<Utc>) -> Result<Self, KnowledgeGovernanceError> {
+        let errors = self.validation_errors();
+        if !errors.is_empty() {
+            return Err(KnowledgeGovernanceError::ValidationFailed(errors));
+        }
+        self.status = KnowledgeGovernanceStatus::Active;
+        self.updated_at = updated_at;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeReviewQueueItem {
+    pub knowledge_entry_id: KnowledgeEntryId,
+    pub status: KnowledgeGovernanceStatus,
+    pub validation_errors: Vec<KnowledgeGovernanceValidationError>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl KnowledgeReviewQueueItem {
+    pub fn from_record(record: &KnowledgeGovernanceRecord) -> Self {
+        Self {
+            knowledge_entry_id: record.knowledge_entry_id.clone(),
+            status: record.status,
+            validation_errors: record.validation_errors(),
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[async_trait]
+pub trait KnowledgeGovernanceStore: Send + Sync {
+    async fn upsert_record(
+        &self,
+        record: KnowledgeGovernanceRecord,
+    ) -> Result<KnowledgeGovernanceRecord, KnowledgeGovernanceError>;
+
+    async fn transition_status(
+        &self,
+        knowledge_entry_id: &KnowledgeEntryId,
+        status: KnowledgeGovernanceStatus,
+        updated_at: DateTime<Utc>,
+    ) -> Result<KnowledgeGovernanceRecord, KnowledgeGovernanceError>;
+
+    async fn review_queue(&self)
+    -> Result<Vec<KnowledgeReviewQueueItem>, KnowledgeGovernanceError>;
+
+    async fn active_index_entry_ids(
+        &self,
+    ) -> Result<Vec<KnowledgeEntryId>, KnowledgeGovernanceError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryKnowledgeGovernanceStore {
+    records: Arc<Mutex<HashMap<KnowledgeEntryId, KnowledgeGovernanceRecord>>>,
+}
+
+impl MemoryKnowledgeGovernanceStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl KnowledgeGovernanceStore for MemoryKnowledgeGovernanceStore {
+    async fn upsert_record(
+        &self,
+        record: KnowledgeGovernanceRecord,
+    ) -> Result<KnowledgeGovernanceRecord, KnowledgeGovernanceError> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| KnowledgeGovernanceError::LockPoisoned)?;
+        records.insert(record.knowledge_entry_id.clone(), record.clone());
+        Ok(record)
+    }
+
+    async fn transition_status(
+        &self,
+        knowledge_entry_id: &KnowledgeEntryId,
+        status: KnowledgeGovernanceStatus,
+        updated_at: DateTime<Utc>,
+    ) -> Result<KnowledgeGovernanceRecord, KnowledgeGovernanceError> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| KnowledgeGovernanceError::LockPoisoned)?;
+        let existing = records
+            .get(knowledge_entry_id)
+            .cloned()
+            .ok_or_else(|| KnowledgeGovernanceError::NotFound(knowledge_entry_id.to_string()))?;
+        let updated = if status == KnowledgeGovernanceStatus::Active {
+            existing.activate(updated_at)?
+        } else {
+            KnowledgeGovernanceRecord {
+                status,
+                updated_at,
+                ..existing
+            }
+        };
+        records.insert(knowledge_entry_id.clone(), updated.clone());
+        Ok(updated)
+    }
+
+    async fn review_queue(
+        &self,
+    ) -> Result<Vec<KnowledgeReviewQueueItem>, KnowledgeGovernanceError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| KnowledgeGovernanceError::LockPoisoned)?;
+        let mut queue = records
+            .values()
+            .filter(|record| record.status != KnowledgeGovernanceStatus::Active)
+            .map(KnowledgeReviewQueueItem::from_record)
+            .filter(|item| !item.validation_errors.is_empty())
+            .collect::<Vec<_>>();
+        queue.sort_by(|a, b| a.knowledge_entry_id.0.cmp(&b.knowledge_entry_id.0));
+        Ok(queue)
+    }
+
+    async fn active_index_entry_ids(
+        &self,
+    ) -> Result<Vec<KnowledgeEntryId>, KnowledgeGovernanceError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| KnowledgeGovernanceError::LockPoisoned)?;
+        let mut ids = records
+            .values()
+            .filter(|record| {
+                record.status == KnowledgeGovernanceStatus::Active
+                    && record.validation_errors().is_empty()
+            })
+            .map(|record| record.knowledge_entry_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ids)
+    }
+}
+
 /// Unique identifier for an answer cache package.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AnswerCachePackageId(pub String);
@@ -2420,6 +2652,147 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn governance_status_roundtrips() {
+        let statuses = vec![
+            KnowledgeGovernanceStatus::Draft,
+            KnowledgeGovernanceStatus::Active,
+            KnowledgeGovernanceStatus::Deprecated,
+            KnowledgeGovernanceStatus::Archived,
+        ];
+        let json = serde_json::to_string(&statuses).unwrap();
+        let decoded: Vec<KnowledgeGovernanceStatus> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, statuses);
+    }
+
+    #[test]
+    fn governance_validates_required_frontmatter_for_active_entries() {
+        let valid = KnowledgeGovernanceRecord::new(
+            KnowledgeEntryId::from("knowledge-entry-1"),
+            KnowledgeGovernanceStatus::Draft,
+            serde_json::json!({ "title": "AgentOS", "summary": "Durable memory", "tags": ["memory"] }),
+            ts(),
+        );
+        assert!(valid.validation_errors().is_empty());
+        assert_eq!(
+            valid.activate(ts()).unwrap().status,
+            KnowledgeGovernanceStatus::Active
+        );
+
+        let invalid = KnowledgeGovernanceRecord::new(
+            KnowledgeEntryId::from("knowledge-entry-2"),
+            KnowledgeGovernanceStatus::Draft,
+            serde_json::json!({ "title": "   ", "summary": "", "tags": [] }),
+            ts(),
+        );
+        assert_eq!(
+            invalid.validation_errors(),
+            vec![
+                KnowledgeGovernanceValidationError::MissingTitle,
+                KnowledgeGovernanceValidationError::MissingSummary,
+                KnowledgeGovernanceValidationError::MissingTags,
+            ]
+        );
+        assert_eq!(
+            invalid.activate(ts()).unwrap_err(),
+            KnowledgeGovernanceError::ValidationFailed(vec![
+                KnowledgeGovernanceValidationError::MissingTitle,
+                KnowledgeGovernanceValidationError::MissingSummary,
+                KnowledgeGovernanceValidationError::MissingTags,
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_governance_review_queue_lists_non_active_invalid_records() {
+        let store = MemoryKnowledgeGovernanceStore::new();
+        let invalid = store
+            .upsert_record(KnowledgeGovernanceRecord::new(
+                KnowledgeEntryId::from("knowledge-entry-1"),
+                KnowledgeGovernanceStatus::Draft,
+                serde_json::json!({ "title": "", "summary": "", "tags": [] }),
+                ts(),
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_record(KnowledgeGovernanceRecord::new(
+                KnowledgeEntryId::from("knowledge-entry-2"),
+                KnowledgeGovernanceStatus::Active,
+                serde_json::json!({ "title": "Ready", "summary": "Ready summary", "tags": ["ready"] }),
+                ts(),
+            ))
+            .await
+            .unwrap();
+
+        let queue = store.review_queue().await.unwrap();
+        assert_eq!(queue, vec![KnowledgeReviewQueueItem::from_record(&invalid)]);
+    }
+
+    #[tokio::test]
+    async fn memory_governance_rejects_invalid_activation_and_keeps_out_of_active_index() {
+        let store = MemoryKnowledgeGovernanceStore::new();
+        store
+            .upsert_record(KnowledgeGovernanceRecord::new(
+                KnowledgeEntryId::from("knowledge-entry-1"),
+                KnowledgeGovernanceStatus::Draft,
+                serde_json::json!({ "title": "", "summary": "", "tags": [] }),
+                ts(),
+            ))
+            .await
+            .unwrap();
+
+        let err = store
+            .transition_status(
+                &KnowledgeEntryId::from("knowledge-entry-1"),
+                KnowledgeGovernanceStatus::Active,
+                ts(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, KnowledgeGovernanceError::ValidationFailed(_)));
+        assert!(
+            store.active_index_entry_ids().await.unwrap().is_empty(),
+            "invalid frontmatter must not enter active index"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_governance_active_index_contains_only_valid_active_records() {
+        let store = MemoryKnowledgeGovernanceStore::new();
+        store
+            .upsert_record(KnowledgeGovernanceRecord::new(
+                KnowledgeEntryId::from("knowledge-entry-1"),
+                KnowledgeGovernanceStatus::Draft,
+                serde_json::json!({ "title": "Ready", "summary": "Ready summary", "tags": ["ready"] }),
+                ts(),
+            ))
+            .await
+            .unwrap();
+        store
+            .transition_status(
+                &KnowledgeEntryId::from("knowledge-entry-1"),
+                KnowledgeGovernanceStatus::Active,
+                ts(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_record(KnowledgeGovernanceRecord::new(
+                KnowledgeEntryId::from("knowledge-entry-2"),
+                KnowledgeGovernanceStatus::Deprecated,
+                serde_json::json!({ "title": "Old", "summary": "Old summary", "tags": ["old"] }),
+                ts(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.active_index_entry_ids().await.unwrap(),
+            vec![KnowledgeEntryId::from("knowledge-entry-1")]
+        );
     }
 
     #[test]
