@@ -61,6 +61,58 @@ pub enum BrowserPageStatus {
     Crashed,
 }
 
+/// Lightweight health classification for a browser page/tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPageHealthStatus {
+    Healthy,
+    Unresponsive,
+    Crashed,
+    Closed,
+}
+
+/// Latest known page/tab health details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPageHealth {
+    pub status: BrowserPageHealthStatus,
+    pub reason: Option<String>,
+    pub checked_at: DateTime<Utc>,
+}
+
+impl BrowserPageHealth {
+    pub fn healthy(now: DateTime<Utc>) -> Self {
+        Self {
+            status: BrowserPageHealthStatus::Healthy,
+            reason: None,
+            checked_at: now,
+        }
+    }
+
+    pub fn unresponsive(reason: impl Into<String>, now: DateTime<Utc>) -> Self {
+        Self {
+            status: BrowserPageHealthStatus::Unresponsive,
+            reason: Some(reason.into()),
+            checked_at: now,
+        }
+    }
+
+    pub fn crashed(reason: impl Into<String>, now: DateTime<Utc>) -> Self {
+        Self {
+            status: BrowserPageHealthStatus::Crashed,
+            reason: Some(reason.into()),
+            checked_at: now,
+        }
+    }
+
+    pub fn closed(now: DateTime<Utc>) -> Self {
+        Self {
+            status: BrowserPageHealthStatus::Closed,
+            reason: None,
+            checked_at: now,
+        }
+    }
+}
+
 /// Metadata for one browser page/tab in a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserPageInfo {
@@ -68,6 +120,7 @@ pub struct BrowserPageInfo {
     pub url: Option<String>,
     pub title: Option<String>,
     pub status: BrowserPageStatus,
+    pub health: BrowserPageHealth,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -79,6 +132,7 @@ impl BrowserPageInfo {
             url: None,
             title: None,
             status: BrowserPageStatus::Opening,
+            health: BrowserPageHealth::healthy(now),
             created_at: now,
             updated_at: now,
         }
@@ -98,6 +152,12 @@ impl BrowserPageInfo {
 
     pub fn with_status(mut self, status: BrowserPageStatus, now: DateTime<Utc>) -> Self {
         self.status = status;
+        self.updated_at = now;
+        self
+    }
+
+    pub fn with_health(mut self, health: BrowserPageHealth, now: DateTime<Utc>) -> Self {
+        self.health = health;
         self.updated_at = now;
         self
     }
@@ -146,15 +206,99 @@ impl BrowserSession {
         }
     }
 
-    pub fn add_page(&mut self, mut page: BrowserPageInfo) {
+    pub fn add_page(&mut self, page: BrowserPageInfo) {
+        let page_id = page.page_id.clone();
         let now = page.updated_at;
-        if self.active_page_id.is_none() {
-            page.status = BrowserPageStatus::Active;
-            page.updated_at = now;
-            self.active_page_id = Some(page.page_id.clone());
-        }
         self.pages.push(page);
+        if self.active_page_id.is_none() {
+            let _ = self.set_active_page(&page_id, now);
+        } else {
+            self.updated_at = now;
+        }
+    }
+
+    pub fn open_page(
+        &mut self,
+        page_id: BrowserPageId,
+        url: Option<String>,
+        title: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        if self.pages.iter().any(|page| page.page_id == page_id) {
+            return Err(BrowserKernelError::ActionFailed(format!(
+                "browser page already exists: {}",
+                page_id.0
+            )));
+        }
+
+        let mut page =
+            BrowserPageInfo::new(page_id, now).with_status(BrowserPageStatus::Background, now);
+        page.url = url;
+        page.title = title;
+        self.add_page(page);
+        Ok(())
+    }
+
+    pub fn close_page(
+        &mut self,
+        page_id: &BrowserPageId,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        let closing_active = self.active_page_id.as_ref() == Some(page_id);
+        let page = self.page_mut(page_id)?;
+        page.status = BrowserPageStatus::Closed;
+        page.health = BrowserPageHealth::closed(now);
+        page.updated_at = now;
+
+        if closing_active {
+            self.active_page_id = self
+                .pages
+                .iter()
+                .find(|candidate| candidate.status != BrowserPageStatus::Closed)
+                .map(|candidate| candidate.page_id.clone());
+            if let Some(next_active_id) = self.active_page_id.clone() {
+                self.set_active_page(&next_active_id, now)?;
+            }
+        }
         self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn update_page_metadata(
+        &mut self,
+        page_id: &BrowserPageId,
+        url: Option<String>,
+        title: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        let page = self.page_mut(page_id)?;
+        page.url = url;
+        page.title = title;
+        page.updated_at = now;
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn update_page_health(
+        &mut self,
+        page_id: &BrowserPageId,
+        health: BrowserPageHealth,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        let status = match health.status {
+            BrowserPageHealthStatus::Healthy => None,
+            BrowserPageHealthStatus::Unresponsive => None,
+            BrowserPageHealthStatus::Crashed => Some(BrowserPageStatus::Crashed),
+            BrowserPageHealthStatus::Closed => Some(BrowserPageStatus::Closed),
+        };
+        let page = self.page_mut(page_id)?;
+        page.health = health;
+        if let Some(status) = status {
+            page.status = status;
+        }
+        page.updated_at = now;
+        self.updated_at = now;
+        Ok(())
     }
 
     pub fn set_active_page(
@@ -162,9 +306,9 @@ impl BrowserSession {
         page_id: &BrowserPageId,
         now: DateTime<Utc>,
     ) -> Result<(), BrowserKernelError> {
-        if !self.pages.iter().any(|page| &page.page_id == page_id) {
+        if self.page(page_id)?.status == BrowserPageStatus::Closed {
             return Err(BrowserKernelError::ActionFailed(format!(
-                "browser page not found: {}",
+                "browser page is closed: {}",
                 page_id.0
             )));
         }
@@ -187,8 +331,116 @@ impl BrowserSession {
             .and_then(|active_id| self.pages.iter().find(|page| &page.page_id == active_id))
     }
 
+    pub fn page(&self, page_id: &BrowserPageId) -> Result<&BrowserPageInfo, BrowserKernelError> {
+        self.pages
+            .iter()
+            .find(|page| &page.page_id == page_id)
+            .ok_or_else(|| {
+                BrowserKernelError::ActionFailed(format!("browser page not found: {}", page_id.0))
+            })
+    }
+
+    pub fn page_mut(
+        &mut self,
+        page_id: &BrowserPageId,
+    ) -> Result<&mut BrowserPageInfo, BrowserKernelError> {
+        self.pages
+            .iter_mut()
+            .find(|page| &page.page_id == page_id)
+            .ok_or_else(|| {
+                BrowserKernelError::ActionFailed(format!("browser page not found: {}", page_id.0))
+            })
+    }
+
+    pub fn open_page_count(&self) -> usize {
+        self.pages
+            .iter()
+            .filter(|page| page.status != BrowserPageStatus::Closed)
+            .count()
+    }
+
     pub fn page_count(&self) -> usize {
         self.pages.len()
+    }
+}
+
+/// In-memory tab/page lifecycle manager for one browser session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPageLifecycleManager {
+    pub session: BrowserSession,
+    pub max_pages: usize,
+}
+
+impl BrowserPageLifecycleManager {
+    pub fn new(session: BrowserSession, max_pages: usize) -> Result<Self, BrowserKernelError> {
+        if max_pages == 0 {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser max_pages must be greater than zero".to_string(),
+            ));
+        }
+        if session.open_page_count() > max_pages {
+            return Err(BrowserKernelError::InvalidConfig(format!(
+                "browser session has {} open pages but max_pages is {}",
+                session.open_page_count(),
+                max_pages
+            )));
+        }
+        Ok(Self { session, max_pages })
+    }
+
+    pub fn open_page(
+        &mut self,
+        page_id: BrowserPageId,
+        url: Option<String>,
+        title: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        if self.session.open_page_count() >= self.max_pages {
+            return Err(BrowserKernelError::ActionFailed(format!(
+                "browser max_pages limit reached: {}",
+                self.max_pages
+            )));
+        }
+        self.session.open_page(page_id, url, title, now)
+    }
+
+    pub fn close_page(
+        &mut self,
+        page_id: &BrowserPageId,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        self.session.close_page(page_id, now)
+    }
+
+    pub fn switch_page(
+        &mut self,
+        page_id: &BrowserPageId,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        self.session.set_active_page(page_id, now)
+    }
+
+    pub fn update_page_metadata(
+        &mut self,
+        page_id: &BrowserPageId,
+        url: Option<String>,
+        title: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        self.session.update_page_metadata(page_id, url, title, now)
+    }
+
+    pub fn update_page_health(
+        &mut self,
+        page_id: &BrowserPageId,
+        health: BrowserPageHealth,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        self.session.update_page_health(page_id, health, now)
+    }
+
+    pub fn active_page(&self) -> Option<&BrowserPageInfo> {
+        self.session.active_page()
     }
 }
 
@@ -2211,6 +2463,151 @@ mod tests {
     fn browser_session_id_rejects_empty_values() {
         assert!(BrowserSessionId::new(" ").is_err());
         assert!(BrowserPageId::new("").is_err());
+    }
+
+    // ---- BrowserPageLifecycleManager tests ----
+
+    #[test]
+    fn page_lifecycle_manager_opens_closes_and_switches_pages() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 3).unwrap();
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        let page_2 = BrowserPageId::new("page-2").unwrap();
+
+        manager
+            .open_page(
+                page_1.clone(),
+                Some("https://one.example".to_string()),
+                Some("One".to_string()),
+                now,
+            )
+            .unwrap();
+        manager
+            .open_page(
+                page_2.clone(),
+                Some("https://two.example".to_string()),
+                Some("Two".to_string()),
+                now,
+            )
+            .unwrap();
+        manager.switch_page(&page_2, now).unwrap();
+        manager.close_page(&page_2, now).unwrap();
+
+        assert_eq!(manager.active_page().unwrap().page_id, page_1);
+        assert_eq!(
+            manager.session.page(&page_2).unwrap().status,
+            BrowserPageStatus::Closed
+        );
+        assert_eq!(
+            manager.session.page(&page_2).unwrap().health.status,
+            BrowserPageHealthStatus::Closed
+        );
+        assert_eq!(manager.session.open_page_count(), 1);
+    }
+
+    #[test]
+    fn page_lifecycle_manager_preserves_per_page_metadata_without_cross_tab_bleed() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 5).unwrap();
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        let page_2 = BrowserPageId::new("page-2").unwrap();
+        manager
+            .open_page(
+                page_1.clone(),
+                Some("https://one.example".to_string()),
+                Some("One".to_string()),
+                now,
+            )
+            .unwrap();
+        manager
+            .open_page(
+                page_2.clone(),
+                Some("https://two.example".to_string()),
+                Some("Two".to_string()),
+                now,
+            )
+            .unwrap();
+
+        manager
+            .update_page_metadata(
+                &page_2,
+                Some("https://two.example/dashboard".to_string()),
+                Some("Two Dashboard".to_string()),
+                now,
+            )
+            .unwrap();
+        manager
+            .update_page_health(
+                &page_2,
+                BrowserPageHealth::unresponsive("network idle timeout", now),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager.session.page(&page_1).unwrap().url.as_deref(),
+            Some("https://one.example")
+        );
+        assert_eq!(
+            manager.session.page(&page_1).unwrap().health.status,
+            BrowserPageHealthStatus::Healthy
+        );
+        assert_eq!(
+            manager.session.page(&page_2).unwrap().url.as_deref(),
+            Some("https://two.example/dashboard")
+        );
+        assert_eq!(
+            manager.session.page(&page_2).unwrap().health.status,
+            BrowserPageHealthStatus::Unresponsive
+        );
+    }
+
+    #[test]
+    fn page_lifecycle_manager_enforces_max_pages() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 1).unwrap();
+        manager
+            .open_page(BrowserPageId::new("page-1").unwrap(), None, None, now)
+            .unwrap();
+
+        let error = manager
+            .open_page(BrowserPageId::new("page-2").unwrap(), None, None, now)
+            .unwrap_err();
+
+        assert!(matches!(error, BrowserKernelError::ActionFailed(_)));
+    }
+
+    #[test]
+    fn page_lifecycle_manager_rejects_switching_to_closed_page() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 2).unwrap();
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        manager.open_page(page_1.clone(), None, None, now).unwrap();
+        manager.close_page(&page_1, now).unwrap();
+
+        let error = manager.switch_page(&page_1, now).unwrap_err();
+
+        assert!(matches!(error, BrowserKernelError::ActionFailed(_)));
     }
 
     // ---- Config tests ----
