@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use agentos_config::AgentOsConfig;
 use agentos_storage::AgentOsStorage;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,28 @@ impl RedactedRuntimeConfig {
             .collect();
 
         Self { values }
+    }
+
+    pub fn from_agentos_config(config: &AgentOsConfig) -> KernelResult<Self> {
+        let validation_report = config.validate();
+        let redacted_config = serde_json::to_string(&config.redacted()).map_err(|err| {
+            crate::KernelError::DiagnosticsFailed {
+                reason: err.to_string(),
+            }
+        })?;
+
+        let mut values = BTreeMap::new();
+        values.insert("agentos_config".to_string(), redacted_config);
+        values.insert(
+            "agentos_config_valid".to_string(),
+            validation_report.is_valid().to_string(),
+        );
+        values.insert(
+            "agentos_config_error_count".to_string(),
+            validation_report.diagnostics.len().to_string(),
+        );
+
+        Ok(Self { values })
     }
 }
 
@@ -123,12 +146,27 @@ pub(crate) async fn build_diagnostics_bundle(
     audit_log: &dyn audit_log::AuditLog,
     storage: Option<&AgentOsStorage>,
 ) -> KernelResult<KernelDiagnosticsBundle> {
+    build_diagnostics_bundle_from_redacted_config(
+        RedactedRuntimeConfig::from_raw(runtime_config),
+        service_health,
+        audit_log,
+        storage,
+    )
+    .await
+}
+
+pub(crate) async fn build_diagnostics_bundle_from_redacted_config(
+    runtime_config: RedactedRuntimeConfig,
+    service_health: KernelHealthReport,
+    audit_log: &dyn audit_log::AuditLog,
+    storage: Option<&AgentOsStorage>,
+) -> KernelResult<KernelDiagnosticsBundle> {
     let storage_manifest = storage
         .map(StorageManifestDump::from_storage)
         .unwrap_or_else(StorageManifestDump::not_configured);
 
     Ok(KernelDiagnosticsBundle {
-        runtime_config: RedactedRuntimeConfig::from_raw(runtime_config),
+        runtime_config,
         service_health,
         storage_manifest,
         recent_audit_summary: RecentAuditSummary::from_audit_log(audit_log).await?,

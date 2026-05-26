@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use action_core::ActionRegistry;
+use agentos_config::{AgentOsConfig, ConnectorConfig, ModelProviderConfig};
 use agentos_kernel::{KernelRuntime, KernelRuntimeBuilder, KernelRuntimeState};
 use agentos_storage::{AgentOsStorage, STORAGE_LAYOUT_VERSION};
 use audit_log::{AuditEvent, AuditLog, MemoryAuditSink};
@@ -118,6 +119,77 @@ async fn diagnostics_bundle_reports_configured_storage_manifest() {
     assert_eq!(
         bundle.storage_manifest.manifest_version,
         Some(STORAGE_LAYOUT_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn diagnostics_bundle_for_config_redacts_typed_agentos_config() {
+    let runtime = runtime();
+    let mut config = AgentOsConfig::default();
+    config.model.default_provider = "openai".to_string();
+    config.model.default_model = "gpt-4.1".to_string();
+    config.model.providers.insert(
+        "openai".to_string(),
+        ModelProviderConfig {
+            provider: "openai".to_string(),
+            endpoint: "https://api.openai.example/v1".to_string(),
+            api_key: Some("sk-typed-secret".to_string()),
+            model: "gpt-4.1".to_string(),
+            timeout_secs: Some(30),
+        },
+    );
+    config.connectors.insert(
+        "github".to_string(),
+        ConnectorConfig {
+            enabled: true,
+            endpoint: Some("https://api.github.example".to_string()),
+            token: Some("ghp-typed-secret".to_string()),
+        },
+    );
+
+    let bundle = runtime
+        .diagnostics_bundle_for_config(&config)
+        .await
+        .unwrap();
+    let json = serde_json::to_string_pretty(&bundle).unwrap();
+
+    assert_eq!(
+        bundle.runtime_config.values.get("agentos_config_valid"),
+        Some(&"true".to_string())
+    );
+    assert_eq!(
+        bundle
+            .runtime_config
+            .values
+            .get("agentos_config_error_count"),
+        Some(&"0".to_string())
+    );
+    assert!(json.contains("<redacted>"));
+    assert!(!json.contains("sk-typed-secret"));
+    assert!(!json.contains("ghp-typed-secret"));
+}
+
+#[tokio::test]
+async fn diagnostics_bundle_for_invalid_config_reports_error_count() {
+    let runtime = runtime();
+    let mut config = AgentOsConfig::default();
+    config.model.default_provider = "missing".to_string();
+
+    let bundle = runtime
+        .diagnostics_bundle_for_config(&config)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle.runtime_config.values.get("agentos_config_valid"),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        bundle
+            .runtime_config
+            .values
+            .get("agentos_config_error_count"),
+        Some(&"1".to_string())
     );
 }
 

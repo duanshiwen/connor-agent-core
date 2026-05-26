@@ -126,6 +126,20 @@ impl KernelRuntime {
         .await
     }
 
+    pub async fn diagnostics_bundle_for_config(
+        &self,
+        config: &agentos_config::AgentOsConfig,
+    ) -> KernelResult<crate::KernelDiagnosticsBundle> {
+        let runtime_config = crate::RedactedRuntimeConfig::from_agentos_config(config)?;
+        crate::diagnostics::build_diagnostics_bundle_from_redacted_config(
+            runtime_config,
+            self.health_check(),
+            self.services.audit_log.as_ref(),
+            self.services.storage.as_deref(),
+        )
+        .await
+    }
+
     pub fn health_check(&self) -> KernelHealthReport {
         let state = self.state();
         let conversation_kernel_available =

@@ -8,6 +8,7 @@ description = "AgentOS kernel composition root and runtime container."
 
 [dependencies]
 action-core = { path = "../action-core" }
+agentos-config = { path = "../agentos-config" }
 agentos-storage = { path = "../agentos-storage" }
 audit-log = { path = "../audit-log" }
 capability-policy = { path = "../capability-policy" }
