@@ -11,7 +11,8 @@
 //! - Maps Anthropic-specific errors to `ModelAdapterError`
 
 use crate::{
-    ModelAdapter, ModelAdapterError, ModelOutput, ModelRequest, ModelRole, ModelUsage, ToolCall,
+    ModelAdapter, ModelAdapterError, ModelOutput, ModelRequest, ModelRole, ModelStreamEvent,
+    ModelStreamFinishReason, ModelToolCallDelta, ModelUsage, StreamingModelAdapter, ToolCall,
     ToolCallingModelAdapter, ToolChoice, ToolDefinition,
 };
 use async_trait::async_trait;
@@ -72,6 +73,8 @@ struct AnthropicRequest {
     tools: Vec<AnthropicTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 /// Anthropic message format.
@@ -145,6 +148,48 @@ struct AnthropicContent {
 #[derive(Debug, Deserialize)]
 struct AnthropicUsage {
     input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    message: Option<AnthropicStreamMessage>,
+    index: Option<usize>,
+    content_block: Option<AnthropicStreamContentBlock>,
+    delta: Option<AnthropicStreamDelta>,
+    usage: Option<AnthropicStreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamMessage {
+    model: String,
+    usage: Option<AnthropicStreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamDelta {
+    #[serde(rename = "type")]
+    delta_type: Option<String>,
+    text: Option<String>,
+    partial_json: Option<String>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AnthropicStreamUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
     output_tokens: u32,
 }
 
@@ -245,6 +290,7 @@ impl AnthropicAdapter {
             temperature,
             tools: anthropic_tools,
             tool_choice: anthropic_tool_choice,
+            stream: None,
         }
     }
 
@@ -362,6 +408,52 @@ impl AnthropicAdapter {
         })
     }
 
+    async fn send_stream_and_parse(
+        &self,
+        anthropic_request: AnthropicRequest,
+        fallback_model: crate::ModelId,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        let response = self
+            .http_client
+            .post(self.config.messages_url())
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", &self.config.api_version)
+            .header("content-type", "application/json")
+            .json(&anthropic_request)
+            .send()
+            .await
+            .map_err(|e| ModelAdapterError::HttpError(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if let Ok(error_body) = serde_json::from_str::<AnthropicErrorResponse>(&body) {
+                return Err(match status.as_u16() {
+                    401 => ModelAdapterError::AuthError(error_body.error.message),
+                    429 => ModelAdapterError::RateLimitExceeded,
+                    500..=599 => ModelAdapterError::ExecutorFailed(format!(
+                        "Anthropic server error: {}",
+                        error_body.error.message
+                    )),
+                    _ => ModelAdapterError::ExecutorFailed(format!(
+                        "Anthropic API error ({}): {}",
+                        status, error_body.error.message
+                    )),
+                });
+            }
+
+            return Err(ModelAdapterError::ExecutorFailed(format!(
+                "Anthropic API error ({status}): {body}"
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ModelAdapterError::ExecutorFailed(e.to_string()))?;
+        parse_anthropic_sse_events(&body, &fallback_model)
+    }
+
     async fn send_request(
         &self,
         anthropic_request: AnthropicRequest,
@@ -407,11 +499,175 @@ impl AnthropicAdapter {
     }
 }
 
+fn anthropic_stream_finish_reason(reason: Option<&str>) -> ModelStreamFinishReason {
+    match reason {
+        Some("end_turn") | Some("stop_sequence") => ModelStreamFinishReason::Stop,
+        Some("max_tokens") => ModelStreamFinishReason::Length,
+        Some("tool_use") => ModelStreamFinishReason::ToolCalls,
+        _ => ModelStreamFinishReason::Error,
+    }
+}
+
+fn parse_anthropic_sse_events(
+    raw: &str,
+    fallback_model: &crate::ModelId,
+) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+    let mut events = Vec::new();
+    let mut started = false;
+    let mut input_tokens = 0;
+
+    for frame in raw.split("\n\n") {
+        let mut data_lines = Vec::new();
+        for line in frame.lines() {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+                continue;
+            }
+            if let Some(data) = line.strip_prefix("data:") {
+                data_lines.push(data.trim_start());
+            }
+        }
+
+        if data_lines.is_empty() {
+            continue;
+        }
+
+        let data = data_lines.join("\n");
+        let stream_event: AnthropicStreamEvent = serde_json::from_str(&data).map_err(|e| {
+            ModelAdapterError::ExecutorFailed(format!("malformed Anthropic SSE JSON: {e}"))
+        })?;
+
+        match stream_event.event_type.as_str() {
+            "message_start" => {
+                let model_id = stream_event
+                    .message
+                    .as_ref()
+                    .map(|message| crate::ModelId::from(message.model.clone()))
+                    .unwrap_or_else(|| fallback_model.clone());
+                if let Some(usage) = stream_event.message.and_then(|message| message.usage) {
+                    input_tokens = usage.input_tokens;
+                }
+                events.push(ModelStreamEvent::Started { model_id });
+                started = true;
+            }
+            "content_block_start" => {
+                if !started {
+                    events.push(ModelStreamEvent::Started {
+                        model_id: fallback_model.clone(),
+                    });
+                    started = true;
+                }
+                if let Some(block) = stream_event.content_block
+                    && block.block_type == "tool_use"
+                {
+                    events.push(ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                        index: stream_event.index.unwrap_or(0),
+                        id_delta: block.id,
+                        name_delta: block.name,
+                        arguments_delta: None,
+                    }));
+                }
+            }
+            "content_block_delta" => {
+                if !started {
+                    events.push(ModelStreamEvent::Started {
+                        model_id: fallback_model.clone(),
+                    });
+                    started = true;
+                }
+                if let Some(delta) = stream_event.delta {
+                    match delta.delta_type.as_deref() {
+                        Some("text_delta") => {
+                            if let Some(text) = delta.text {
+                                events.push(ModelStreamEvent::TextDelta { delta: text });
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let Some(partial_json) = delta.partial_json {
+                                events.push(ModelStreamEvent::ToolCallDelta(
+                                    ModelToolCallDelta::arguments(
+                                        stream_event.index.unwrap_or(0),
+                                        partial_json,
+                                    ),
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "message_delta" => {
+                if let Some(usage) = stream_event.usage {
+                    if usage.input_tokens > 0 {
+                        input_tokens = usage.input_tokens;
+                    }
+                    events.push(ModelStreamEvent::Usage {
+                        usage: ModelUsage {
+                            input_tokens,
+                            output_tokens: usage.output_tokens,
+                        },
+                    });
+                }
+                if let Some(reason) = stream_event
+                    .delta
+                    .as_ref()
+                    .and_then(|delta| delta.stop_reason.as_deref())
+                {
+                    events.push(ModelStreamEvent::Finished {
+                        reason: anthropic_stream_finish_reason(Some(reason)),
+                    });
+                }
+            }
+            "message_stop" => {
+                if !events
+                    .iter()
+                    .any(|event| matches!(event, ModelStreamEvent::Finished { .. }))
+                {
+                    events.push(ModelStreamEvent::Finished {
+                        reason: ModelStreamFinishReason::Stop,
+                    });
+                }
+            }
+            "ping" | "content_block_stop" => {}
+            _ => {}
+        }
+    }
+
+    if !started {
+        events.insert(
+            0,
+            ModelStreamEvent::Started {
+                model_id: fallback_model.clone(),
+            },
+        );
+    }
+
+    Ok(events)
+}
+
 #[async_trait]
 impl ModelAdapter for AnthropicAdapter {
     async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
         let anthropic_request = self.convert_request(&request);
         self.send_request(anthropic_request).await
+    }
+}
+
+#[async_trait]
+impl StreamingModelAdapter for AnthropicAdapter {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        if request.messages.is_empty() {
+            return Err(ModelAdapterError::EmptyRequest);
+        }
+
+        let fallback_model = request.model_id.clone();
+        let mut anthropic_request = self.convert_request(&request);
+        anthropic_request.stream = Some(true);
+        self.send_stream_and_parse(anthropic_request, fallback_model)
+            .await
     }
 }
 
@@ -431,7 +687,10 @@ impl ToolCallingModelAdapter for AnthropicAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModelId, ModelMessage};
+    use crate::{
+        ModelId, ModelMessage, ModelStreamAccumulator, ModelStreamEvent, ModelStreamFinishReason,
+        ModelToolCallDelta, StreamingModelAdapter,
+    };
     use std::collections::BTreeMap;
 
     // ── Config Tests ──
@@ -653,6 +912,7 @@ mod tests {
             temperature: Some(0.7),
             tools: vec![],
             tool_choice: None,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -674,6 +934,7 @@ mod tests {
             temperature: None,
             tools: vec![],
             tool_choice: None,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -847,6 +1108,142 @@ mod tests {
         assert_eq!(response.id, "msg_123");
         assert_eq!(response.content.len(), 1);
         assert_eq!(response.content[0].text, Some("Hello!".to_string()));
+    }
+
+    #[test]
+    fn anthropic_stream_parser_emits_started_text_usage_finished() {
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":7,"output_tokens":0}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+
+        let events = parse_anthropic_sse_events(raw, &ModelId::from("fallback")).unwrap();
+        assert_eq!(
+            events.first(),
+            Some(&ModelStreamEvent::Started {
+                model_id: ModelId::from("claude-test")
+            })
+        );
+
+        let accumulator = ModelStreamAccumulator::from_events(&events);
+        assert_eq!(accumulator.text, "Hello");
+        assert_eq!(accumulator.usage.unwrap().total_tokens(), 9);
+        assert_eq!(accumulator.finished, Some(ModelStreamFinishReason::Stop));
+    }
+
+    #[test]
+    fn anthropic_stream_parser_emits_tool_use_deltas() {
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"knowledge_search"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"AgentOS\"}"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}
+
+"#;
+
+        let events = parse_anthropic_sse_events(raw, &ModelId::from("fallback")).unwrap();
+        assert!(
+            events.contains(&ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                index: 1,
+                id_delta: Some("toolu_123".to_string()),
+                name_delta: Some("knowledge_search".to_string()),
+                arguments_delta: None,
+            }))
+        );
+        assert!(events.contains(&ModelStreamEvent::ToolCallDelta(
+            ModelToolCallDelta::arguments(1, "{\"query\":")
+        )));
+        assert!(events.contains(&ModelStreamEvent::Finished {
+            reason: ModelStreamFinishReason::ToolCalls
+        }));
+    }
+
+    #[test]
+    fn anthropic_stream_parser_rejects_malformed_json() {
+        let raw = "event: message_start\ndata: {not-json}\n\n";
+        let err = parse_anthropic_sse_events(raw, &ModelId::from("fallback")).unwrap_err();
+        match err {
+            ModelAdapterError::ExecutorFailed(message) => {
+                assert!(
+                    message.contains("malformed Anthropic SSE JSON"),
+                    "unexpected: {message}"
+                );
+            }
+            other => panic!("expected ExecutorFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_streaming_adapter_posts_stream_true_and_parses_sse() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let sse_body = r#"event: message_start
+data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":7,"output_tokens":0}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({"stream": true})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = AnthropicConfig {
+            api_key: "test".to_string(),
+            base_url: mock_server.uri(),
+            default_model: "claude-test".to_string(),
+            api_version: "2023-06-01".to_string(),
+        };
+        let adapter = AnthropicAdapter::new(config);
+        let request = ModelRequest::new("claude-test", vec![ModelMessage::user("Say hello")]);
+
+        let events = adapter.stream(request).await.unwrap();
+        let accumulator = ModelStreamAccumulator::from_events(&events);
+
+        assert_eq!(accumulator.text, "Hello");
+        assert_eq!(accumulator.usage.unwrap().total_tokens(), 9);
+        assert_eq!(accumulator.finished, Some(ModelStreamFinishReason::Stop));
     }
 
     #[test]
