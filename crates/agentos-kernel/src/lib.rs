@@ -19,9 +19,10 @@ pub use diagnostics::{
 };
 pub use error::{KernelError, KernelResult};
 pub use host_api::{
-    HostActionDecisionRequest, HostApiError, HostApiResult, HostPendingApproval, HostRunStatus,
-    HostRunStatusResponse, KernelHostApi, StartAgentRunRequest, StartAgentRunResponse,
-    SubmitUserMessageRequest, SubmitUserMessageResponse,
+    HostActionDecisionRequest, HostActorContext, HostApiError, HostApiResult, HostPendingApproval,
+    HostPermissionResource, HostRunStatus, HostRunStatusResponse, KernelHostApi,
+    StartAgentRunRequest, StartAgentRunResponse, SubmitUserMessageRequest,
+    SubmitUserMessageResponse,
 };
 pub use registries::{
     ActionExecutorRegistry, ConnectorRegistry, ConnectorService, ModelProviderRegistry,

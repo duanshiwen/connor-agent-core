@@ -75,6 +75,8 @@ impl fmt::Display for EnterpriseRole {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceType {
+    Conversation,
+    Action,
     KnowledgeBase,
     FileArea,
     File,
@@ -86,6 +88,8 @@ pub enum ResourceType {
 impl fmt::Display for ResourceType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Conversation => write!(f, "conversation"),
+            Self::Action => write!(f, "action"),
             Self::KnowledgeBase => write!(f, "knowledge_base"),
             Self::FileArea => write!(f, "file_area"),
             Self::File => write!(f, "file"),

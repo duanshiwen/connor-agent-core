@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use action_core::ActionRegistry;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
 use conversation_journal::ConversationJournal;
 use conversation_kernel::ConversationKernel;
+use enterprise_permission_core::PermissionStore;
 use model_adapter::ModelAdapter;
 
 use crate::{KernelError, KernelResult, KernelRuntime, KernelServices};
@@ -16,6 +17,7 @@ pub struct KernelRuntimeBuilder {
     action_registry: Option<Arc<ActionRegistry>>,
     capability_policy: Option<Arc<CapabilityPolicy>>,
     audit_log: Option<Arc<dyn AuditLog>>,
+    permission_store: Option<Arc<Mutex<PermissionStore>>>,
 }
 
 impl KernelRuntimeBuilder {
@@ -48,6 +50,23 @@ impl KernelRuntimeBuilder {
         self
     }
 
+    pub fn permission_store(mut self, permission_store: Arc<Mutex<PermissionStore>>) -> Self {
+        self.permission_store = Some(permission_store);
+        self
+    }
+
+    pub fn enterprise_permission_store(
+        self,
+        permission_store: Arc<Mutex<PermissionStore>>,
+    ) -> Self {
+        self.permission_store(permission_store)
+    }
+
+    pub fn permission_store_value(mut self, permission_store: PermissionStore) -> Self {
+        self.permission_store = Some(Arc::new(Mutex::new(permission_store)));
+        self
+    }
+
     pub fn build(self) -> KernelResult<KernelRuntime> {
         let conversation_journal =
             self.conversation_journal
@@ -73,6 +92,7 @@ impl KernelRuntimeBuilder {
             action_registry,
             capability_policy,
             audit_log,
+            permission_store: self.permission_store,
         };
 
         Ok(KernelRuntime::new(services))

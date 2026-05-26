@@ -1,4 +1,5 @@
 use action_core::ActionId;
+use chrono::Utc;
 use conversation_core::{
     AgentRunStatus, ConversationActionStatus, ConversationId, MessageContent, MessageId,
     ParticipantId, Visibility,
@@ -6,6 +7,10 @@ use conversation_core::{
 use conversation_kernel::{
     AppendMessageCommand, ApproveActionCommand, DenyActionCommand, RequestAgentRunCommand,
     StartAgentRunCommand,
+};
+use enterprise_permission_core::{
+    EnterpriseRole, EnterpriseUserId, PermissionAction, PermissionDecision, ResourceId,
+    ResourceType,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +25,17 @@ pub enum HostApiError {
 
     #[error("run not found: {run_id}")]
     RunNotFound { run_id: String },
+
+    #[error("permission store unavailable for permission-aware host request")]
+    PermissionStoreUnavailable,
+
+    #[error("permission denied: {actor} cannot {action} {resource_type}:{resource_id}")]
+    PermissionDenied {
+        actor: String,
+        action: String,
+        resource_type: String,
+        resource_id: String,
+    },
 }
 
 impl From<anyhow::Error> for HostApiError {
@@ -56,6 +72,13 @@ impl KernelHostApi {
         &self,
         request: SubmitUserMessageRequest,
     ) -> HostApiResult<SubmitUserMessageResponse> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Write,
+        )?;
+
         let message_id = self
             .runtime
             .services()
@@ -77,6 +100,13 @@ impl KernelHostApi {
         &self,
         request: StartAgentRunRequest,
     ) -> HostApiResult<StartAgentRunResponse> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Write,
+        )?;
+
         let run_id = self
             .runtime
             .services()
@@ -155,6 +185,13 @@ impl KernelHostApi {
     }
 
     pub async fn approve_action(&self, request: HostActionDecisionRequest) -> HostApiResult<()> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Admin,
+        )?;
+
         self.runtime
             .services()
             .conversation_kernel
@@ -168,6 +205,13 @@ impl KernelHostApi {
     }
 
     pub async fn deny_action(&self, request: HostActionDecisionRequest) -> HostApiResult<()> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Admin,
+        )?;
+
         self.runtime
             .services()
             .conversation_kernel
@@ -187,6 +231,63 @@ impl KernelHostApi {
         self.runtime.shutdown()?;
         Ok(())
     }
+
+    fn require_permission(
+        &self,
+        actor_context: Option<&HostActorContext>,
+        resource_type: ResourceType,
+        resource_id: ResourceId,
+        action: PermissionAction,
+    ) -> HostApiResult<()> {
+        let Some(actor_context) = actor_context else {
+            return Ok(());
+        };
+        let Some(permission_store) = self.runtime.services().permission_store.as_ref() else {
+            return Err(HostApiError::PermissionStoreUnavailable);
+        };
+
+        let decision = permission_store.lock().unwrap().check_with_role(
+            &actor_context.enterprise_user_id,
+            actor_context.role,
+            &resource_type,
+            &resource_id,
+            &action,
+            Utc::now(),
+        );
+        if decision == PermissionDecision::Allow {
+            Ok(())
+        } else {
+            Err(HostApiError::PermissionDenied {
+                actor: actor_context.enterprise_user_id.to_string(),
+                action: action.to_string(),
+                resource_type: resource_type.to_string(),
+                resource_id: resource_id.to_string(),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostActorContext {
+    pub user_id: ParticipantId,
+    pub enterprise_user_id: EnterpriseUserId,
+    pub role: EnterpriseRole,
+}
+
+impl HostActorContext {
+    pub fn user(user_id: ParticipantId, enterprise_user_id: EnterpriseUserId) -> Self {
+        Self {
+            user_id,
+            enterprise_user_id,
+            role: EnterpriseRole::User,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPermissionResource {
+    pub resource_type: ResourceType,
+    pub resource_id: ResourceId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +295,8 @@ pub struct SubmitUserMessageRequest {
     pub conversation_id: ConversationId,
     pub user_id: ParticipantId,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_context: Option<HostActorContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +309,8 @@ pub struct StartAgentRunRequest {
     pub conversation_id: ConversationId,
     pub trigger_message_id: MessageId,
     pub requested_by: ParticipantId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_context: Option<HostActorContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,4 +363,6 @@ pub struct HostActionDecisionRequest {
     pub action_id: ActionId,
     pub decided_by: ParticipantId,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_context: Option<HostActorContext>,
 }

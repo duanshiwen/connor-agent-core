@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use action_core::ActionRegistry;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
 use conversation_kernel::ConversationKernel;
+use enterprise_permission_core::PermissionStore;
 use model_adapter::ModelAdapter;
 
 #[derive(Clone)]
@@ -13,4 +14,5 @@ pub struct KernelServices {
     pub action_registry: Arc<ActionRegistry>,
     pub capability_policy: Arc<CapabilityPolicy>,
     pub audit_log: Arc<dyn AuditLog>,
+    pub permission_store: Option<Arc<Mutex<PermissionStore>>>,
 }

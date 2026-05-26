@@ -36,6 +36,7 @@ pub struct KernelHealthReport {
     pub action_registry_available: bool,
     pub capability_policy_available: bool,
     pub audit_log_available: bool,
+    pub permission_store_available: bool,
 }
 
 #[derive(Clone)]
@@ -132,6 +133,7 @@ impl KernelRuntime {
         let action_registry_available = Arc::strong_count(&self.services.action_registry) > 0;
         let capability_policy_available = Arc::strong_count(&self.services.capability_policy) > 0;
         let audit_log_available = Arc::strong_count(&self.services.audit_log) > 0;
+        let permission_store_available = self.services.permission_store.is_some();
         let healthy = state != KernelRuntimeState::ShuttingDown
             && state != KernelRuntimeState::Shutdown
             && conversation_kernel_available
@@ -148,6 +150,7 @@ impl KernelRuntime {
             action_registry_available,
             capability_policy_available,
             audit_log_available,
+            permission_store_available,
         }
     }
 }

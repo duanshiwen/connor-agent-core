@@ -91,6 +91,7 @@ dependencies = [
  "conversation-core",
  "conversation-journal",
  "conversation-kernel",
+ "enterprise-permission-core",
  "model-adapter",
  "serde",
  "serde_json",
