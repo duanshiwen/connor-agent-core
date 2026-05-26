@@ -663,6 +663,279 @@ impl CredentialStore for MemoryCredentialStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OAuth connector credential boundary
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthTokenSet {
+    pub access_token: SecretValue,
+    pub refresh_token: Option<SecretValue>,
+    pub token_type: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
+}
+
+impl OAuthTokenSet {
+    pub fn new(
+        access_token: SecretValue,
+        refresh_token: Option<SecretValue>,
+        token_type: impl Into<String>,
+        expires_at: Option<DateTime<Utc>>,
+        scopes: Vec<String>,
+    ) -> Self {
+        Self {
+            access_token,
+            refresh_token,
+            token_type: token_type.into(),
+            expires_at,
+            scopes: normalize_scopes(scopes),
+        }
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
+
+    pub fn needs_refresh(&self, now: DateTime<Utc>, refresh_skew_secs: i64) -> bool {
+        self.expires_at.is_some_and(|expires_at| {
+            expires_at <= now + chrono::Duration::seconds(refresh_skew_secs.max(0))
+        })
+    }
+
+    pub fn to_credential_record(
+        &self,
+        credential_ref: &OAuthCredentialRef,
+        label: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<CredentialRecord, CredentialError> {
+        let serialized = serde_json::to_string(&OAuthTokenSetSerde::from_token_set(self))
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        Ok(CredentialRecord::new(
+            credential_ref.credential_id.clone(),
+            credential_ref.credential_scope(),
+            label,
+            SecretValue::new(serialized),
+            now,
+        ))
+    }
+
+    pub fn from_credential_record(record: &CredentialRecord) -> Result<Self, CredentialError> {
+        let decoded: OAuthTokenSetSerde = serde_json::from_str(record.secret.expose_secret())
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        Ok(decoded.into_token_set())
+    }
+}
+
+impl fmt::Debug for OAuthTokenSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthTokenSet")
+            .field("access_token", &self.access_token)
+            .field("refresh_token", &self.refresh_token)
+            .field("token_type", &self.token_type)
+            .field("expires_at", &self.expires_at)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCredentialRef {
+    pub credential_id: CredentialId,
+    pub connector_id: String,
+    pub account_id: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+impl OAuthCredentialRef {
+    pub fn new(
+        credential_id: CredentialId,
+        connector_id: impl Into<String>,
+        account_id: Option<String>,
+        scopes: Vec<String>,
+    ) -> Self {
+        Self {
+            credential_id,
+            connector_id: connector_id.into(),
+            account_id,
+            scopes: normalize_scopes(scopes),
+        }
+    }
+
+    pub fn credential_scope(&self) -> CredentialScope {
+        CredentialScope::Connector {
+            connector_id: self.connector_id.clone(),
+        }
+    }
+
+    pub fn metadata_label(&self) -> String {
+        match self.account_id.as_deref() {
+            Some(account_id) if !account_id.trim().is_empty() => {
+                format!("OAuth {} {}", self.connector_id, account_id)
+            }
+            _ => format!("OAuth {}", self.connector_id),
+        }
+    }
+}
+
+#[async_trait]
+pub trait OAuthTokenRefresher: Send + Sync {
+    async fn refresh(
+        &self,
+        connector_id: &str,
+        current: &OAuthTokenSet,
+    ) -> Result<OAuthTokenSet, OAuthTokenRefreshError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OAuthTokenRefreshError {
+    #[error("oauth refresh token is missing")]
+    MissingRefreshToken,
+    #[error("oauth provider unavailable: {0}")]
+    ProviderUnavailable(String),
+    #[error("oauth provider returned invalid response: {0}")]
+    InvalidResponse(String),
+    #[error("credential error: {0}")]
+    Credential(#[from] CredentialError),
+}
+
+pub struct FakeOAuthTokenRefresher {
+    access_token_prefix: String,
+    failure: Option<String>,
+    refresh_count: Mutex<u64>,
+    expires_in_secs: i64,
+}
+
+impl FakeOAuthTokenRefresher {
+    pub fn new(access_token_prefix: impl Into<String>) -> Self {
+        Self {
+            access_token_prefix: access_token_prefix.into(),
+            failure: None,
+            refresh_count: Mutex::new(0),
+            expires_in_secs: 3600,
+        }
+    }
+
+    pub fn failing(reason: impl Into<String>) -> Self {
+        Self {
+            access_token_prefix: "unused".to_string(),
+            failure: Some(reason.into()),
+            refresh_count: Mutex::new(0),
+            expires_in_secs: 3600,
+        }
+    }
+
+    pub fn refresh_count(&self) -> u64 {
+        self.refresh_count.lock().map(|count| *count).unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for FakeOAuthTokenRefresher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FakeOAuthTokenRefresher")
+            .field("access_token_prefix", &self.access_token_prefix)
+            .field("failure", &self.failure)
+            .field("refresh_count", &self.refresh_count())
+            .field("expires_in_secs", &self.expires_in_secs)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl OAuthTokenRefresher for FakeOAuthTokenRefresher {
+    async fn refresh(
+        &self,
+        _connector_id: &str,
+        current: &OAuthTokenSet,
+    ) -> Result<OAuthTokenSet, OAuthTokenRefreshError> {
+        if let Some(reason) = &self.failure {
+            return Err(OAuthTokenRefreshError::ProviderUnavailable(reason.clone()));
+        }
+        let refresh_token = current
+            .refresh_token
+            .clone()
+            .ok_or(OAuthTokenRefreshError::MissingRefreshToken)?;
+        let next_count = {
+            let mut count = self
+                .refresh_count
+                .lock()
+                .map_err(|err| OAuthTokenRefreshError::InvalidResponse(err.to_string()))?;
+            *count += 1;
+            *count
+        };
+        Ok(OAuthTokenSet::new(
+            SecretValue::new(format!("{}-{}", self.access_token_prefix, next_count)),
+            Some(refresh_token),
+            current.token_type.clone(),
+            Some(Utc::now() + chrono::Duration::seconds(self.expires_in_secs)),
+            current.scopes.clone(),
+        ))
+    }
+}
+
+pub async fn refresh_oauth_credential(
+    store: &dyn CredentialStore,
+    refresher: &dyn OAuthTokenRefresher,
+    credential_ref: &OAuthCredentialRef,
+    now: DateTime<Utc>,
+    refresh_skew_secs: i64,
+) -> Result<OAuthTokenSet, OAuthTokenRefreshError> {
+    let record = store.read(&credential_ref.credential_id).await?;
+    let current = OAuthTokenSet::from_credential_record(&record)?;
+    if !current.needs_refresh(now, refresh_skew_secs) {
+        return Ok(current);
+    }
+    let refreshed = refresher
+        .refresh(&credential_ref.connector_id, &current)
+        .await?;
+    let updated_record = refreshed
+        .to_credential_record(credential_ref, record.metadata.label, now)
+        .map_err(OAuthTokenRefreshError::Credential)?;
+    store.write(updated_record).await?;
+    Ok(refreshed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OAuthTokenSetSerde {
+    access_token: String,
+    refresh_token: Option<String>,
+    token_type: String,
+    expires_at: Option<DateTime<Utc>>,
+    scopes: Vec<String>,
+}
+
+impl OAuthTokenSetSerde {
+    fn from_token_set(token: &OAuthTokenSet) -> Self {
+        Self {
+            access_token: token.access_token.expose_secret().to_string(),
+            refresh_token: token
+                .refresh_token
+                .as_ref()
+                .map(|secret| secret.expose_secret().to_string()),
+            token_type: token.token_type.clone(),
+            expires_at: token.expires_at,
+            scopes: token.scopes.clone(),
+        }
+    }
+
+    fn into_token_set(self) -> OAuthTokenSet {
+        OAuthTokenSet::new(
+            SecretValue::new(self.access_token),
+            self.refresh_token.map(SecretValue::new),
+            self.token_type,
+            self.expires_at,
+            self.scopes,
+        )
+    }
+}
+
+fn normalize_scopes(mut scopes: Vec<String>) -> Vec<String> {
+    scopes.retain(|scope| !scope.trim().is_empty());
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
 /// Encryption boundary for future encrypted credential file storage.
 pub trait CredentialCipher: Send + Sync {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CredentialError>;
@@ -1509,5 +1782,207 @@ mod tests {
 
         assert!(policy.is_production());
         assert!(policy.uses_fake_crypto());
+    }
+
+    fn sample_oauth_token(expires_at: DateTime<Utc>) -> OAuthTokenSet {
+        OAuthTokenSet::new(
+            SecretValue::new("access-secret"),
+            Some(SecretValue::new("refresh-secret")),
+            "Bearer",
+            Some(expires_at),
+            vec![
+                "repo".to_string(),
+                "read:user".to_string(),
+                "repo".to_string(),
+            ],
+        )
+    }
+
+    fn sample_oauth_ref() -> OAuthCredentialRef {
+        OAuthCredentialRef::new(
+            CredentialId::from("oauth-github-main"),
+            "github",
+            Some("user-1".to_string()),
+            vec!["repo".to_string(), "read:user".to_string()],
+        )
+    }
+
+    #[test]
+    fn oauth_token_debug_redacts_access_and_refresh_tokens() {
+        let token = sample_oauth_token(ts());
+
+        let debug = format!("{token:?}");
+
+        assert!(debug.contains("OAuthTokenSet"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("access-secret"));
+        assert!(!debug.contains("refresh-secret"));
+    }
+
+    #[test]
+    fn oauth_token_scopes_are_sorted_and_deduped() {
+        let token = sample_oauth_token(ts());
+
+        assert_eq!(token.scopes, vec!["read:user", "repo"]);
+    }
+
+    #[test]
+    fn oauth_token_expiration_and_refresh_skew_are_detected() {
+        let now = ts();
+        let expired = sample_oauth_token(now - chrono::Duration::seconds(1));
+        let soon = sample_oauth_token(now + chrono::Duration::seconds(30));
+        let later = sample_oauth_token(now + chrono::Duration::seconds(120));
+
+        assert!(expired.is_expired(now));
+        assert!(expired.needs_refresh(now, 60));
+        assert!(!soon.is_expired(now));
+        assert!(soon.needs_refresh(now, 60));
+        assert!(!later.needs_refresh(now, 60));
+    }
+
+    #[test]
+    fn oauth_credential_ref_maps_to_connector_scope() {
+        let credential_ref = sample_oauth_ref();
+
+        assert_eq!(
+            credential_ref.credential_scope(),
+            CredentialScope::Connector {
+                connector_id: "github".to_string()
+            }
+        );
+        assert_eq!(credential_ref.metadata_label(), "OAuth github user-1");
+    }
+
+    #[test]
+    fn oauth_token_roundtrips_through_credential_record() {
+        let token = sample_oauth_token(ts());
+        let credential_ref = sample_oauth_ref();
+        let record = token
+            .to_credential_record(&credential_ref, "GitHub OAuth", ts())
+            .unwrap();
+
+        let decoded = OAuthTokenSet::from_credential_record(&record).unwrap();
+
+        assert_eq!(record.metadata.id, credential_ref.credential_id);
+        assert_eq!(record.metadata.scope, credential_ref.credential_scope());
+        assert_eq!(decoded, token);
+    }
+
+    #[tokio::test]
+    async fn fake_oauth_refresher_rotates_access_token() {
+        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+        let current = sample_oauth_token(ts());
+
+        let refreshed = refresher.refresh("github", &current).await.unwrap();
+
+        assert_eq!(refreshed.access_token.expose_secret(), "rotated-access-1");
+        assert_eq!(refresher.refresh_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_credential_returns_current_when_not_expired() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        let token = sample_oauth_token(now + chrono::Duration::seconds(3600));
+        store
+            .write(
+                token
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+
+        let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60)
+            .await
+            .unwrap();
+
+        assert_eq!(result, token);
+        assert_eq!(refresher.refresh_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_credential_refreshes_and_persists_expired_token() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        let token = sample_oauth_token(now - chrono::Duration::seconds(1));
+        store
+            .write(
+                token
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+
+        let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60)
+            .await
+            .unwrap();
+        let persisted = OAuthTokenSet::from_credential_record(
+            &store.read(&credential_ref.credential_id).await.unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(result.access_token.expose_secret(), "rotated-access-1");
+        assert_eq!(persisted.access_token.expose_secret(), "rotated-access-1");
+        assert_eq!(refresher.refresh_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_credential_missing_refresh_token_returns_typed_error() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        let token = OAuthTokenSet::new(
+            SecretValue::new("access-secret"),
+            None,
+            "Bearer",
+            Some(now - chrono::Duration::seconds(1)),
+            vec!["repo".to_string()],
+        );
+        store
+            .write(
+                token
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+
+        let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60).await;
+
+        assert!(matches!(
+            result,
+            Err(OAuthTokenRefreshError::MissingRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_credential_propagates_provider_failure() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        let token = sample_oauth_token(now - chrono::Duration::seconds(1));
+        store
+            .write(
+                token
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refresher = FakeOAuthTokenRefresher::failing("provider offline");
+
+        let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60).await;
+
+        assert!(matches!(
+            result,
+            Err(OAuthTokenRefreshError::ProviderUnavailable(reason)) if reason == "provider offline"
+        ));
     }
 }
