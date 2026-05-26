@@ -945,6 +945,92 @@ pub fn classify_model_error_message(message: &str) -> ModelRetryErrorClass {
     ModelRetryErrorClass::Unknown
 }
 
+/// Model call operation recorded by observability wrappers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallOperation {
+    Complete,
+    Stream,
+    ToolCall,
+}
+
+/// Outcome kind recorded by model traces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTraceOutcome {
+    Success,
+    Error,
+}
+
+/// Redacted model call trace safe for logs and audit surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallTrace {
+    pub operation: ModelCallOperation,
+    pub model_id: ModelId,
+    pub latency_ms: u64,
+    pub usage: Option<ModelUsage>,
+    pub outcome: ModelTraceOutcome,
+    pub error_class: Option<ModelRetryErrorClass>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// Sink for model call observability events.
+pub trait ModelTraceSink: Send + Sync {
+    fn record(&self, trace: ModelCallTrace);
+}
+
+/// In-memory trace sink for tests and local diagnostics.
+#[derive(Debug, Default)]
+pub struct MemoryModelTraceSink {
+    traces: Mutex<Vec<ModelCallTrace>>,
+}
+
+impl MemoryModelTraceSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn traces(&self) -> Vec<ModelCallTrace> {
+        self.traces.lock().unwrap().clone()
+    }
+}
+
+impl ModelTraceSink for MemoryModelTraceSink {
+    fn record(&self, trace: ModelCallTrace) {
+        self.traces.lock().unwrap().push(trace);
+    }
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn redacted_model_metadata(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .map(|(key, value)| {
+            if is_sensitive_metadata_key(key) {
+                (key.clone(), "<redacted>".to_string())
+            } else {
+                (key.clone(), value.clone())
+            }
+        })
+        .collect()
+}
+
+fn is_sensitive_metadata_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("authorization")
+        || normalized.contains("auth")
+        || normalized.contains("bearer")
+        || normalized.contains("credential")
+        || normalized.contains("password")
+        || normalized.contains("secret")
+        || normalized.contains("token")
+}
+
 /// Async model adapter trait — text-only completion.
 #[async_trait]
 pub trait ModelAdapter: Send + Sync {
@@ -962,6 +1048,109 @@ pub trait StreamingModelAdapter: ModelAdapter {
         &self,
         request: ModelRequest,
     ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError>;
+}
+
+/// Adapter wrapper that records redacted model call traces.
+pub struct ObservedModelAdapter<A> {
+    inner: A,
+    sink: Arc<dyn ModelTraceSink>,
+}
+
+impl<A> ObservedModelAdapter<A> {
+    pub fn new(inner: A, sink: Arc<dyn ModelTraceSink>) -> Self {
+        Self { inner, sink }
+    }
+
+    pub fn inner(&self) -> &A {
+        &self.inner
+    }
+}
+
+impl<A> fmt::Debug for ObservedModelAdapter<A>
+where
+    A: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObservedModelAdapter")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl<A> ModelAdapter for ObservedModelAdapter<A>
+where
+    A: ModelAdapter + Send + Sync,
+{
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+        let started = Instant::now();
+        let model_id = request.model_id.clone();
+        let metadata = redacted_model_metadata(&request.metadata);
+        let result = self.inner.complete(request).await;
+        let trace = match &result {
+            Ok(output) => ModelCallTrace {
+                operation: ModelCallOperation::Complete,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: output.usage().cloned(),
+                outcome: ModelTraceOutcome::Success,
+                error_class: None,
+                metadata,
+            },
+            Err(error) => ModelCallTrace {
+                operation: ModelCallOperation::Complete,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: None,
+                outcome: ModelTraceOutcome::Error,
+                error_class: Some(classify_model_adapter_error(error)),
+                metadata,
+            },
+        };
+        self.sink.record(trace);
+        result
+    }
+}
+
+#[async_trait]
+impl<A> StreamingModelAdapter for ObservedModelAdapter<A>
+where
+    A: StreamingModelAdapter + Send + Sync,
+{
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        let started = Instant::now();
+        let model_id = request.model_id.clone();
+        let metadata = redacted_model_metadata(&request.metadata);
+        let result = self.inner.stream(request).await;
+        let trace = match &result {
+            Ok(events) => ModelCallTrace {
+                operation: ModelCallOperation::Stream,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: events.iter().find_map(|event| match event {
+                    ModelStreamEvent::Usage { usage } => Some(usage.clone()),
+                    _ => None,
+                }),
+                outcome: ModelTraceOutcome::Success,
+                error_class: None,
+                metadata,
+            },
+            Err(error) => ModelCallTrace {
+                operation: ModelCallOperation::Stream,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: None,
+                outcome: ModelTraceOutcome::Error,
+                error_class: Some(classify_model_adapter_error(error)),
+                metadata,
+            },
+        };
+        self.sink.record(trace);
+        result
+    }
 }
 
 /// Adapter wrapper that guards provider calls with a circuit breaker.
@@ -1138,6 +1327,49 @@ pub trait ToolCallingModelAdapter: ModelAdapter {
         tools: Vec<ToolDefinition>,
         tool_choice: ToolChoice,
     ) -> Result<ModelOutput, ModelAdapterError>;
+}
+
+#[async_trait]
+impl<A> ToolCallingModelAdapter for ObservedModelAdapter<A>
+where
+    A: ToolCallingModelAdapter + Send + Sync,
+{
+    async fn complete_with_tools(
+        &self,
+        request: ModelRequest,
+        tools: Vec<ToolDefinition>,
+        tool_choice: ToolChoice,
+    ) -> Result<ModelOutput, ModelAdapterError> {
+        let started = Instant::now();
+        let model_id = request.model_id.clone();
+        let metadata = redacted_model_metadata(&request.metadata);
+        let result = self
+            .inner
+            .complete_with_tools(request, tools, tool_choice)
+            .await;
+        let trace = match &result {
+            Ok(output) => ModelCallTrace {
+                operation: ModelCallOperation::ToolCall,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: output.usage().cloned(),
+                outcome: ModelTraceOutcome::Success,
+                error_class: None,
+                metadata,
+            },
+            Err(error) => ModelCallTrace {
+                operation: ModelCallOperation::ToolCall,
+                model_id,
+                latency_ms: duration_to_millis(started.elapsed()),
+                usage: None,
+                outcome: ModelTraceOutcome::Error,
+                error_class: Some(classify_model_adapter_error(error)),
+                metadata,
+            },
+        };
+        self.sink.record(trace);
+        result
+    }
 }
 
 /// Tool-calling adapter wrapper that enforces registry capabilities before calls.
@@ -1600,6 +1832,102 @@ mod tests {
             )),
             ModelRetryErrorClass::Validation
         );
+    }
+
+    #[tokio::test]
+    async fn observed_adapter_records_success_trace_with_usage_and_redacted_metadata() {
+        let sink = Arc::new(MemoryModelTraceSink::new());
+        let adapter = ObservedModelAdapter::new(FakeModelAdapter::default(), sink.clone());
+        let mut request = ModelRequest::new("fake/default", vec![ModelMessage::user("hello")]);
+        request
+            .metadata
+            .insert("request_id".to_string(), "req-123".to_string());
+        request
+            .metadata
+            .insert("api_key".to_string(), "sk-secret".to_string());
+
+        let output = adapter.complete(request).await.unwrap();
+
+        assert!(output.usage().is_some());
+        let traces = sink.traces();
+        assert_eq!(traces.len(), 1);
+        let trace = &traces[0];
+        assert_eq!(trace.operation, ModelCallOperation::Complete);
+        assert_eq!(trace.model_id, ModelId::from("fake/default"));
+        assert_eq!(trace.outcome, ModelTraceOutcome::Success);
+        assert!(trace.usage.is_some());
+        assert_eq!(trace.metadata["request_id"], "req-123");
+        assert_eq!(trace.metadata["api_key"], "<redacted>");
+    }
+
+    #[tokio::test]
+    async fn observed_adapter_records_error_trace_with_error_class() {
+        let sink = Arc::new(MemoryModelTraceSink::new());
+        let adapter = ObservedModelAdapter::new(FakeModelAdapter::default(), sink.clone());
+        let error = adapter
+            .complete(ModelRequest::new("fake/default", vec![]))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, ModelAdapterError::EmptyRequest);
+        let traces = sink.traces();
+        assert_eq!(traces[0].outcome, ModelTraceOutcome::Error);
+        assert_eq!(
+            traces[0].error_class,
+            Some(ModelRetryErrorClass::EmptyRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_streaming_adapter_records_usage_without_prompt_text() {
+        let sink = Arc::new(MemoryModelTraceSink::new());
+        let adapter = ObservedModelAdapter::new(FakeStreamingModelAdapter::default(), sink.clone());
+        let mut request =
+            ModelRequest::new("fake/default", vec![ModelMessage::user("secret prompt")]);
+        request
+            .metadata
+            .insert("auth_token".to_string(), "token-secret".to_string());
+
+        let events = adapter.stream(request).await.unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ModelStreamEvent::Usage { .. }))
+        );
+        let traces = sink.traces();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].operation, ModelCallOperation::Stream);
+        assert_eq!(traces[0].outcome, ModelTraceOutcome::Success);
+        assert!(traces[0].usage.is_some());
+        assert_eq!(traces[0].metadata["auth_token"], "<redacted>");
+        let serialized = serde_json::to_string(&traces[0]).unwrap();
+        assert!(!serialized.contains("secret prompt"));
+        assert!(!serialized.contains("token-secret"));
+    }
+
+    #[tokio::test]
+    async fn observed_tool_adapter_records_tool_call_trace() {
+        let sink = Arc::new(MemoryModelTraceSink::new());
+        let adapter = ObservedModelAdapter::new(EchoToolAdapter, sink.clone());
+        let output = adapter
+            .complete_with_tools(
+                ModelRequest::new("fake/tools", vec![ModelMessage::user("search")]),
+                vec![ToolDefinition {
+                    name: "knowledge.search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                }],
+                ToolChoice::Auto,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output, ModelOutput::ToolCalls { .. }));
+        let traces = sink.traces();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].operation, ModelCallOperation::ToolCall);
+        assert_eq!(traces[0].outcome, ModelTraceOutcome::Success);
     }
 
     #[test]
