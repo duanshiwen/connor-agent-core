@@ -1803,6 +1803,153 @@ fn infer_upload_filename(path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Network trace artifacts
+// ---------------------------------------------------------------------------
+
+/// Redaction policy attached to captured browser network traces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserNetworkRedactionPolicy {
+    pub redact_auth_headers: bool,
+    pub redacted_value: String,
+}
+
+impl Default for BrowserNetworkRedactionPolicy {
+    fn default() -> Self {
+        Self {
+            redact_auth_headers: true,
+            redacted_value: BrowserNetworkHeader::REDACTED.to_string(),
+        }
+    }
+}
+
+/// Optional network capture policy for browser actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserNetworkTracePolicy {
+    #[serde(default = "default_network_capture_enabled")]
+    pub capture_enabled: bool,
+    #[serde(default = "default_network_trace_max_entries")]
+    pub max_entries: usize,
+    #[serde(default)]
+    pub redaction: BrowserNetworkRedactionPolicy,
+}
+
+impl Default for BrowserNetworkTracePolicy {
+    fn default() -> Self {
+        Self {
+            capture_enabled: default_network_capture_enabled(),
+            max_entries: default_network_trace_max_entries(),
+            redaction: BrowserNetworkRedactionPolicy::default(),
+        }
+    }
+}
+
+impl BrowserNetworkTracePolicy {
+    pub fn should_redact_header(&self, name: &str) -> bool {
+        self.redaction.redact_auth_headers && is_sensitive_network_header(name)
+    }
+
+    pub fn redact_headers(&self, headers: Vec<BrowserNetworkHeader>) -> Vec<BrowserNetworkHeader> {
+        headers
+            .into_iter()
+            .map(|mut header| {
+                if self.should_redact_header(&header.name) {
+                    header.value = self.redaction.redacted_value.clone();
+                }
+                header
+            })
+            .collect()
+    }
+}
+
+const fn default_network_capture_enabled() -> bool {
+    true
+}
+
+const fn default_network_trace_max_entries() -> usize {
+    200
+}
+
+fn is_sensitive_network_header(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "x-auth-token"
+            | "x-csrf-token"
+    )
+}
+
+/// Header captured in browser network traces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserNetworkHeader {
+    pub name: String,
+    pub value: String,
+}
+
+impl BrowserNetworkHeader {
+    pub const REDACTED: &'static str = "[REDACTED]";
+
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// One request/response pair in a browser network trace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserNetworkTraceEntry {
+    pub request_id: String,
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub request_headers: Vec<BrowserNetworkHeader>,
+    #[serde(default)]
+    pub response_status: Option<u16>,
+    #[serde(default)]
+    pub response_headers: Vec<BrowserNetworkHeader>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// Captured HAR-like browser network trace boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserNetworkTrace {
+    pub artifact_id: ArtifactId,
+    pub source_url: String,
+    #[serde(default)]
+    pub entries: Vec<BrowserNetworkTraceEntry>,
+    pub captured_at: DateTime<Utc>,
+    #[serde(default)]
+    pub redaction_policy: BrowserNetworkRedactionPolicy,
+}
+
+impl BrowserNetworkTrace {
+    pub fn to_artifact_descriptor(&self, source_action: Option<&str>) -> ArtifactDescriptor {
+        let mut descriptor = ArtifactDescriptor::new(
+            self.artifact_id.clone(),
+            ArtifactKind::ToolResult,
+            self.captured_at,
+        );
+        descriptor.title = Some(format!("Network trace for {}", self.source_url));
+        descriptor.source_uri = Some(self.source_url.clone());
+        descriptor.mime_type = Some("application/har+json".to_string());
+        descriptor.metadata = serde_json::json!({
+            "source": "browser_network_trace",
+            "source_action": source_action,
+            "entries": self.entries.len(),
+            "auth_headers_redacted": self.redaction_policy.redact_auth_headers,
+        });
+        descriptor
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Download artifacts
 // ---------------------------------------------------------------------------
 
@@ -4795,6 +4942,98 @@ mod tests {
             ),
             Err(BrowserKernelError::InvalidConfig(_))
         ));
+    }
+
+    // ---- Network trace tests ----
+
+    #[test]
+    fn browser_network_trace_policy_defaults_auth_headers_redacted() {
+        let policy = BrowserNetworkTracePolicy::default();
+
+        assert!(policy.capture_enabled);
+        assert_eq!(policy.max_entries, 200);
+        assert!(policy.should_redact_header("authorization"));
+        assert!(policy.should_redact_header("Cookie"));
+        assert!(policy.should_redact_header("x-api-key"));
+        assert!(!policy.should_redact_header("content-type"));
+    }
+
+    #[test]
+    fn browser_network_header_redaction_preserves_non_sensitive_headers() {
+        let policy = BrowserNetworkTracePolicy::default();
+        let headers = vec![
+            BrowserNetworkHeader::new("Authorization", "Bearer secret"),
+            BrowserNetworkHeader::new("Content-Type", "application/json"),
+            BrowserNetworkHeader::new("Set-Cookie", "sid=secret"),
+        ];
+
+        let redacted = policy.redact_headers(headers);
+
+        assert_eq!(redacted[0].value, BrowserNetworkHeader::REDACTED);
+        assert_eq!(redacted[1].value, "application/json");
+        assert_eq!(redacted[2].value, BrowserNetworkHeader::REDACTED);
+    }
+
+    #[test]
+    fn browser_network_trace_roundtrips_with_redacted_entries() {
+        let trace = BrowserNetworkTrace {
+            artifact_id: ArtifactId::from("har-1"),
+            source_url: "https://example.com".to_string(),
+            entries: vec![BrowserNetworkTraceEntry {
+                request_id: "req-1".to_string(),
+                method: "GET".to_string(),
+                url: "https://example.com/api".to_string(),
+                request_headers: vec![BrowserNetworkHeader::new(
+                    "Authorization",
+                    BrowserNetworkHeader::REDACTED,
+                )],
+                response_status: Some(200),
+                response_headers: vec![BrowserNetworkHeader::new(
+                    "Content-Type",
+                    "application/json",
+                )],
+                started_at: ts(),
+                finished_at: Some(ts()),
+            }],
+            captured_at: ts(),
+            redaction_policy: BrowserNetworkRedactionPolicy::default(),
+        };
+
+        let json = serde_json::to_string_pretty(&trace).unwrap();
+        let decoded: BrowserNetworkTrace = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, trace);
+        assert_eq!(
+            decoded.entries[0].request_headers[0].value,
+            BrowserNetworkHeader::REDACTED
+        );
+    }
+
+    #[test]
+    fn browser_network_trace_descriptor_uses_tool_result_artifact() {
+        let trace = BrowserNetworkTrace {
+            artifact_id: ArtifactId::from("har-1"),
+            source_url: "https://example.com".to_string(),
+            entries: vec![],
+            captured_at: ts(),
+            redaction_policy: BrowserNetworkRedactionPolicy::default(),
+        };
+
+        let descriptor = trace.to_artifact_descriptor(Some("browser.extract_content"));
+
+        assert_eq!(descriptor.id, ArtifactId::from("har-1"));
+        assert_eq!(descriptor.kind, ArtifactKind::ToolResult);
+        assert_eq!(
+            descriptor.mime_type,
+            Some("application/har+json".to_string())
+        );
+        assert_eq!(descriptor.metadata["source"], "browser_network_trace");
+        assert_eq!(
+            descriptor.metadata["source_action"],
+            "browser.extract_content"
+        );
+        assert_eq!(descriptor.metadata["entries"], 0);
+        assert_eq!(descriptor.metadata["auth_headers_redacted"], true);
     }
 
     // ---- Download artifact tests ----

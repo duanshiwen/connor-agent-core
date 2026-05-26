@@ -1,5 +1,41 @@
 # Roadmap Progress
 
+## 2026-05-26 — M21 PR131: HAR / network trace boundary
+
+Status: implemented.
+
+### Scope
+
+- Added HAR-like network trace boundary types:
+  - `BrowserNetworkTrace`
+  - `BrowserNetworkTraceEntry`
+  - `BrowserNetworkHeader`
+- Added optional capture policy and redaction policy types:
+  - `BrowserNetworkTracePolicy`
+  - `BrowserNetworkRedactionPolicy`
+- Added default network capture boundary with `capture_enabled = true` and `max_entries = 200`.
+- Added default auth/credential header redaction for `Authorization`, `Cookie`, `Set-Cookie`, API key/token headers, and proxy auth headers.
+- Added `BrowserNetworkTrace::to_artifact_descriptor(...)` for future HAR persistence as `ArtifactKind::ToolResult` with `application/har+json` MIME type.
+
+### Acceptance coverage
+
+- Network trace policy defaults to auth header redaction.
+- Sensitive request/response headers are replaced with `[REDACTED]`.
+- Non-sensitive headers are preserved.
+- Network trace payloads roundtrip through serde with redacted entries.
+- Network trace artifact descriptor records source action, entry count, and redaction metadata.
+
+### Verification commands
+
+```bash
+cargo test -p browser-kernel-core browser_network
+cargo test -p browser-kernel-core
+```
+
+### Next planned step
+
+M21 PR132: Human takeover boundary.
+
 ## 2026-05-26 — M21 PR130: DOM snapshot artifact
 
 Status: implemented.
