@@ -72,6 +72,8 @@ pub enum WorkObjectType {
     Person,
     MailThread,
     BrowserSession,
+    Question,
+    Answer,
     External,
 }
 

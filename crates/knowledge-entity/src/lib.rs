@@ -16,7 +16,7 @@ use action_core::{
     ActionRequest, ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
 };
 use artifact_core::ArtifactId;
-use asset_core::AssetId;
+use asset_core::{AssetId, WorkObjectId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1002,6 +1002,7 @@ pub struct QuestionLedgerEntry {
     pub question: String,
     pub conversation_id: Option<String>,
     pub message_id: Option<String>,
+    pub work_object_id: Option<WorkObjectId>,
     pub answer_ref: Option<QuestionAnswerRef>,
     pub related_knowledge_entry_ids: Vec<KnowledgeEntryId>,
     pub tags: Vec<String>,
@@ -1015,6 +1016,7 @@ pub struct QuestionLedgerCreateRequest {
     pub question: String,
     pub conversation_id: Option<String>,
     pub message_id: Option<String>,
+    pub work_object_id: Option<WorkObjectId>,
     pub related_knowledge_entry_ids: Vec<KnowledgeEntryId>,
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
@@ -1026,6 +1028,7 @@ impl QuestionLedgerCreateRequest {
             question: question.into(),
             conversation_id: None,
             message_id: None,
+            work_object_id: None,
             related_knowledge_entry_ids: vec![],
             tags: vec![],
             created_at,
@@ -1050,6 +1053,11 @@ impl QuestionLedgerCreateRequest {
 
     pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
         self.message_id = Some(message_id.into());
+        self
+    }
+
+    pub fn with_work_object_id(mut self, work_object_id: WorkObjectId) -> Self {
+        self.work_object_id = Some(work_object_id);
         self
     }
 
@@ -1097,6 +1105,11 @@ pub trait QuestionLedger: Send + Sync {
         answer_ref: QuestionAnswerRef,
         updated_at: DateTime<Utc>,
     ) -> Result<QuestionLedgerEntry, QuestionLedgerError>;
+
+    async fn list_by_work_object(
+        &self,
+        work_object_id: &WorkObjectId,
+    ) -> Result<Vec<QuestionLedgerEntry>, QuestionLedgerError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1134,6 +1147,7 @@ impl QuestionLedger for MemoryQuestionLedger {
             question: request.question,
             conversation_id: request.conversation_id,
             message_id: request.message_id,
+            work_object_id: request.work_object_id,
             answer_ref: None,
             related_knowledge_entry_ids: request.related_knowledge_entry_ids,
             tags: request.tags,
@@ -1196,6 +1210,23 @@ impl QuestionLedger for MemoryQuestionLedger {
         entry.answer_ref = Some(answer_ref);
         entry.updated_at = updated_at;
         Ok(entry.clone())
+    }
+
+    async fn list_by_work_object(
+        &self,
+        work_object_id: &WorkObjectId,
+    ) -> Result<Vec<QuestionLedgerEntry>, QuestionLedgerError> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| QuestionLedgerError::LockPoisoned)?;
+        let mut results = entries
+            .values()
+            .filter(|entry| entry.work_object_id.as_ref() == Some(work_object_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(results)
     }
 }
 
@@ -1787,6 +1818,7 @@ impl AnswerEvidenceRef {
 pub struct AnswerCachePackage {
     pub id: AnswerCachePackageId,
     pub question_id: Option<QuestionLedgerEntryId>,
+    pub work_object_id: Option<WorkObjectId>,
     pub answer_id: String,
     pub version: AnswerCachePackageVersion,
     pub answer_markdown: String,
@@ -1801,6 +1833,7 @@ pub struct AnswerCachePackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerCacheCreateRequest {
     pub question_id: Option<QuestionLedgerEntryId>,
+    pub work_object_id: Option<WorkObjectId>,
     pub answer_id: String,
     pub answer_markdown: String,
     pub evidence_refs: Vec<AnswerEvidenceRef>,
@@ -1816,6 +1849,7 @@ impl AnswerCacheCreateRequest {
     ) -> Self {
         Self {
             question_id: None,
+            work_object_id: None,
             answer_id: answer_id.into(),
             answer_markdown: answer_markdown.into(),
             evidence_refs: vec![],
@@ -1826,6 +1860,11 @@ impl AnswerCacheCreateRequest {
 
     pub fn with_question_id(mut self, question_id: QuestionLedgerEntryId) -> Self {
         self.question_id = Some(question_id);
+        self
+    }
+
+    pub fn with_work_object_id(mut self, work_object_id: WorkObjectId) -> Self {
+        self.work_object_id = Some(work_object_id);
         self
     }
 
@@ -1887,6 +1926,11 @@ pub trait AnswerCacheStore: Send + Sync {
         &self,
         knowledge_entry_id: &KnowledgeEntryId,
     ) -> Result<Vec<AnswerCachePackage>, AnswerCacheError>;
+
+    async fn list_by_work_object(
+        &self,
+        work_object_id: &WorkObjectId,
+    ) -> Result<Vec<AnswerCachePackage>, AnswerCacheError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1937,6 +1981,7 @@ impl AnswerCacheStore for MemoryAnswerCacheStore {
         let package = AnswerCachePackage {
             id: Self::next_id(&packages),
             question_id: request.question_id,
+            work_object_id: request.work_object_id,
             answer_id: request.answer_id.clone(),
             version: Self::next_version_for_answer(&packages, &request.answer_id)?,
             answer_markdown: request.answer_markdown,
@@ -2003,6 +2048,108 @@ impl AnswerCacheStore for MemoryAnswerCacheStore {
             .collect::<Vec<_>>();
         results.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(results)
+    }
+
+    async fn list_by_work_object(
+        &self,
+        work_object_id: &WorkObjectId,
+    ) -> Result<Vec<AnswerCachePackage>, AnswerCacheError> {
+        let packages = self
+            .packages
+            .lock()
+            .map_err(|_| AnswerCacheError::LockPoisoned)?;
+        let mut results = packages
+            .values()
+            .filter(|package| package.work_object_id.as_ref() == Some(work_object_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(results)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Work Object cross-entity query boundary
+// ---------------------------------------------------------------------------
+
+/// Query for all entities linked to a specific work object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkObjectCrossEntityQuery {
+    pub work_object_id: WorkObjectId,
+}
+
+impl WorkObjectCrossEntityQuery {
+    pub fn new(work_object_id: WorkObjectId) -> Self {
+        Self { work_object_id }
+    }
+}
+
+/// Aggregated result of all entities linked to a work object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkObjectCrossEntityResult {
+    pub work_object_id: WorkObjectId,
+    pub question_ids: Vec<QuestionLedgerEntryId>,
+    pub answer_ids: Vec<AnswerCachePackageId>,
+    pub knowledge_entry_ids: Vec<KnowledgeEntryId>,
+}
+
+/// Cross-entity coordinator that queries across question ledger,
+/// answer cache, and knowledge entries by work object.
+#[derive(Debug, Clone)]
+pub struct WorkObjectCrossEntityCoordinator<Q: QuestionLedger, A: AnswerCacheStore> {
+    question_ledger: Q,
+    answer_cache: A,
+}
+
+impl<Q: QuestionLedger, A: AnswerCacheStore> WorkObjectCrossEntityCoordinator<Q, A> {
+    pub fn new(question_ledger: Q, answer_cache: A) -> Self {
+        Self {
+            question_ledger,
+            answer_cache,
+        }
+    }
+
+    /// Query all entities linked to the given work object.
+    pub async fn query(
+        &self,
+        query: &WorkObjectCrossEntityQuery,
+    ) -> Result<WorkObjectCrossEntityResult, String> {
+        let questions = self
+            .question_ledger
+            .list_by_work_object(&query.work_object_id)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let answers = self
+            .answer_cache
+            .list_by_work_object(&query.work_object_id)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Collect unique knowledge entry IDs from questions and answers
+        let mut knowledge_entry_ids: Vec<KnowledgeEntryId> = Vec::new();
+        for q in &questions {
+            for kid in &q.related_knowledge_entry_ids {
+                if !knowledge_entry_ids.iter().any(|existing| existing == kid) {
+                    knowledge_entry_ids.push(kid.clone());
+                }
+            }
+        }
+        for a in &answers {
+            for kid in &a.related_knowledge_entry_ids {
+                if !knowledge_entry_ids.iter().any(|existing| existing == kid) {
+                    knowledge_entry_ids.push(kid.clone());
+                }
+            }
+        }
+        knowledge_entry_ids.sort_by(|a, b| a.0.cmp(&b.0));
+
+        Ok(WorkObjectCrossEntityResult {
+            work_object_id: query.work_object_id.clone(),
+            question_ids: questions.iter().map(|q| q.id.clone()).collect(),
+            answer_ids: answers.iter().map(|a| a.id.clone()).collect(),
+            knowledge_entry_ids,
+        })
     }
 }
 
@@ -3225,6 +3372,7 @@ mod tests {
         let package = AnswerCachePackage {
             id: AnswerCachePackageId::from("answer-cache-1"),
             question_id: Some(QuestionLedgerEntryId::from("question-1")),
+            work_object_id: None,
             answer_id: "answer-1".to_string(),
             version: AnswerCachePackageVersion::new(2).unwrap(),
             answer_markdown: "# Answer\n\nUse durable storage.".to_string(),
@@ -3351,6 +3499,7 @@ mod tests {
             question: "How should AgentOS store durable memory?".to_string(),
             conversation_id: Some("conversation-1".to_string()),
             message_id: Some("message-1".to_string()),
+            work_object_id: None,
             answer_ref: Some(QuestionAnswerRef {
                 answer_id: "answer-1".to_string(),
                 answer_cache_ref: Some("answer-cache/2026/05/question-1/v1".to_string()),
@@ -4219,5 +4368,201 @@ mod tests {
 
         let err = executor.execute(&request).await.unwrap_err();
         assert!(matches!(err, ActionExecutorError::NotSupported(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 144: Work Object integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn work_object_type_question_and_answer_serialize_as_snake_case() {
+        use asset_core::WorkObjectType;
+        assert_eq!(
+            serde_json::to_string(&WorkObjectType::Question).unwrap(),
+            "\"question\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkObjectType::Answer).unwrap(),
+            "\"answer\""
+        );
+        let decoded_q: WorkObjectType = serde_json::from_str("\"question\"").unwrap();
+        assert_eq!(decoded_q, WorkObjectType::Question);
+        let decoded_a: WorkObjectType = serde_json::from_str("\"answer\"").unwrap();
+        assert_eq!(decoded_a, WorkObjectType::Answer);
+    }
+
+    #[test]
+    fn question_ledger_entry_with_work_object_id_roundtrips() {
+        let entry = QuestionLedgerEntry {
+            id: QuestionLedgerEntryId::from("question-1"),
+            question: "What is the architecture?".to_string(),
+            conversation_id: None,
+            message_id: None,
+            work_object_id: Some(WorkObjectId::from("project-alpha")),
+            answer_ref: None,
+            related_knowledge_entry_ids: vec![],
+            tags: vec!["architecture".to_string()],
+            created_at: ts(),
+            updated_at: ts(),
+        };
+        let json = serde_json::to_string_pretty(&entry).unwrap();
+        let decoded: QuestionLedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, entry);
+        assert_eq!(decoded.work_object_id.unwrap().0, "project-alpha");
+    }
+
+    #[tokio::test]
+    async fn question_ledger_create_with_work_object_id_and_list_by_work_object() {
+        let ledger = MemoryQuestionLedger::new();
+        let wo_id = WorkObjectId::from("project-alpha");
+
+        ledger
+            .create_question(
+                QuestionLedgerCreateRequest::new("Q1", ts()).with_work_object_id(wo_id.clone()),
+            )
+            .await
+            .unwrap();
+        ledger
+            .create_question(QuestionLedgerCreateRequest::new("Q2", ts()))
+            .await
+            .unwrap();
+        ledger
+            .create_question(
+                QuestionLedgerCreateRequest::new("Q3", ts()).with_work_object_id(wo_id.clone()),
+            )
+            .await
+            .unwrap();
+
+        let results = ledger.list_by_work_object(&wo_id).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].question, "Q1");
+        assert_eq!(results[1].question, "Q3");
+
+        let other = WorkObjectId::from("other-project");
+        assert!(ledger.list_by_work_object(&other).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn answer_cache_package_with_work_object_id_roundtrips() {
+        let package = AnswerCachePackage {
+            id: AnswerCachePackageId::from("answer-cache-1"),
+            question_id: None,
+            work_object_id: Some(WorkObjectId::from("project-alpha")),
+            answer_id: "answer-1".to_string(),
+            version: AnswerCachePackageVersion::new(1).unwrap(),
+            answer_markdown: "# Answer".to_string(),
+            evidence_refs: vec![],
+            related_knowledge_entry_ids: vec![],
+            freshness_policy: AnswerFreshnessPolicy::never_expires(),
+            created_at: ts(),
+            updated_at: ts(),
+        };
+        let json = serde_json::to_string_pretty(&package).unwrap();
+        let decoded: AnswerCachePackage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, package);
+        assert_eq!(decoded.work_object_id.unwrap().0, "project-alpha");
+    }
+
+    #[tokio::test]
+    async fn answer_cache_create_with_work_object_id_and_list_by_work_object() {
+        let store = MemoryAnswerCacheStore::new();
+        let wo_id = WorkObjectId::from("project-alpha");
+
+        store
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-1", "First answer", ts())
+                    .with_work_object_id(wo_id.clone()),
+            )
+            .await
+            .unwrap();
+        store
+            .create_package(AnswerCacheCreateRequest::new(
+                "answer-2",
+                "Second answer",
+                ts(),
+            ))
+            .await
+            .unwrap();
+        store
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-3", "Third answer", ts())
+                    .with_work_object_id(wo_id.clone()),
+            )
+            .await
+            .unwrap();
+
+        let results = store.list_by_work_object(&wo_id).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].answer_id, "answer-1");
+        assert_eq!(results[1].answer_id, "answer-3");
+
+        let other = WorkObjectId::from("other-project");
+        assert!(store.list_by_work_object(&other).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn work_object_cross_entity_coordinator_aggregates_questions_and_answers() {
+        let ledger = MemoryQuestionLedger::new();
+        let cache = MemoryAnswerCacheStore::new();
+        let wo_id = WorkObjectId::from("project-alpha");
+
+        // Create question with work object
+        let q = ledger
+            .create_question(
+                QuestionLedgerCreateRequest::new("What is X?", ts())
+                    .with_work_object_id(wo_id.clone())
+                    .with_related_knowledge_entry_ids(vec![KnowledgeEntryId::from(
+                        "knowledge-entry-1",
+                    )]),
+            )
+            .await
+            .unwrap();
+
+        // Create answer with work object
+        cache
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-1", "X is Y", ts())
+                    .with_work_object_id(wo_id.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Create unrelated question
+        ledger
+            .create_question(QuestionLedgerCreateRequest::new("Unrelated", ts()))
+            .await
+            .unwrap();
+
+        let coordinator = WorkObjectCrossEntityCoordinator::new(ledger, cache);
+        let result = coordinator
+            .query(&WorkObjectCrossEntityQuery::new(wo_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(result.work_object_id, wo_id);
+        assert_eq!(result.question_ids.len(), 1);
+        assert_eq!(result.question_ids[0], q.id);
+        assert_eq!(result.answer_ids.len(), 1);
+        assert_eq!(
+            result.knowledge_entry_ids,
+            vec![KnowledgeEntryId::from("knowledge-entry-1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn work_object_cross_entity_coordinator_returns_empty_for_unknown_work_object() {
+        let ledger = MemoryQuestionLedger::new();
+        let cache = MemoryAnswerCacheStore::new();
+        let coordinator = WorkObjectCrossEntityCoordinator::new(ledger, cache);
+        let result = coordinator
+            .query(&WorkObjectCrossEntityQuery::new(WorkObjectId::from(
+                "nonexistent",
+            )))
+            .await
+            .unwrap();
+
+        assert!(result.question_ids.is_empty());
+        assert!(result.answer_ids.is_empty());
+        assert!(result.knowledge_entry_ids.is_empty());
     }
 }
