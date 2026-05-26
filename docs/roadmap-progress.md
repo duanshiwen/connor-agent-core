@@ -1,5 +1,54 @@
 # Roadmap Progress
 
+## 2026-05-27 — M22 PR136: Embedding / semantic search boundary
+
+Status: implemented.
+
+### Scope
+
+- Added the first stable semantic search boundary in `knowledge-entity`:
+  - `KnowledgeEmbeddingVector`
+  - `KnowledgeEmbeddingDocument`
+  - `KnowledgeSemanticQuery`
+  - `KnowledgeEmbeddingRebuildRequest`
+  - `KnowledgeEmbeddingIndex` trait
+- Added typed embedding/index validation:
+  - empty embedding vectors are rejected
+  - non-finite values (`NaN` / infinities) are rejected
+  - mismatched vector dimensions return a typed `DimensionMismatch` error
+- Added `KnowledgeEmbeddingBackendKind::DeterministicInProcess` as the initial backend selection boundary.
+- Added deterministic in-memory semantic backend:
+  - `DeterministicEmbeddingKnowledgeBackend`
+  - `MemorySemanticKnowledgeIndex` alias
+- Implemented cosine-similarity ranking with deterministic tie-breaking by entry id.
+- Reused the existing `KnowledgeSearchResult` shape so callers can consume full-text and semantic results through the same lightweight result type.
+- Kept real embedding model calls, vector persistence, ANN backends, and hybrid rank fusion out of this PR.
+
+### Acceptance coverage
+
+- Embedding vectors reject empty and non-finite values.
+- Semantic query defaults are stable.
+- Embedding backend kind defaults to deterministic in-process.
+- Memory semantic index ranks by cosine similarity.
+- Memory semantic index filters by tags and frontmatter.
+- Memory semantic index rejects dimension mismatch.
+- Memory semantic index supports upsert, delete, and rebuild flows.
+- Semantic ranking ties break by stable entry id.
+
+### Verification commands
+
+```bash
+cargo test -p knowledge-entity semantic
+cargo test -p knowledge-entity embedding
+cargo test -p knowledge-entity
+cargo fmt --all --check
+cargo clippy --workspace -- -D warnings
+```
+
+### Next planned step
+
+M22 PR137: Hybrid search query boundary.
+
 ## 2026-05-26 — M22 PR135: Full-text search backend
 
 Status: implemented.

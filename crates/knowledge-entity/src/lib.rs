@@ -244,10 +244,116 @@ impl KnowledgeIndexDocument {
     }
 }
 
+/// Validated embedding vector for semantic knowledge search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEmbeddingVector {
+    values: Vec<f32>,
+}
+
+impl KnowledgeEmbeddingVector {
+    pub fn new(values: Vec<f32>) -> Result<Self, KnowledgeIndexError> {
+        if values.is_empty() {
+            return Err(KnowledgeIndexError::InvalidEmbedding(
+                "knowledge embedding vector must not be empty".to_string(),
+            ));
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(KnowledgeIndexError::InvalidEmbedding(
+                "knowledge embedding vector values must be finite".to_string(),
+            ));
+        }
+        Ok(Self { values })
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub fn dimensions(&self) -> usize {
+        self.values.len()
+    }
+}
+
+/// Semantic query boundary for embedding-backed knowledge indexes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeSemanticQuery {
+    pub embedding: KnowledgeEmbeddingVector,
+    pub tags: Vec<String>,
+    pub frontmatter_filters: Vec<(String, String)>,
+    pub limit: usize,
+}
+
+impl KnowledgeSemanticQuery {
+    pub fn new(embedding: KnowledgeEmbeddingVector) -> Self {
+        Self {
+            embedding,
+            tags: vec![],
+            frontmatter_filters: vec![],
+            limit: 10,
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub fn with_frontmatter_filter(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.frontmatter_filters.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+/// Indexable semantic embedding document containing entry metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEmbeddingDocument {
+    pub entry: KnowledgeEntryRef,
+    pub embedding: KnowledgeEmbeddingVector,
+    pub tags: Vec<String>,
+    pub frontmatter: serde_json::Value,
+}
+
+impl KnowledgeEmbeddingDocument {
+    pub fn new(entry: KnowledgeEntryRef, embedding: KnowledgeEmbeddingVector) -> Self {
+        Self {
+            entry,
+            embedding,
+            tags: vec![],
+            frontmatter: serde_json::json!({}),
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub fn with_frontmatter(mut self, frontmatter: serde_json::Value) -> Self {
+        self.frontmatter = frontmatter;
+        self
+    }
+}
+
 /// Request to rebuild an index from a complete document set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeIndexRebuildRequest {
     pub documents: Vec<KnowledgeIndexDocument>,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// Request to rebuild an embedding index from a complete document set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEmbeddingRebuildRequest {
+    pub documents: Vec<KnowledgeEmbeddingDocument>,
     pub requested_at: DateTime<Utc>,
 }
 
@@ -266,6 +372,10 @@ pub enum KnowledgeIndexError {
     LockPoisoned,
     #[error("invalid knowledge index query: {0}")]
     InvalidQuery(String),
+    #[error("invalid knowledge embedding: {0}")]
+    InvalidEmbedding(String),
+    #[error("knowledge embedding dimension mismatch: expected {expected}, actual {actual}")]
+    DimensionMismatch { expected: usize, actual: usize },
 }
 
 /// Search backend abstraction for knowledge indexes.
@@ -287,6 +397,27 @@ pub trait KnowledgeIndex: Send + Sync {
     ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError>;
 }
 
+/// Semantic search backend abstraction for knowledge embedding indexes.
+#[async_trait]
+pub trait KnowledgeEmbeddingIndex: Send + Sync {
+    async fn upsert_embedding(
+        &mut self,
+        document: KnowledgeEmbeddingDocument,
+    ) -> Result<(), KnowledgeIndexError>;
+
+    async fn delete_embedding(&mut self, id: &KnowledgeEntryId) -> Result<(), KnowledgeIndexError>;
+
+    async fn semantic_query(
+        &self,
+        query: &KnowledgeSemanticQuery,
+    ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError>;
+
+    async fn rebuild_embeddings(
+        &mut self,
+        request: KnowledgeEmbeddingRebuildRequest,
+    ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError>;
+}
+
 /// Selected full-text backend implementation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,6 +427,20 @@ pub enum KnowledgeFullTextBackendKind {
 }
 
 impl Default for KnowledgeFullTextBackendKind {
+    fn default() -> Self {
+        Self::DeterministicInProcess
+    }
+}
+
+/// Selected embedding backend implementation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEmbeddingBackendKind {
+    /// Dependency-free deterministic backend used until vector storage is selected.
+    DeterministicInProcess,
+}
+
+impl Default for KnowledgeEmbeddingBackendKind {
     fn default() -> Self {
         Self::DeterministicInProcess
     }
@@ -467,6 +612,149 @@ impl KnowledgeIndex for DeterministicFullTextKnowledgeBackend {
 
 /// Deterministic in-memory full-text index alias kept for the PR134 fake-index boundary.
 pub type MemoryFullTextKnowledgeIndex = DeterministicFullTextKnowledgeBackend;
+
+/// First embedding backend: deterministic, dependency-free, in-process cosine search.
+#[derive(Debug, Clone, Default)]
+pub struct DeterministicEmbeddingKnowledgeBackend {
+    documents: HashMap<KnowledgeEntryId, KnowledgeEmbeddingDocument>,
+}
+
+impl DeterministicEmbeddingKnowledgeBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn matches(document: &KnowledgeEmbeddingDocument, query: &KnowledgeSemanticQuery) -> bool {
+        let matches_tags = query
+            .tags
+            .iter()
+            .all(|tag| document.tags.iter().any(|candidate| candidate == tag));
+        let matches_frontmatter = query.frontmatter_filters.iter().all(|(key, value)| {
+            document
+                .frontmatter
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(|candidate| candidate == value)
+                .unwrap_or(false)
+        });
+        matches_tags && matches_frontmatter
+    }
+
+    fn cosine_similarity(
+        left: &KnowledgeEmbeddingVector,
+        right: &KnowledgeEmbeddingVector,
+    ) -> Result<f32, KnowledgeIndexError> {
+        if left.dimensions() != right.dimensions() {
+            return Err(KnowledgeIndexError::DimensionMismatch {
+                expected: left.dimensions(),
+                actual: right.dimensions(),
+            });
+        }
+
+        let mut dot = 0.0_f32;
+        let mut left_norm = 0.0_f32;
+        let mut right_norm = 0.0_f32;
+        for (left_value, right_value) in left.values().iter().zip(right.values().iter()) {
+            dot += left_value * right_value;
+            left_norm += left_value * left_value;
+            right_norm += right_value * right_value;
+        }
+
+        if left_norm == 0.0 || right_norm == 0.0 {
+            return Ok(0.0);
+        }
+
+        Ok(dot / (left_norm.sqrt() * right_norm.sqrt()))
+    }
+}
+
+#[async_trait]
+impl KnowledgeEmbeddingIndex for DeterministicEmbeddingKnowledgeBackend {
+    async fn upsert_embedding(
+        &mut self,
+        document: KnowledgeEmbeddingDocument,
+    ) -> Result<(), KnowledgeIndexError> {
+        if let Some(existing) = self.documents.values().next()
+            && existing.embedding.dimensions() != document.embedding.dimensions()
+        {
+            return Err(KnowledgeIndexError::DimensionMismatch {
+                expected: existing.embedding.dimensions(),
+                actual: document.embedding.dimensions(),
+            });
+        }
+        self.documents.insert(document.entry.id.clone(), document);
+        Ok(())
+    }
+
+    async fn delete_embedding(&mut self, id: &KnowledgeEntryId) -> Result<(), KnowledgeIndexError> {
+        self.documents.remove(id);
+        Ok(())
+    }
+
+    async fn semantic_query(
+        &self,
+        query: &KnowledgeSemanticQuery,
+    ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError> {
+        if query.limit == 0 {
+            return Err(KnowledgeIndexError::InvalidQuery(
+                "knowledge semantic query limit must be greater than zero".to_string(),
+            ));
+        }
+
+        let mut results = Vec::new();
+        for document in self
+            .documents
+            .values()
+            .filter(|document| Self::matches(document, query))
+        {
+            results.push(KnowledgeSearchResult {
+                entry: document.entry.clone(),
+                score: Self::cosine_similarity(&document.embedding, &query.embedding)?,
+                snippet: None,
+            });
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entry.id.0.cmp(&b.entry.id.0))
+        });
+        results.truncate(query.limit);
+        Ok(results)
+    }
+
+    async fn rebuild_embeddings(
+        &mut self,
+        request: KnowledgeEmbeddingRebuildRequest,
+    ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError> {
+        if let Some(first) = request.documents.first() {
+            let expected = first.embedding.dimensions();
+            for document in &request.documents {
+                if document.embedding.dimensions() != expected {
+                    return Err(KnowledgeIndexError::DimensionMismatch {
+                        expected,
+                        actual: document.embedding.dimensions(),
+                    });
+                }
+            }
+        }
+
+        let deleted_count = self.documents.len();
+        self.documents = request
+            .documents
+            .into_iter()
+            .map(|document| (document.entry.id.clone(), document))
+            .collect();
+        Ok(KnowledgeIndexRebuildReport {
+            indexed_count: self.documents.len(),
+            deleted_count,
+            rebuilt_at: request.requested_at,
+        })
+    }
+}
+
+/// Deterministic in-memory semantic index alias kept for the PR136 fake-index boundary.
+pub type MemorySemanticKnowledgeIndex = DeterministicEmbeddingKnowledgeBackend;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KnowledgeValidationError {
@@ -1358,6 +1646,291 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn knowledge_embedding_vector_rejects_empty_vectors() {
+        assert_eq!(
+            KnowledgeEmbeddingVector::new(vec![]).unwrap_err(),
+            KnowledgeIndexError::InvalidEmbedding(
+                "knowledge embedding vector must not be empty".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn knowledge_embedding_vector_rejects_non_finite_values() {
+        assert_eq!(
+            KnowledgeEmbeddingVector::new(vec![1.0, f32::NAN]).unwrap_err(),
+            KnowledgeIndexError::InvalidEmbedding(
+                "knowledge embedding vector values must be finite".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn knowledge_semantic_query_defaults_are_stable() {
+        let query =
+            KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap());
+
+        assert_eq!(query.embedding.values(), &[1.0, 0.0]);
+        assert_eq!(query.limit, 10);
+        assert!(query.tags.is_empty());
+        assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn knowledge_embedding_backend_kind_defaults_to_deterministic_in_process() {
+        assert_eq!(
+            KnowledgeEmbeddingBackendKind::default(),
+            KnowledgeEmbeddingBackendKind::DeterministicInProcess
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_semantic_index_ranks_by_cosine_similarity() {
+        let mut index = MemorySemanticKnowledgeIndex::new();
+        index
+            .rebuild_embeddings(KnowledgeEmbeddingRebuildRequest {
+                documents: vec![
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-1"),
+                            title: "Browser Kernel".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![0.0, 1.0]).unwrap(),
+                    ),
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-2"),
+                            title: "AgentOS Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    ),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = index
+            .semantic_query(&KnowledgeSemanticQuery::new(
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-2")
+        );
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[tokio::test]
+    async fn memory_semantic_index_filters_by_tags_and_frontmatter() {
+        let mut index = MemorySemanticKnowledgeIndex::new();
+        index
+            .rebuild_embeddings(KnowledgeEmbeddingRebuildRequest {
+                documents: vec![
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-1"),
+                            title: "Published Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    )
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter(serde_json::json!({ "status": "published" })),
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-2"),
+                            title: "Draft Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    )
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter(serde_json::json!({ "status": "draft" })),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = index
+            .semantic_query(
+                &KnowledgeSemanticQuery::new(
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                )
+                .with_tags(vec!["memory".to_string()])
+                .with_frontmatter_filter("status", "published"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_semantic_index_rejects_dimension_mismatch() {
+        let mut index = MemorySemanticKnowledgeIndex::new();
+        index
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("knowledge-entry-1"),
+                    title: "AgentOS Memory".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            index
+                .semantic_query(&KnowledgeSemanticQuery::new(
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0, 0.0]).unwrap(),
+                ))
+                .await
+                .unwrap_err(),
+            KnowledgeIndexError::DimensionMismatch {
+                expected: 2,
+                actual: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_semantic_index_upserts_and_deletes_embeddings() {
+        let mut index = MemorySemanticKnowledgeIndex::new();
+        index
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("knowledge-entry-1"),
+                    title: "Original".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                KnowledgeEmbeddingVector::new(vec![0.0, 1.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+        index
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("knowledge-entry-1"),
+                    title: "Updated".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let results = index
+            .semantic_query(&KnowledgeSemanticQuery::new(
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.title, "Updated");
+
+        index
+            .delete_embedding(&KnowledgeEntryId::from("knowledge-entry-1"))
+            .await
+            .unwrap();
+        assert!(
+            index
+                .semantic_query(&KnowledgeSemanticQuery::new(
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                ))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_ranking_ties_break_by_entry_id() {
+        let mut index = MemorySemanticKnowledgeIndex::new();
+        index
+            .rebuild_embeddings(KnowledgeEmbeddingRebuildRequest {
+                documents: vec![
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-b"),
+                            title: "Memory B".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    ),
+                    KnowledgeEmbeddingDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-a"),
+                            title: "Memory A".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    ),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = index
+            .semantic_query(&KnowledgeSemanticQuery::new(
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| &result.entry.id)
+                .collect::<Vec<_>>(),
+            vec![
+                &KnowledgeEntryId::from("knowledge-entry-a"),
+                &KnowledgeEntryId::from("knowledge-entry-b")
+            ]
+        );
     }
 
     #[tokio::test]
