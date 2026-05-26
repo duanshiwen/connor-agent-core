@@ -457,3 +457,29 @@ async fn host_api_shutdown_delegates_to_kernel_runtime() {
 
     assert_eq!(runtime.state().as_str(), "shutdown");
 }
+
+#[tokio::test]
+async fn host_api_recover_delegates_to_kernel_runtime() {
+    let runtime = runtime();
+    runtime.start().unwrap();
+    let api = KernelHostApi::new(runtime.clone());
+
+    api.recover().await.unwrap();
+
+    assert_eq!(runtime.state().as_str(), "initialized");
+}
+
+#[tokio::test]
+async fn host_api_recover_after_shutdown_returns_kernel_operation_error() {
+    let runtime = runtime();
+    let api = KernelHostApi::new(runtime.clone());
+
+    api.shutdown().await.unwrap();
+    let result = api.recover().await;
+
+    assert!(matches!(
+        result,
+        Err(HostApiError::KernelOperationFailed { reason })
+            if reason == "invalid kernel lifecycle transition: shutdown -> recovering"
+    ));
+}

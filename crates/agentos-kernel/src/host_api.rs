@@ -232,6 +232,11 @@ impl KernelHostApi {
         Ok(())
     }
 
+    pub async fn recover(&self) -> HostApiResult<()> {
+        self.runtime.recover()?;
+        Ok(())
+    }
+
     fn require_permission(
         &self,
         actor_context: Option<&HostActorContext>,
