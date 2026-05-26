@@ -1170,6 +1170,157 @@ pub struct BrowserActionResult {
 }
 
 // ---------------------------------------------------------------------------
+// Upload handling
+// ---------------------------------------------------------------------------
+
+/// Input contract for a browser file upload action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserUploadInput {
+    pub url: String,
+    pub selector: ElementSelector,
+    pub local_path: PathBuf,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+impl BrowserUploadInput {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.url.trim().is_empty() {
+            return Err(BrowserKernelError::EmptyUrl);
+        }
+        self.selector.validate()?;
+        if self.local_path.as_os_str().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "upload local_path cannot be empty".to_string(),
+            ));
+        }
+        if let Some(filename) = &self.filename
+            && filename.trim().is_empty()
+        {
+            return Err(BrowserKernelError::InvalidConfig(
+                "upload filename cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn audit_data(
+        &self,
+        requested_at: DateTime<Utc>,
+    ) -> Result<BrowserUploadAuditData, BrowserKernelError> {
+        self.validate()?;
+        Ok(BrowserUploadAuditData {
+            url: self.url.trim().to_string(),
+            selector: self.selector.clone(),
+            local_path: self.local_path.clone(),
+            filename: self
+                .filename
+                .clone()
+                .unwrap_or_else(|| infer_upload_filename(&self.local_path)),
+            content_type: self.content_type.clone(),
+            size_bytes: self.size_bytes,
+            requested_at,
+        })
+    }
+
+    pub fn approval_requirement(
+        &self,
+        requested_at: DateTime<Utc>,
+    ) -> BrowserUploadApprovalRequirement {
+        match self.audit_data(requested_at) {
+            Ok(audit) => BrowserUploadApprovalRequirement::ask(
+                "browser upload exposes a local file to a web page and requires human approval",
+                audit,
+            ),
+            Err(error) => BrowserUploadApprovalRequirement::deny(
+                format!("invalid browser upload input: {}", error),
+                BrowserUploadAuditData::invalid(requested_at),
+            ),
+        }
+    }
+}
+
+/// Audit payload exposed before a browser upload is approved or denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserUploadAuditData {
+    pub url: String,
+    pub selector: ElementSelector,
+    pub local_path: PathBuf,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub requested_at: DateTime<Utc>,
+}
+
+impl BrowserUploadAuditData {
+    fn invalid(requested_at: DateTime<Utc>) -> Self {
+        Self {
+            url: "".to_string(),
+            selector: ElementSelector::css("invalid"),
+            local_path: PathBuf::new(),
+            filename: "".to_string(),
+            content_type: None,
+            size_bytes: None,
+            requested_at,
+        }
+    }
+}
+
+/// Policy result for upload actions. Uploads are never silently allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserUploadPolicyDecision {
+    Ask,
+    Deny,
+}
+
+/// Approval requirement returned for every browser upload request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserUploadApprovalRequirement {
+    pub decision: BrowserUploadPolicyDecision,
+    pub reason: String,
+    pub audit_data: BrowserUploadAuditData,
+}
+
+impl BrowserUploadApprovalRequirement {
+    pub fn ask(reason: impl Into<String>, audit_data: BrowserUploadAuditData) -> Self {
+        Self {
+            decision: BrowserUploadPolicyDecision::Ask,
+            reason: reason.into(),
+            audit_data,
+        }
+    }
+
+    pub fn deny(reason: impl Into<String>, audit_data: BrowserUploadAuditData) -> Self {
+        Self {
+            decision: BrowserUploadPolicyDecision::Deny,
+            reason: reason.into(),
+            audit_data,
+        }
+    }
+
+    pub fn requires_human_approval(&self) -> bool {
+        self.decision == BrowserUploadPolicyDecision::Ask
+    }
+
+    pub fn is_denied(&self) -> bool {
+        self.decision == BrowserUploadPolicyDecision::Deny
+    }
+}
+
+fn infer_upload_filename(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("upload.bin")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Download artifacts
 // ---------------------------------------------------------------------------
 
@@ -1620,6 +1771,32 @@ impl From<BrowserDownloadActionInput> for BrowserDownloadInput {
             url: input.url,
             suggested_filename: input.suggested_filename,
             content_type: input.content_type,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserUploadActionInput {
+    url: String,
+    selector: ElementSelector,
+    local_path: PathBuf,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+}
+
+impl From<BrowserUploadActionInput> for BrowserUploadInput {
+    fn from(input: BrowserUploadActionInput) -> Self {
+        Self {
+            url: input.url,
+            selector: input.selector,
+            local_path: input.local_path,
+            filename: input.filename,
+            content_type: input.content_type,
+            size_bytes: input.size_bytes,
         }
     }
 }
@@ -2445,6 +2622,38 @@ impl CdpBrowserExecutor {
             completed_at: downloaded_at,
         })
     }
+
+    async fn upload_file(
+        &self,
+        input: BrowserUploadInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let requested_at = chrono::Utc::now();
+        let requirement = input.approval_requirement(requested_at);
+        let status = if requirement.requires_human_approval() {
+            action_core::ActionStatus::ApprovalRequired
+        } else {
+            action_core::ActionStatus::Denied
+        };
+        let summary = match requirement.decision {
+            BrowserUploadPolicyDecision::Ask => {
+                format!("Browser upload requires approval: {}", requirement.reason)
+            }
+            BrowserUploadPolicyDecision::Deny => {
+                format!("Browser upload denied: {}", requirement.reason)
+            }
+        };
+
+        Ok(action_core::ActionResult {
+            status,
+            summary,
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "decision": requirement.decision,
+                "reason": requirement.reason,
+                "audit_data": requirement.audit_data,
+            })),
+            completed_at: requested_at,
+        })
+    }
 }
 
 fn infer_download_filename(url: &str) -> String {
@@ -2615,6 +2824,7 @@ const KNOWN_BROWSER_ACTIONS: &[&str] = &[
     "browser.get_page_screenshot",
     "browser.get_interactive_snapshot",
     "browser.download_file",
+    "browser.upload_file",
 ];
 
 #[async_trait::async_trait]
@@ -2723,6 +2933,11 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                         action_core::ActionExecutorError::InvalidInput(e.to_string())
                     })?;
                 self.download_file(input.into()).await
+            }
+            "browser.upload_file" => {
+                let input: BrowserUploadActionInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.upload_file(input.into()).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
@@ -3367,6 +3582,105 @@ mod tests {
             "files"
         );
         assert_eq!(infer_download_filename(""), "download.bin");
+    }
+
+    // ---- Upload handling tests ----
+
+    fn valid_upload_input() -> BrowserUploadInput {
+        BrowserUploadInput {
+            url: "https://example.com/upload".to_string(),
+            selector: ElementSelector::css("input[type=file]"),
+            local_path: PathBuf::from("/tmp/report.pdf"),
+            filename: None,
+            content_type: Some("application/pdf".to_string()),
+            size_bytes: Some(42),
+        }
+    }
+
+    #[test]
+    fn browser_upload_input_validates_url_selector_and_path() {
+        assert!(valid_upload_input().validate().is_ok());
+
+        let mut empty_url = valid_upload_input();
+        empty_url.url = " ".to_string();
+        assert!(matches!(
+            empty_url.validate(),
+            Err(BrowserKernelError::EmptyUrl)
+        ));
+
+        let mut empty_selector = valid_upload_input();
+        empty_selector.selector = ElementSelector::css(" ");
+        assert!(matches!(
+            empty_selector.validate(),
+            Err(BrowserKernelError::EmptySelector)
+        ));
+
+        let mut empty_path = valid_upload_input();
+        empty_path.local_path = PathBuf::new();
+        assert!(empty_path.validate().is_err());
+    }
+
+    #[test]
+    fn browser_upload_requirement_is_always_ask_or_deny_never_allow() {
+        let requirement = valid_upload_input().approval_requirement(ts());
+
+        assert_eq!(requirement.decision, BrowserUploadPolicyDecision::Ask);
+        assert!(requirement.requires_human_approval());
+        assert!(!requirement.is_denied());
+        assert!(requirement.reason.contains("requires human approval"));
+    }
+
+    #[test]
+    fn browser_upload_audit_data_exposes_target_file_and_metadata() {
+        let audit = valid_upload_input().audit_data(ts()).unwrap();
+
+        assert_eq!(audit.url, "https://example.com/upload");
+        assert_eq!(audit.selector, ElementSelector::css("input[type=file]"));
+        assert_eq!(audit.local_path, PathBuf::from("/tmp/report.pdf"));
+        assert_eq!(audit.filename, "report.pdf");
+        assert_eq!(audit.content_type.as_deref(), Some("application/pdf"));
+        assert_eq!(audit.size_bytes, Some(42));
+    }
+
+    #[test]
+    fn browser_upload_requirement_denies_invalid_input() {
+        let mut input = valid_upload_input();
+        input.selector = ElementSelector::css(" ");
+
+        let requirement = input.approval_requirement(ts());
+
+        assert_eq!(requirement.decision, BrowserUploadPolicyDecision::Deny);
+        assert!(requirement.is_denied());
+        assert!(requirement.reason.contains("invalid browser upload input"));
+    }
+
+    #[test]
+    fn infer_upload_filename_uses_path_tail_or_default() {
+        assert_eq!(
+            infer_upload_filename(Path::new("/tmp/report.pdf")),
+            "report.pdf"
+        );
+        assert_eq!(infer_upload_filename(Path::new("")), "upload.bin");
+    }
+
+    #[tokio::test]
+    async fn upload_action_returns_approval_required_payload() {
+        let mut lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        // SAFETY: unit test only; upload_file does not touch the browser handle.
+        lifecycle.browser = None;
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
+
+        let result = executor.upload_file(valid_upload_input()).await.unwrap();
+
+        assert_eq!(result.status, action_core::ActionStatus::ApprovalRequired);
+        match result.payload {
+            action_core::ActionResultPayload::Json(payload) => {
+                assert_eq!(payload["decision"], "ask");
+                assert_eq!(payload["audit_data"]["filename"], "report.pdf");
+                assert_eq!(payload["audit_data"]["size_bytes"], 42);
+            }
+            other => panic!("unexpected payload: {:?}", other),
+        }
     }
 
     // ---- Lifecycle manager tests ----
