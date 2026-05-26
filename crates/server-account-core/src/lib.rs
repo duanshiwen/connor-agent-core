@@ -174,6 +174,164 @@ pub struct ServerAccountBinding {
     pub bound_at: DateTime<Utc>,
 }
 
+/// Kind of trust material pinned for a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ServerTrustPinKind {
+    PublicKeySha256,
+    CertificateSha256,
+    ServerIdentityKey,
+}
+
+/// Pinned trust material for a server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTrustPin {
+    pub kind: ServerTrustPinKind,
+    pub value: String,
+    pub pinned_at: DateTime<Utc>,
+}
+
+impl ServerTrustPin {
+    pub fn new(
+        kind: ServerTrustPinKind,
+        value: impl Into<String>,
+        pinned_at: DateTime<Utc>,
+    ) -> Result<Self, ServerAccountError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(ServerAccountError::InvalidTrustPin(
+                "trust pin value cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            kind,
+            value,
+            pinned_at,
+        })
+    }
+}
+
+/// Server identity material presented during verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerIdentityClaim {
+    pub server_id: ServerId,
+    pub endpoint: ServerEndpoint,
+    pub presented_pin: Option<ServerTrustPin>,
+    pub verified_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerIdentityVerificationDecision {
+    Trusted,
+    RequiresApproval(String),
+    Rejected(String),
+}
+
+pub trait ServerIdentityVerifier: Send + Sync {
+    fn verify(
+        &self,
+        server: &ServerRegistration,
+        claim: &ServerIdentityClaim,
+    ) -> ServerIdentityVerificationDecision;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticServerIdentityVerifier {
+    decision: ServerIdentityVerificationDecision,
+}
+
+impl StaticServerIdentityVerifier {
+    pub fn new(decision: ServerIdentityVerificationDecision) -> Self {
+        Self { decision }
+    }
+}
+
+impl ServerIdentityVerifier for StaticServerIdentityVerifier {
+    fn verify(
+        &self,
+        _server: &ServerRegistration,
+        _claim: &ServerIdentityClaim,
+    ) -> ServerIdentityVerificationDecision {
+        self.decision.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingApproval {
+    NotRequired,
+    Approved { approved_by: String, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerBindingDecision {
+    Allowed,
+    RequiresApproval(String),
+    Rejected(String),
+}
+
+pub fn evaluate_server_binding_trust(
+    server: &ServerRegistration,
+    approval: &BindingApproval,
+) -> ServerBindingDecision {
+    match server.trust_status {
+        ServerTrustStatus::Trusted => ServerBindingDecision::Allowed,
+        ServerTrustStatus::Unverified => match approval {
+            BindingApproval::NotRequired => ServerBindingDecision::RequiresApproval(format!(
+                "server {} is unverified and requires approval before binding",
+                server.id
+            )),
+            BindingApproval::Approved { .. } => ServerBindingDecision::Allowed,
+        },
+        ServerTrustStatus::Blocked => ServerBindingDecision::Rejected(format!(
+            "server {} is blocked and cannot be bound",
+            server.id
+        )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountBindingAuditOutcome {
+    Allowed,
+    RequiresApproval,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBindingAuditEvent {
+    pub id: String,
+    pub agentos_id: String,
+    pub server_id: ServerId,
+    pub trust_status: ServerTrustStatus,
+    pub approval: BindingApproval,
+    pub outcome: AccountBindingAuditOutcome,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AccountBindingAuditEvent {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: impl Into<String>,
+        agentos_id: impl Into<String>,
+        server_id: ServerId,
+        trust_status: ServerTrustStatus,
+        approval: BindingApproval,
+        outcome: AccountBindingAuditOutcome,
+        reason: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            agentos_id: agentos_id.into(),
+            server_id,
+            trust_status,
+            approval,
+            outcome,
+            reason: reason.into(),
+            created_at,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -188,6 +346,8 @@ pub enum ServerAccountError {
     AlreadyRegistered(String),
     #[error("connection policy violation: {0}")]
     PolicyViolation(String),
+    #[error("invalid trust pin: {0}")]
+    InvalidTrustPin(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -511,5 +671,136 @@ mod tests {
         store.unbind(&ServerAccountId::from("b-1")).await.unwrap();
         let result = store.get(&ServerAccountId::from("b-1")).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn trust_pin_roundtrips() {
+        let pin = ServerTrustPin::new(ServerTrustPinKind::PublicKeySha256, "sha256:abc123", ts())
+            .unwrap();
+
+        let json = serde_json::to_string(&pin).unwrap();
+        let decoded: ServerTrustPin = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, pin);
+    }
+
+    #[test]
+    fn trust_pin_rejects_empty_value() {
+        let result = ServerTrustPin::new(ServerTrustPinKind::CertificateSha256, " ", ts());
+
+        assert!(matches!(
+            result,
+            Err(ServerAccountError::InvalidTrustPin(_))
+        ));
+    }
+
+    #[test]
+    fn server_identity_claim_roundtrips() {
+        let claim = ServerIdentityClaim {
+            server_id: ServerId::from("s-1"),
+            endpoint: ServerEndpoint::from("https://s-1.example.com"),
+            presented_pin: Some(
+                ServerTrustPin::new(ServerTrustPinKind::ServerIdentityKey, "key-1", ts()).unwrap(),
+            ),
+            verified_at: ts(),
+        };
+
+        let json = serde_json::to_string(&claim).unwrap();
+        let decoded: ServerIdentityClaim = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, claim);
+    }
+
+    #[test]
+    fn trusted_server_binding_is_allowed_without_approval() {
+        let mut server = sample_server("s-1");
+        server.trust_status = ServerTrustStatus::Trusted;
+
+        let decision = evaluate_server_binding_trust(&server, &BindingApproval::NotRequired);
+
+        assert_eq!(decision, ServerBindingDecision::Allowed);
+    }
+
+    #[test]
+    fn unverified_server_binding_requires_approval() {
+        let server = sample_server("s-1");
+
+        let decision = evaluate_server_binding_trust(&server, &BindingApproval::NotRequired);
+
+        assert!(matches!(
+            decision,
+            ServerBindingDecision::RequiresApproval(_)
+        ));
+    }
+
+    #[test]
+    fn unverified_server_binding_with_approval_is_allowed() {
+        let server = sample_server("s-1");
+
+        let decision = evaluate_server_binding_trust(
+            &server,
+            &BindingApproval::Approved {
+                approved_by: "user".to_string(),
+                reason: "manual review".to_string(),
+            },
+        );
+
+        assert_eq!(decision, ServerBindingDecision::Allowed);
+    }
+
+    #[test]
+    fn blocked_server_binding_is_rejected_even_with_approval() {
+        let mut server = sample_server("s-1");
+        server.trust_status = ServerTrustStatus::Blocked;
+
+        let decision = evaluate_server_binding_trust(
+            &server,
+            &BindingApproval::Approved {
+                approved_by: "user".to_string(),
+                reason: "manual review".to_string(),
+            },
+        );
+
+        assert!(matches!(decision, ServerBindingDecision::Rejected(_)));
+    }
+
+    #[test]
+    fn binding_audit_event_roundtrips() {
+        let event = AccountBindingAuditEvent::new(
+            "audit-1",
+            "agent-1",
+            ServerId::from("s-1"),
+            ServerTrustStatus::Unverified,
+            BindingApproval::NotRequired,
+            AccountBindingAuditOutcome::RequiresApproval,
+            "server requires approval",
+            ts(),
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: AccountBindingAuditEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn static_server_identity_verifier_returns_configured_decision() {
+        let server = sample_server("s-1");
+        let claim = ServerIdentityClaim {
+            server_id: server.id.clone(),
+            endpoint: server.endpoint.clone(),
+            presented_pin: None,
+            verified_at: ts(),
+        };
+        let verifier = StaticServerIdentityVerifier::new(
+            ServerIdentityVerificationDecision::RequiresApproval("pin mismatch".to_string()),
+        );
+
+        let decision = verifier.verify(&server, &claim);
+
+        assert_eq!(
+            decision,
+            ServerIdentityVerificationDecision::RequiresApproval("pin mismatch".to_string())
+        );
     }
 }

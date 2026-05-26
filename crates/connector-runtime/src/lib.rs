@@ -8,11 +8,13 @@
 use chrono::Utc;
 use identity_core::{AgentOsId, DeviceId, FakeCryptoProvider, IdentityStore, PublicIdentity};
 use server_account_core::{
-    ConnectionPolicy, MemoryServerAccountStore, MemoryServerRegistry, ServerAccountBinding,
-    ServerAccountError, ServerAccountId, ServerAccountStore, ServerEndpoint, ServerId, ServerKind,
-    ServerRegistration, ServerRegistry, ServerTrustStatus,
+    AccountBindingAuditEvent, AccountBindingAuditOutcome, BindingApproval, ConnectionPolicy,
+    MemoryServerAccountStore, MemoryServerRegistry, ServerAccountBinding, ServerAccountError,
+    ServerAccountId, ServerAccountStore, ServerBindingDecision, ServerEndpoint, ServerId,
+    ServerKind, ServerRegistration, ServerRegistry, ServerTrustStatus,
+    evaluate_server_binding_trust,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // ConnectorRuntime
@@ -24,6 +26,7 @@ pub struct ConnectorRuntime {
     server_registry: Arc<dyn ServerRegistry>,
     account_store: Arc<dyn ServerAccountStore>,
     crypto: FakeCryptoProvider,
+    binding_audit_events: Arc<Mutex<Vec<AccountBindingAuditEvent>>>,
 }
 
 impl ConnectorRuntime {
@@ -37,6 +40,7 @@ impl ConnectorRuntime {
             server_registry,
             account_store,
             crypto: FakeCryptoProvider,
+            binding_audit_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -97,23 +101,91 @@ impl ConnectorRuntime {
         agentos_id: &str,
         server_id: &ServerId,
     ) -> Result<ServerAccountBinding, ConnectorError> {
-        // Verify server exists
-        self.server_registry
+        self.bind_account_with_approval(agentos_id, server_id, BindingApproval::NotRequired)
+            .await
+    }
+
+    /// Bind an AgentOS identity to a server with an explicit trust approval decision.
+    pub async fn bind_account_with_approval(
+        &self,
+        agentos_id: &str,
+        server_id: &ServerId,
+        approval: BindingApproval,
+    ) -> Result<ServerAccountBinding, ConnectorError> {
+        let server = self
+            .server_registry
             .get(server_id)
             .await
             .map_err(ConnectorError::ServerAccount)?;
 
-        let binding = ServerAccountBinding {
-            id: ServerAccountId(format!("binding-{}", uuid_simple())),
-            agentos_id: agentos_id.to_string(),
-            server_id: server_id.clone(),
-            bound_at: Utc::now(),
-        };
-        self.account_store
-            .bind(&binding)
-            .await
-            .map_err(ConnectorError::ServerAccount)?;
-        Ok(binding)
+        match evaluate_server_binding_trust(&server, &approval) {
+            ServerBindingDecision::Allowed => {
+                self.record_binding_audit_event(
+                    agentos_id,
+                    &server,
+                    approval,
+                    AccountBindingAuditOutcome::Allowed,
+                    "server binding allowed",
+                )?;
+                let binding = ServerAccountBinding {
+                    id: ServerAccountId(format!("binding-{}", uuid_simple())),
+                    agentos_id: agentos_id.to_string(),
+                    server_id: server_id.clone(),
+                    bound_at: Utc::now(),
+                };
+                self.account_store
+                    .bind(&binding)
+                    .await
+                    .map_err(ConnectorError::ServerAccount)?;
+                Ok(binding)
+            }
+            ServerBindingDecision::RequiresApproval(reason) => {
+                self.record_binding_audit_event(
+                    agentos_id,
+                    &server,
+                    approval,
+                    AccountBindingAuditOutcome::RequiresApproval,
+                    reason.clone(),
+                )?;
+                Err(ConnectorError::BindingRequiresApproval(reason))
+            }
+            ServerBindingDecision::Rejected(reason) => {
+                self.record_binding_audit_event(
+                    agentos_id,
+                    &server,
+                    approval,
+                    AccountBindingAuditOutcome::Rejected,
+                    reason.clone(),
+                )?;
+                Err(ConnectorError::BindingRejected(reason))
+            }
+        }
+    }
+
+    fn record_binding_audit_event(
+        &self,
+        agentos_id: &str,
+        server: &ServerRegistration,
+        approval: BindingApproval,
+        outcome: AccountBindingAuditOutcome,
+        reason: impl Into<String>,
+    ) -> Result<(), ConnectorError> {
+        let mut events = self
+            .binding_audit_events
+            .lock()
+            .map_err(|err| ConnectorError::Audit(err.to_string()))?;
+        let event = AccountBindingAuditEvent::new(
+            format!("binding-audit-{}", events.len() + 1),
+            agentos_id,
+            server.id.clone(),
+            server.trust_status,
+            approval,
+            outcome,
+            reason,
+            Utc::now(),
+        );
+        events.push(event);
+        Ok(())
     }
 
     /// Verify a server challenge using fake crypto.
@@ -156,6 +228,14 @@ impl ConnectorRuntime {
             .map_err(ConnectorError::ServerAccount)
     }
 
+    /// List in-memory account binding audit events in insertion order.
+    pub fn list_binding_audit_events(&self) -> Vec<AccountBindingAuditEvent> {
+        self.binding_audit_events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+
     /// Disconnect a server (unregister + unbind all).
     pub async fn disconnect_server(&self, server_id: &ServerId) -> Result<(), ConnectorError> {
         // Unbind all accounts for this server
@@ -189,6 +269,12 @@ pub enum ConnectorError {
     ServerAccount(#[from] ServerAccountError),
     #[error("identity error: {0}")]
     Identity(#[from] identity_core::IdentityError),
+    #[error("server binding requires approval: {0}")]
+    BindingRequiresApproval(String),
+    #[error("server binding rejected: {0}")]
+    BindingRejected(String),
+    #[error("binding audit error: {0}")]
+    Audit(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +329,17 @@ mod tests {
             .await
             .unwrap();
 
-        let binding = runtime.bind_account("agent-1", &server_id).await.unwrap();
+        let binding = runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &server_id,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(binding.agentos_id, "agent-1");
         assert_eq!(binding.server_id, server_id);
 
@@ -273,8 +369,28 @@ mod tests {
             .await
             .unwrap();
 
-        runtime.bind_account("agent-1", &s1).await.unwrap();
-        runtime.bind_account("agent-1", &s2).await.unwrap();
+        runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &s1,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &s2,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
+            .await
+            .unwrap();
 
         let bindings = runtime.list_bindings("agent-1").await.unwrap();
         assert_eq!(bindings.len(), 2);
@@ -336,7 +452,17 @@ mod tests {
             .await
             .unwrap();
 
-        runtime.bind_account("agent-1", &server_id).await.unwrap();
+        runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &server_id,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
+            .await
+            .unwrap();
         runtime.disconnect_server(&server_id).await.unwrap();
 
         let servers = runtime.list_servers().await.unwrap();
@@ -378,7 +504,14 @@ mod tests {
 
         // Bind identity to server
         let binding = runtime
-            .bind_account(&identity.agentos_id.0, &server_id)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &server_id,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
             .await
             .unwrap();
         assert_eq!(binding.agentos_id, identity.agentos_id.0);
@@ -432,15 +565,36 @@ mod tests {
 
         // Bind identity to all three
         runtime
-            .bind_account(&identity.agentos_id.0, &personal)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &personal,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
             .await
             .unwrap();
         runtime
-            .bind_account(&identity.agentos_id.0, &enterprise)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &enterprise,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
             .await
             .unwrap();
         runtime
-            .bind_account(&identity.agentos_id.0, &relay)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &relay,
+                BindingApproval::Approved {
+                    approved_by: "test".to_string(),
+                    reason: "legacy test approval".to_string(),
+                },
+            )
             .await
             .unwrap();
 
@@ -496,17 +650,235 @@ mod tests {
             .unwrap();
         assert!(!not_required);
 
-        // Bind to both servers
+        // Bind to both servers with explicit approval because newly registered servers are unverified.
         runtime
-            .bind_account(&identity.agentos_id.0, &enterprise_server)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &enterprise_server,
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "ownership notice acknowledged".to_string(),
+                },
+            )
             .await
             .unwrap();
         runtime
-            .bind_account(&identity.agentos_id.0, &personal_server)
+            .bind_account_with_approval(
+                &identity.agentos_id.0,
+                &personal_server,
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "personal server reviewed".to_string(),
+                },
+            )
             .await
             .unwrap();
 
         let bindings = runtime.list_bindings(&identity.agentos_id.0).await.unwrap();
         assert_eq!(bindings.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bind_account_rejects_unverified_server_without_approval() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+        let server_id = runtime
+            .register_server(
+                "https://unverified.example.com",
+                ServerKind::OpenSourceRelay,
+                ConnectionPolicy::AllowAll,
+                "Unverified",
+            )
+            .await
+            .unwrap();
+
+        let result = runtime.bind_account("agent-1", &server_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ConnectorError::BindingRequiresApproval(_))
+        ));
+        assert!(runtime.list_bindings("agent-1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bind_account_with_approval_allows_unverified_server() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+        let server_id = runtime
+            .register_server(
+                "https://unverified.example.com",
+                ServerKind::OpenSourceRelay,
+                ConnectionPolicy::AllowAll,
+                "Unverified",
+            )
+            .await
+            .unwrap();
+
+        let binding = runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &server_id,
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "manual review".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(binding.server_id, server_id);
+        assert_eq!(runtime.list_bindings("agent-1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bind_account_rejects_blocked_server_even_with_approval() {
+        let registry = Arc::new(MemoryServerRegistry::new());
+        let account_store = Arc::new(MemoryServerAccountStore::new());
+        let runtime = ConnectorRuntime::new(
+            Arc::new(identity_core::MemoryIdentityStore::new()),
+            registry.clone(),
+            account_store,
+        );
+        let mut server = ServerRegistration {
+            id: ServerId::from("blocked-server"),
+            endpoint: ServerEndpoint::from("https://blocked.example.com"),
+            kind: ServerKind::OpenSourceRelay,
+            connection_policy: ConnectionPolicy::AllowAll,
+            trust_status: ServerTrustStatus::Blocked,
+            display_name: "Blocked".to_string(),
+            registered_at: Utc::now(),
+        };
+        registry.register(&server).await.unwrap();
+        server.trust_status = ServerTrustStatus::Trusted;
+
+        let result = runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &ServerId::from("blocked-server"),
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "manual review".to_string(),
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(ConnectorError::BindingRejected(_))));
+        assert!(runtime.list_bindings("agent-1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bind_account_trusted_server_allows_without_approval() {
+        let registry = Arc::new(MemoryServerRegistry::new());
+        let runtime = ConnectorRuntime::new(
+            Arc::new(identity_core::MemoryIdentityStore::new()),
+            registry.clone(),
+            Arc::new(MemoryServerAccountStore::new()),
+        );
+        let server = ServerRegistration {
+            id: ServerId::from("trusted-server"),
+            endpoint: ServerEndpoint::from("https://trusted.example.com"),
+            kind: ServerKind::Official,
+            connection_policy: ConnectionPolicy::AllowAll,
+            trust_status: ServerTrustStatus::Trusted,
+            display_name: "Trusted".to_string(),
+            registered_at: Utc::now(),
+        };
+        registry.register(&server).await.unwrap();
+
+        let binding = runtime
+            .bind_account("agent-1", &ServerId::from("trusted-server"))
+            .await
+            .unwrap();
+
+        assert_eq!(binding.server_id, ServerId::from("trusted-server"));
+    }
+
+    #[tokio::test]
+    async fn binding_audit_records_requires_approval() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+        let server_id = runtime
+            .register_server(
+                "https://unverified.example.com",
+                ServerKind::OpenSourceRelay,
+                ConnectionPolicy::AllowAll,
+                "Unverified",
+            )
+            .await
+            .unwrap();
+
+        let _ = runtime.bind_account("agent-1", &server_id).await;
+        let events = runtime.list_binding_audit_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].outcome,
+            AccountBindingAuditOutcome::RequiresApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_audit_records_allowed_with_approval() {
+        let runtime = ConnectorRuntime::with_memory_stores();
+        let server_id = runtime
+            .register_server(
+                "https://unverified.example.com",
+                ServerKind::OpenSourceRelay,
+                ConnectionPolicy::AllowAll,
+                "Unverified",
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &server_id,
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "manual review".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let events = runtime.list_binding_audit_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, AccountBindingAuditOutcome::Allowed);
+    }
+
+    #[tokio::test]
+    async fn binding_audit_records_rejected_blocked_server() {
+        let registry = Arc::new(MemoryServerRegistry::new());
+        let runtime = ConnectorRuntime::new(
+            Arc::new(identity_core::MemoryIdentityStore::new()),
+            registry.clone(),
+            Arc::new(MemoryServerAccountStore::new()),
+        );
+        registry
+            .register(&ServerRegistration {
+                id: ServerId::from("blocked-server"),
+                endpoint: ServerEndpoint::from("https://blocked.example.com"),
+                kind: ServerKind::OpenSourceRelay,
+                connection_policy: ConnectionPolicy::AllowAll,
+                trust_status: ServerTrustStatus::Blocked,
+                display_name: "Blocked".to_string(),
+                registered_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let _ = runtime
+            .bind_account_with_approval(
+                "agent-1",
+                &ServerId::from("blocked-server"),
+                BindingApproval::Approved {
+                    approved_by: "user".to_string(),
+                    reason: "manual review".to_string(),
+                },
+            )
+            .await;
+        let events = runtime.list_binding_audit_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, AccountBindingAuditOutcome::Rejected);
     }
 }
