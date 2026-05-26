@@ -771,6 +771,196 @@ fn compute_tag(ciphertext: &[u8], key: &[u8]) -> Vec<u8> {
     hasher.finish().to_be_bytes().to_vec()
 }
 
+// ===========================================================================
+// Sync Transport Boundary
+// ===========================================================================
+
+/// Error type for transport operations.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("connection failed: {0}")]
+    ConnectionFailed(String),
+    #[error("send failed: {0}")]
+    SendFailed(String),
+    #[error("receive failed: {0}")]
+    ReceiveFailed(String),
+    #[error("discovery failed: {0}")]
+    DiscoveryFailed(String),
+    #[error("signaling failed: {0}")]
+    SignalingFailed(String),
+    #[error("timeout")]
+    Timeout,
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Transport message types.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TransportMessage {
+    /// Sync object transfer.
+    SyncObject(EncryptedPayload),
+    /// Manifest exchange.
+    Manifest(SyncManifest),
+    /// Discovery announcement.
+    DiscoveryAnnouncement {
+        device_id: DeviceId,
+        agent_os_id: String,
+        capabilities: Vec<String>,
+    },
+    /// Discovery response.
+    DiscoveryResponse {
+        device_id: DeviceId,
+        agent_os_id: String,
+        accepted: bool,
+    },
+    /// WebRTC signaling: offer.
+    SignalingOffer {
+        from_device: DeviceId,
+        to_device: DeviceId,
+        sdp: String,
+    },
+    /// WebRTC signaling: answer.
+    SignalingAnswer {
+        from_device: DeviceId,
+        to_device: DeviceId,
+        sdp: String,
+    },
+    /// WebRTC signaling: ICE candidate.
+    SignalingIceCandidate {
+        from_device: DeviceId,
+        to_device: DeviceId,
+        candidate: String,
+    },
+}
+
+/// Trait for sync transports.
+#[async_trait::async_trait]
+pub trait SyncTransport: Send + Sync {
+    /// Send a message to a specific device.
+    async fn send(&self, to: &DeviceId, message: TransportMessage) -> Result<(), TransportError>;
+
+    /// Receive a message (blocking).
+    async fn receive(&self) -> Result<(DeviceId, TransportMessage), TransportError>;
+
+    /// Check if connected to a device.
+    fn is_connected(&self, device_id: &DeviceId) -> bool;
+
+    /// Get list of connected devices.
+    fn connected_devices(&self) -> Vec<DeviceId>;
+
+    /// Disconnect from a device.
+    async fn disconnect(&self, device_id: &DeviceId) -> Result<(), TransportError>;
+}
+
+/// Trait for LAN discovery.
+#[async_trait::async_trait]
+pub trait LandDiscovery: Send + Sync {
+    /// Announce presence on the LAN.
+    async fn announce(&self) -> Result<(), TransportError>;
+
+    /// Listen for discovery announcements.
+    async fn listen(&self) -> Result<Vec<DiscoveryAnnouncement>, TransportError>;
+
+    /// Respond to a discovery announcement.
+    async fn respond(&self, to: &DeviceId, accepted: bool) -> Result<(), TransportError>;
+}
+
+/// A discovered device on the LAN.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryAnnouncement {
+    pub device_id: DeviceId,
+    pub agent_os_id: String,
+    pub capabilities: Vec<String>,
+    pub discovered_at: DateTime<Utc>,
+}
+
+/// Trait for WebRTC signaling.
+#[async_trait::async_trait]
+pub trait WebRtcSignaling: Send + Sync {
+    /// Send an SDP offer.
+    async fn send_offer(&self, to: &DeviceId, sdp: String) -> Result<(), TransportError>;
+
+    /// Send an SDP answer.
+    async fn send_answer(&self, to: &DeviceId, sdp: String) -> Result<(), TransportError>;
+
+    /// Send an ICE candidate.
+    async fn send_ice_candidate(
+        &self,
+        to: &DeviceId,
+        candidate: String,
+    ) -> Result<(), TransportError>;
+
+    /// Receive signaling messages.
+    async fn receive_signaling(&self) -> Result<TransportMessage, TransportError>;
+}
+
+/// Memory-based transport for testing.
+pub struct MemoryTransport {
+    inbox: std::sync::Arc<std::sync::Mutex<Vec<(DeviceId, TransportMessage)>>>,
+    connected: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<DeviceId>>>,
+}
+
+impl MemoryTransport {
+    pub fn new() -> Self {
+        Self {
+            inbox: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            connected: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Simulate receiving a message (for testing).
+    pub fn inject_message(&self, from: DeviceId, message: TransportMessage) {
+        self.inbox.lock().unwrap().push((from, message));
+    }
+
+    /// Simulate connecting to a device.
+    pub fn simulate_connect(&self, device_id: DeviceId) {
+        self.connected.lock().unwrap().insert(device_id);
+    }
+}
+
+impl Default for MemoryTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl SyncTransport for MemoryTransport {
+    async fn send(&self, to: &DeviceId, message: TransportMessage) -> Result<(), TransportError> {
+        if !self.is_connected(to) {
+            return Err(TransportError::ConnectionFailed(format!(
+                "not connected to {}",
+                to
+            )));
+        }
+        // In memory transport, we just add to inbox
+        self.inbox.lock().unwrap().push((to.clone(), message));
+        Ok(())
+    }
+
+    async fn receive(&self) -> Result<(DeviceId, TransportMessage), TransportError> {
+        let mut inbox = self.inbox.lock().unwrap();
+        if inbox.is_empty() {
+            return Err(TransportError::Timeout);
+        }
+        Ok(inbox.remove(0))
+    }
+
+    fn is_connected(&self, device_id: &DeviceId) -> bool {
+        self.connected.lock().unwrap().contains(device_id)
+    }
+
+    fn connected_devices(&self) -> Vec<DeviceId> {
+        self.connected.lock().unwrap().iter().cloned().collect()
+    }
+
+    async fn disconnect(&self, device_id: &DeviceId) -> Result<(), TransportError> {
+        self.connected.lock().unwrap().remove(device_id);
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1648,5 +1838,149 @@ mod tests {
         assert!(!encrypted.ciphertext.is_empty());
         assert!(!encrypted.tag.is_empty());
         assert!(!encrypted.content_hash.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 153: LAN/WebRTC transport boundary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_transport_new() {
+        let transport = MemoryTransport::new();
+        assert!(transport.connected_devices().is_empty());
+    }
+
+    #[test]
+    fn memory_transport_connect() {
+        let transport = MemoryTransport::new();
+        let device = DeviceId::from("device-1");
+
+        transport.simulate_connect(device.clone());
+        assert!(transport.is_connected(&device));
+        assert_eq!(transport.connected_devices().len(), 1);
+    }
+
+    #[test]
+    fn memory_transport_disconnect() {
+        let transport = MemoryTransport::new();
+        let device = DeviceId::from("device-1");
+
+        transport.simulate_connect(device.clone());
+        assert!(transport.is_connected(&device));
+
+        // Use block_on for async in sync test
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            transport.disconnect(&device).await.unwrap();
+        });
+
+        assert!(!transport.is_connected(&device));
+    }
+
+    #[tokio::test]
+    async fn memory_transport_send_receive() {
+        let transport = MemoryTransport::new();
+        let device = DeviceId::from("device-1");
+
+        transport.simulate_connect(device.clone());
+
+        let message = TransportMessage::DiscoveryAnnouncement {
+            device_id: DeviceId::from("device-2"),
+            agent_os_id: "agent-1".to_string(),
+            capabilities: vec!["sync".to_string()],
+        };
+
+        transport.send(&device, message.clone()).await.unwrap();
+        let (from, received) = transport.receive().await.unwrap();
+
+        assert_eq!(from, device);
+        assert_eq!(received, message);
+    }
+
+    #[tokio::test]
+    async fn memory_transport_send_fails_not_connected() {
+        let transport = MemoryTransport::new();
+        let device = DeviceId::from("device-1");
+
+        let message = TransportMessage::DiscoveryAnnouncement {
+            device_id: DeviceId::from("device-2"),
+            agent_os_id: "agent-1".to_string(),
+            capabilities: vec!["sync".to_string()],
+        };
+
+        let result = transport.send(&device, message).await;
+        assert!(matches!(result, Err(TransportError::ConnectionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn memory_transport_receive_timeout() {
+        let transport = MemoryTransport::new();
+
+        let result = transport.receive().await;
+        assert!(matches!(result, Err(TransportError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn memory_transport_inject_message() {
+        let transport = MemoryTransport::new();
+        let device = DeviceId::from("device-1");
+
+        let message = TransportMessage::DiscoveryResponse {
+            device_id: DeviceId::from("device-2"),
+            agent_os_id: "agent-1".to_string(),
+            accepted: true,
+        };
+
+        transport.inject_message(device.clone(), message.clone());
+        let (from, received) = transport.receive().await.unwrap();
+
+        assert_eq!(from, device);
+        assert_eq!(received, message);
+    }
+
+    #[test]
+    fn transport_message_variants() {
+        let discovery = TransportMessage::DiscoveryAnnouncement {
+            device_id: DeviceId::from("device-1"),
+            agent_os_id: "agent-1".to_string(),
+            capabilities: vec!["sync".to_string()],
+        };
+
+        let signaling_offer = TransportMessage::SignalingOffer {
+            from_device: DeviceId::from("device-1"),
+            to_device: DeviceId::from("device-2"),
+            sdp: "offer-sdp".to_string(),
+        };
+
+        let signaling_answer = TransportMessage::SignalingAnswer {
+            from_device: DeviceId::from("device-1"),
+            to_device: DeviceId::from("device-2"),
+            sdp: "answer-sdp".to_string(),
+        };
+
+        let ice_candidate = TransportMessage::SignalingIceCandidate {
+            from_device: DeviceId::from("device-1"),
+            to_device: DeviceId::from("device-2"),
+            candidate: "ice-candidate".to_string(),
+        };
+
+        // Verify they can be created and cloned
+        let _ = discovery.clone();
+        let _ = signaling_offer.clone();
+        let _ = signaling_answer.clone();
+        let _ = ice_candidate.clone();
+    }
+
+    #[test]
+    fn discovery_announcement_fields() {
+        let announcement = DiscoveryAnnouncement {
+            device_id: DeviceId::from("device-1"),
+            agent_os_id: "agent-1".to_string(),
+            capabilities: vec!["sync".to_string(), "calendar".to_string()],
+            discovered_at: Utc::now(),
+        };
+
+        assert_eq!(announcement.device_id.0, "device-1");
+        assert_eq!(announcement.agent_os_id, "agent-1");
+        assert_eq!(announcement.capabilities.len(), 2);
     }
 }
