@@ -1,5 +1,42 @@
 # Roadmap Progress
 
+## 2026-05-26 — M21 PR129: Frame / iframe support
+
+Status: implemented.
+
+### Scope
+
+- Added stable frame identity and frame-aware selector types:
+  - `BrowserFrameId`
+  - `BrowserFrameSelector`
+  - `ElementSelector::Frame(...)`
+- Added frame metadata to interactive snapshots via `BrowserFrameMetadata` and `InteractiveSnapshot::frames`.
+- Added `InteractiveElement::frame_id` so elements discovered inside same-origin iframes can be attributed to their source frame.
+- Upgraded interactive snapshot extraction to return both elements and frames.
+- Added raw mapping helpers for frame metadata and iframe elements.
+- Updated snapshot JavaScript to collect iframe/frame metadata and same-origin iframe interactive elements while safely ignoring cross-origin frame contents.
+
+### Acceptance coverage
+
+- Frame-aware selectors roundtrip through serde and validate nested selectors.
+- Invalid frame ids and invalid inner selectors are rejected.
+- Frame metadata roundtrips in snapshot payloads.
+- Raw iframe elements map to `ElementSelector::Frame(...)` with the correct `frame_id`.
+- Raw interactive snapshots map iframe elements and frame metadata together, allowing iframe-origin elements to be located by frame-aware selectors.
+
+### Verification commands
+
+```bash
+cargo test -p browser-kernel-core element_selector_frame
+cargo test -p browser-kernel-core frame_metadata
+cargo test -p browser-kernel-core raw_frame
+cargo test -p browser-kernel-core
+```
+
+### Next planned step
+
+M21 PR130: DOM snapshot artifact.
+
 ## 2026-05-26 — M21 PR128: Browser crash recovery
 
 Status: implemented.

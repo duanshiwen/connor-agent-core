@@ -1450,6 +1450,44 @@ pub enum BrowserKernelError {
 // Element selector
 // ---------------------------------------------------------------------------
 
+/// Stable browser frame/iframe identifier within an interactive snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BrowserFrameId(pub String);
+
+impl BrowserFrameId {
+    pub fn new(value: impl Into<String>) -> Result<Self, BrowserKernelError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            Err(BrowserKernelError::InvalidConfig(
+                "browser frame id cannot be empty".to_string(),
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+/// Selector scoped to a specific browser frame/iframe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserFrameSelector {
+    pub frame_id: BrowserFrameId,
+    pub selector: Box<ElementSelector>,
+}
+
+impl BrowserFrameSelector {
+    pub fn new(frame_id: BrowserFrameId, selector: ElementSelector) -> Self {
+        Self {
+            frame_id,
+            selector: Box::new(selector),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        BrowserFrameId::new(self.frame_id.0.clone())?;
+        self.selector.validate()
+    }
+}
+
 /// Selector for locating an element on an interactive page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
@@ -1457,6 +1495,7 @@ pub enum ElementSelector {
     Css(String),
     Text(String),
     XPath(String),
+    Frame(BrowserFrameSelector),
 }
 
 impl ElementSelector {
@@ -1472,15 +1511,20 @@ impl ElementSelector {
         Self::XPath(xpath.into())
     }
 
-    pub fn validate(&self) -> Result<(), BrowserKernelError> {
-        let value = match self {
-            Self::Css(value) | Self::Text(value) | Self::XPath(value) => value,
-        };
+    pub fn frame(frame_id: BrowserFrameId, selector: ElementSelector) -> Self {
+        Self::Frame(BrowserFrameSelector::new(frame_id, selector))
+    }
 
-        if value.trim().is_empty() {
-            Err(BrowserKernelError::EmptySelector)
-        } else {
-            Ok(())
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        match self {
+            Self::Css(value) | Self::Text(value) | Self::XPath(value) => {
+                if value.trim().is_empty() {
+                    Err(BrowserKernelError::EmptySelector)
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Frame(selector) => selector.validate(),
         }
     }
 }
@@ -1556,6 +1600,22 @@ pub struct ElementBoundingBox {
     pub height: f64,
 }
 
+/// Metadata for a frame/iframe discovered while capturing an interactive snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserFrameMetadata {
+    pub frame_id: BrowserFrameId,
+    #[serde(default)]
+    pub parent_frame_id: Option<BrowserFrameId>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub selector: Option<ElementSelector>,
+}
+
 /// A single interactive element detected on a rendered page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractiveElement {
@@ -1565,6 +1625,8 @@ pub struct InteractiveElement {
     pub text: Option<String>,
     pub aria_label: Option<String>,
     pub bounding_box: Option<ElementBoundingBox>,
+    #[serde(default)]
+    pub frame_id: Option<BrowserFrameId>,
 }
 
 /// A full interactive snapshot of a rendered page including element index.
@@ -1573,6 +1635,8 @@ pub struct InteractiveSnapshot {
     pub url: String,
     pub title: String,
     pub elements: Vec<InteractiveElement>,
+    #[serde(default)]
+    pub frames: Vec<BrowserFrameMetadata>,
     pub screenshot_artifact_id: Option<ArtifactId>,
     pub captured_at: DateTime<Utc>,
 }
@@ -2268,6 +2332,31 @@ struct RawInteractiveElement {
     text: Option<String>,
     aria_label: Option<String>,
     bounding_box: Option<ElementBoundingBox>,
+    #[serde(default)]
+    frame_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RawFrameMetadata {
+    frame_id: String,
+    #[serde(default)]
+    parent_frame_id: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RawInteractiveSnapshot {
+    #[serde(default)]
+    elements: Vec<RawInteractiveElement>,
+    #[serde(default)]
+    frames: Vec<RawFrameMetadata>,
 }
 
 /// Real CDP browser executor.
@@ -2413,13 +2502,14 @@ impl CdpBrowserExecutor {
 
         let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
         let title = page_title(&page).await.unwrap_or_default();
-        let elements = page_interactive_elements(&page)
+        let (elements, frames) = page_interactive_snapshot_parts(&page)
             .await
             .map_err(to_execution_failed)?;
         let snapshot = InteractiveSnapshot {
             url: current_url.clone(),
             title,
             elements,
+            frames,
             screenshot_artifact_id: None,
             captured_at: chrono::Utc::now(),
         };
@@ -3218,28 +3308,54 @@ const INTERACTIVE_ELEMENTS_JS: &str = r#"
     if (tag === 'input') return 'input';
     return 'other';
   };
-  const candidates = Array.from(document.querySelectorAll(
-    'a[href],button,input,select,textarea,[role="button"],[onclick],[tabindex]'
-  ));
-  return candidates
-    .filter(el => {
-      const rect = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-    })
+  const visible = (el, win) => {
+    const rect = el.getBoundingClientRect();
+    const style = win.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const elementRecord = (el, index, frameId, idPrefix, offsetX = 0, offsetY = 0) => {
+    const rect = el.getBoundingClientRect();
+    const text = (el.innerText || el.value || el.getAttribute('title') || '').trim();
+    return {
+      id: `${idPrefix}e${index + 1}`,
+      kind: kindFor(el),
+      selector: selectorFor(el),
+      text: text ? text.slice(0, 200) : null,
+      aria_label: el.getAttribute('aria-label'),
+      bounding_box: { x: rect.x + offsetX, y: rect.y + offsetY, width: rect.width, height: rect.height },
+      frame_id: frameId
+    };
+  };
+  const selector = 'a[href],button,input,select,textarea,[role="button"],[onclick],[tabindex]';
+  const elements = Array.from(document.querySelectorAll(selector))
+    .filter(el => visible(el, window))
     .slice(0, 200)
-    .map((el, index) => {
-      const rect = el.getBoundingClientRect();
-      const text = (el.innerText || el.value || el.getAttribute('title') || '').trim();
-      return {
-        id: `e${index + 1}`,
-        kind: kindFor(el),
-        selector: selectorFor(el),
-        text: text ? text.slice(0, 200) : null,
-        aria_label: el.getAttribute('aria-label'),
-        bounding_box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-      };
+    .map((el, index) => elementRecord(el, index, null, ''));
+  const frames = [];
+  Array.from(document.querySelectorAll('iframe,frame')).slice(0, 50).forEach((frameEl, frameIndex) => {
+    const frameId = `frame-${frameIndex + 1}`;
+    frames.push({
+      frame_id: frameId,
+      parent_frame_id: null,
+      url: frameEl.src || null,
+      name: frameEl.getAttribute('name'),
+      title: frameEl.getAttribute('title'),
+      selector: selectorFor(frameEl)
     });
+    try {
+      const doc = frameEl.contentDocument;
+      const win = frameEl.contentWindow;
+      if (!doc || !win) return;
+      const frameRect = frameEl.getBoundingClientRect();
+      Array.from(doc.querySelectorAll(selector))
+        .filter(el => visible(el, win))
+        .slice(0, 100)
+        .forEach((el, index) => elements.push(elementRecord(el, index, frameId, `${frameId}-`, frameRect.x, frameRect.y)));
+    } catch (_error) {
+      // Cross-origin frames still contribute metadata, but their elements cannot be inspected.
+    }
+  });
+  return { elements, frames };
 })()
 "#;
 
@@ -3277,27 +3393,69 @@ async fn page_string_array(
         .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))
 }
 
-async fn page_interactive_elements(
+async fn page_interactive_snapshot_parts(
     page: &chromiumoxide::Page,
-) -> Result<Vec<InteractiveElement>, BrowserKernelError> {
-    let raw: Vec<RawInteractiveElement> = page
+) -> Result<(Vec<InteractiveElement>, Vec<BrowserFrameMetadata>), BrowserKernelError> {
+    let raw: RawInteractiveSnapshot = page
         .evaluate(INTERACTIVE_ELEMENTS_JS)
         .await
         .map_err(to_browser_action_failed)?
         .into_value()
         .map_err(|e| BrowserKernelError::ActionFailed(e.to_string()))?;
 
-    Ok(raw
+    raw_interactive_snapshot_to_parts(raw)
+}
+
+fn raw_interactive_snapshot_to_parts(
+    raw: RawInteractiveSnapshot,
+) -> Result<(Vec<InteractiveElement>, Vec<BrowserFrameMetadata>), BrowserKernelError> {
+    let elements = raw
+        .elements
         .into_iter()
-        .map(|element| InteractiveElement {
-            id: element.id,
-            kind: interactive_kind_from_str(&element.kind),
-            selector: element.selector.map(ElementSelector::Css),
-            text: element.text,
-            aria_label: element.aria_label,
-            bounding_box: element.bounding_box,
-        })
-        .collect())
+        .map(raw_interactive_element_to_interactive_element)
+        .collect::<Result<Vec<_>, _>>()?;
+    let frames = raw
+        .frames
+        .into_iter()
+        .map(raw_frame_metadata_to_frame_metadata)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((elements, frames))
+}
+
+fn raw_interactive_element_to_interactive_element(
+    element: RawInteractiveElement,
+) -> Result<InteractiveElement, BrowserKernelError> {
+    let frame_id = element.frame_id.map(BrowserFrameId::new).transpose()?;
+    let selector = match (frame_id.clone(), element.selector) {
+        (Some(frame_id), Some(selector)) => Some(ElementSelector::frame(
+            frame_id,
+            ElementSelector::Css(selector),
+        )),
+        (None, Some(selector)) => Some(ElementSelector::Css(selector)),
+        (_, None) => None,
+    };
+    Ok(InteractiveElement {
+        id: element.id,
+        kind: interactive_kind_from_str(&element.kind),
+        selector,
+        text: element.text,
+        aria_label: element.aria_label,
+        bounding_box: element.bounding_box,
+        frame_id,
+    })
+}
+
+fn raw_frame_metadata_to_frame_metadata(
+    raw: RawFrameMetadata,
+) -> Result<BrowserFrameMetadata, BrowserKernelError> {
+    Ok(BrowserFrameMetadata {
+        frame_id: BrowserFrameId::new(raw.frame_id)?,
+        parent_frame_id: raw.parent_frame_id.map(BrowserFrameId::new).transpose()?,
+        url: raw.url,
+        name: raw.name,
+        title: raw.title,
+        selector: raw.selector.map(ElementSelector::Css),
+    })
 }
 
 fn interactive_kind_from_str(kind: &str) -> InteractiveElementKind {
@@ -4304,6 +4462,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn browser_frame_id_rejects_empty_values() {
+        assert!(matches!(
+            BrowserFrameId::new(" "),
+            Err(BrowserKernelError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn element_selector_frame_roundtrips_and_validates() {
+        let selector = ElementSelector::frame(
+            BrowserFrameId::new("frame-1").unwrap(),
+            ElementSelector::css("button.submit"),
+        );
+
+        let json = serde_json::to_string_pretty(&selector).unwrap();
+        let decoded: ElementSelector = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, selector);
+        assert!(selector.validate().is_ok());
+    }
+
+    #[test]
+    fn element_selector_frame_rejects_invalid_inner_selector() {
+        let selector = ElementSelector::frame(
+            BrowserFrameId::new("frame-1").unwrap(),
+            ElementSelector::css(" "),
+        );
+
+        assert!(matches!(
+            selector.validate(),
+            Err(BrowserKernelError::EmptySelector)
+        ));
+    }
+
     // ---- Form fill tests ----
 
     #[test]
@@ -4347,6 +4540,23 @@ mod tests {
     // ---- Snapshot tests ----
 
     #[test]
+    fn browser_frame_metadata_roundtrips() {
+        let metadata = BrowserFrameMetadata {
+            frame_id: BrowserFrameId::new("frame-1").unwrap(),
+            parent_frame_id: None,
+            url: Some("https://embed.example".to_string()),
+            name: Some("embed".to_string()),
+            title: Some("Embed".to_string()),
+            selector: Some(ElementSelector::css("iframe#embed")),
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+        let decoded: BrowserFrameMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, metadata);
+    }
+
+    #[test]
     fn interactive_element_roundtrips() {
         let element = InteractiveElement {
             id: "btn-1".to_string(),
@@ -4360,6 +4570,7 @@ mod tests {
                 width: 120.0,
                 height: 40.0,
             }),
+            frame_id: Some(BrowserFrameId::new("frame-1").unwrap()),
         };
 
         let json = serde_json::to_string_pretty(&element).unwrap();
@@ -4380,6 +4591,15 @@ mod tests {
                 text: Some("Click me".to_string()),
                 aria_label: None,
                 bounding_box: None,
+                frame_id: None,
+            }],
+            frames: vec![BrowserFrameMetadata {
+                frame_id: BrowserFrameId::new("frame-1").unwrap(),
+                parent_frame_id: None,
+                url: Some("https://embed.example".to_string()),
+                name: Some("embed".to_string()),
+                title: None,
+                selector: Some(ElementSelector::css("iframe#embed")),
             }],
             screenshot_artifact_id: Some(ArtifactId::from("art-1")),
             captured_at: ts(),
@@ -4953,16 +5173,10 @@ mod tests {
                 width: 100.0,
                 height: 32.0,
             }),
+            frame_id: None,
         };
 
-        let element = InteractiveElement {
-            id: raw.id,
-            kind: interactive_kind_from_str(&raw.kind),
-            selector: raw.selector.map(ElementSelector::Css),
-            text: raw.text,
-            aria_label: raw.aria_label,
-            bounding_box: raw.bounding_box,
-        };
+        let element = raw_interactive_element_to_interactive_element(raw).unwrap();
 
         assert_eq!(element.id, "e1");
         assert_eq!(element.kind, InteractiveElementKind::Button);
@@ -4973,6 +5187,88 @@ mod tests {
         assert_eq!(element.text, Some("Submit".to_string()));
         assert_eq!(element.aria_label, Some("Submit form".to_string()));
         assert_eq!(element.bounding_box.unwrap().width, 100.0);
+        assert_eq!(element.frame_id, None);
+    }
+
+    #[test]
+    fn raw_frame_metadata_maps_to_snapshot_frame_metadata() {
+        let raw = RawFrameMetadata {
+            frame_id: "frame-1".to_string(),
+            parent_frame_id: None,
+            url: Some("https://embed.example".to_string()),
+            name: Some("embed".to_string()),
+            title: Some("Embed".to_string()),
+            selector: Some("iframe#embed".to_string()),
+        };
+
+        let metadata = raw_frame_metadata_to_frame_metadata(raw).unwrap();
+
+        assert_eq!(metadata.frame_id, BrowserFrameId("frame-1".to_string()));
+        assert_eq!(metadata.url.as_deref(), Some("https://embed.example"));
+        assert_eq!(
+            metadata.selector,
+            Some(ElementSelector::css("iframe#embed"))
+        );
+    }
+
+    #[test]
+    fn raw_interactive_element_with_frame_maps_to_frame_selector() {
+        let raw = RawInteractiveElement {
+            id: "frame-1-e1".to_string(),
+            kind: "button".to_string(),
+            selector: Some("button.pay".to_string()),
+            text: Some("Pay".to_string()),
+            aria_label: None,
+            bounding_box: None,
+            frame_id: Some("frame-1".to_string()),
+        };
+
+        let element = raw_interactive_element_to_interactive_element(raw).unwrap();
+
+        assert_eq!(
+            element.frame_id,
+            Some(BrowserFrameId("frame-1".to_string()))
+        );
+        assert_eq!(
+            element.selector,
+            Some(ElementSelector::frame(
+                BrowserFrameId("frame-1".to_string()),
+                ElementSelector::css("button.pay"),
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_interactive_snapshot_maps_iframe_elements_and_frames() {
+        let raw = RawInteractiveSnapshot {
+            elements: vec![RawInteractiveElement {
+                id: "frame-1-e1".to_string(),
+                kind: "button".to_string(),
+                selector: Some("button.pay".to_string()),
+                text: Some("Pay".to_string()),
+                aria_label: None,
+                bounding_box: None,
+                frame_id: Some("frame-1".to_string()),
+            }],
+            frames: vec![RawFrameMetadata {
+                frame_id: "frame-1".to_string(),
+                parent_frame_id: None,
+                url: Some("https://checkout.example".to_string()),
+                name: Some("checkout".to_string()),
+                title: None,
+                selector: Some("iframe#checkout".to_string()),
+            }],
+        };
+
+        let (elements, frames) = raw_interactive_snapshot_to_parts(raw).unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].frame_id, Some(frames[0].frame_id.clone()));
+        assert!(matches!(
+            elements[0].selector,
+            Some(ElementSelector::Frame(_))
+        ));
     }
 
     // ---- BrowserProfileMode tests ----
