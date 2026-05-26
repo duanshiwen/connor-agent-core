@@ -1199,6 +1199,334 @@ impl QuestionLedger for MemoryQuestionLedger {
     }
 }
 
+/// Unique identifier for an answer cache package.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AnswerCachePackageId(pub String);
+
+impl fmt::Display for AnswerCachePackageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for AnswerCachePackageId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for AnswerCachePackageId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Positive, monotonically increasing package version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AnswerCachePackageVersion(u32);
+
+impl AnswerCachePackageVersion {
+    pub fn new(version: u32) -> Result<Self, AnswerCacheError> {
+        if version == 0 {
+            return Err(AnswerCacheError::InvalidVersion);
+        }
+        Ok(Self(version))
+    }
+
+    pub fn value(self) -> u32 {
+        self.0
+    }
+}
+
+/// Freshness policy for cached answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerFreshnessPolicy {
+    pub expires_after_days: Option<u32>,
+}
+
+impl AnswerFreshnessPolicy {
+    pub fn never_expires() -> Self {
+        Self {
+            expires_after_days: None,
+        }
+    }
+
+    pub fn expires_after_days(days: u32) -> Self {
+        Self {
+            expires_after_days: Some(days),
+        }
+    }
+}
+
+impl Default for AnswerFreshnessPolicy {
+    fn default() -> Self {
+        Self::never_expires()
+    }
+}
+
+/// Evidence reference captured inside an answer cache package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AnswerEvidenceRef {
+    KnowledgeEntry {
+        knowledge_entry_id: KnowledgeEntryId,
+        quote: Option<String>,
+    },
+    ConversationMessage {
+        conversation_id: String,
+        message_id: String,
+    },
+    Artifact {
+        artifact_id: ArtifactId,
+    },
+    Asset {
+        asset_id: AssetId,
+    },
+}
+
+impl AnswerEvidenceRef {
+    pub fn knowledge_entry(knowledge_entry_id: KnowledgeEntryId, quote: Option<String>) -> Self {
+        Self::KnowledgeEntry {
+            knowledge_entry_id,
+            quote,
+        }
+    }
+
+    pub fn conversation_message(
+        conversation_id: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self::ConversationMessage {
+            conversation_id: conversation_id.into(),
+            message_id: message_id.into(),
+        }
+    }
+}
+
+/// Versioned answer package linked to question ledger and evidence refs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerCachePackage {
+    pub id: AnswerCachePackageId,
+    pub question_id: Option<QuestionLedgerEntryId>,
+    pub answer_id: String,
+    pub version: AnswerCachePackageVersion,
+    pub answer_markdown: String,
+    pub evidence_refs: Vec<AnswerEvidenceRef>,
+    pub related_knowledge_entry_ids: Vec<KnowledgeEntryId>,
+    pub freshness_policy: AnswerFreshnessPolicy,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to create a new answer cache package version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerCacheCreateRequest {
+    pub question_id: Option<QuestionLedgerEntryId>,
+    pub answer_id: String,
+    pub answer_markdown: String,
+    pub evidence_refs: Vec<AnswerEvidenceRef>,
+    pub freshness_policy: AnswerFreshnessPolicy,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AnswerCacheCreateRequest {
+    pub fn new(
+        answer_id: impl Into<String>,
+        answer_markdown: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            question_id: None,
+            answer_id: answer_id.into(),
+            answer_markdown: answer_markdown.into(),
+            evidence_refs: vec![],
+            freshness_policy: AnswerFreshnessPolicy::default(),
+            created_at,
+        }
+    }
+
+    pub fn with_question_id(mut self, question_id: QuestionLedgerEntryId) -> Self {
+        self.question_id = Some(question_id);
+        self
+    }
+
+    pub fn with_evidence_refs(mut self, evidence_refs: Vec<AnswerEvidenceRef>) -> Self {
+        self.evidence_refs = evidence_refs;
+        self
+    }
+
+    pub fn with_freshness_policy(mut self, freshness_policy: AnswerFreshnessPolicy) -> Self {
+        self.freshness_policy = freshness_policy;
+        self
+    }
+
+    pub fn related_knowledge_entry_ids(&self) -> Vec<KnowledgeEntryId> {
+        let mut ids = Vec::new();
+        for evidence in &self.evidence_refs {
+            if let AnswerEvidenceRef::KnowledgeEntry {
+                knowledge_entry_id, ..
+            } = evidence
+                && !ids.iter().any(|existing| existing == knowledge_entry_id)
+            {
+                ids.push(knowledge_entry_id.clone());
+            }
+        }
+        ids
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AnswerCacheError {
+    #[error("answer cache lock poisoned")]
+    LockPoisoned,
+    #[error("answer cache package version must be greater than zero")]
+    InvalidVersion,
+    #[error("answer markdown cannot be blank")]
+    BlankAnswer,
+    #[error("answer cache package not found: {0}")]
+    NotFound(String),
+}
+
+#[async_trait]
+pub trait AnswerCacheStore: Send + Sync {
+    async fn create_package(
+        &self,
+        request: AnswerCacheCreateRequest,
+    ) -> Result<AnswerCachePackage, AnswerCacheError>;
+
+    async fn get_package(
+        &self,
+        id: &AnswerCachePackageId,
+    ) -> Result<Option<AnswerCachePackage>, AnswerCacheError>;
+
+    async fn latest_for_question(
+        &self,
+        question_id: &QuestionLedgerEntryId,
+    ) -> Result<Option<AnswerCachePackage>, AnswerCacheError>;
+
+    async fn list_by_knowledge_entry(
+        &self,
+        knowledge_entry_id: &KnowledgeEntryId,
+    ) -> Result<Vec<AnswerCachePackage>, AnswerCacheError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryAnswerCacheStore {
+    packages: Arc<Mutex<HashMap<AnswerCachePackageId, AnswerCachePackage>>>,
+}
+
+impl MemoryAnswerCacheStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn next_id(
+        packages: &HashMap<AnswerCachePackageId, AnswerCachePackage>,
+    ) -> AnswerCachePackageId {
+        AnswerCachePackageId::from(format!("answer-cache-{}", packages.len() + 1))
+    }
+
+    fn next_version_for_answer(
+        packages: &HashMap<AnswerCachePackageId, AnswerCachePackage>,
+        answer_id: &str,
+    ) -> Result<AnswerCachePackageVersion, AnswerCacheError> {
+        let next = packages
+            .values()
+            .filter(|package| package.answer_id == answer_id)
+            .map(|package| package.version.value())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        AnswerCachePackageVersion::new(next)
+    }
+}
+
+#[async_trait]
+impl AnswerCacheStore for MemoryAnswerCacheStore {
+    async fn create_package(
+        &self,
+        request: AnswerCacheCreateRequest,
+    ) -> Result<AnswerCachePackage, AnswerCacheError> {
+        if request.answer_markdown.trim().is_empty() {
+            return Err(AnswerCacheError::BlankAnswer);
+        }
+        let mut packages = self
+            .packages
+            .lock()
+            .map_err(|_| AnswerCacheError::LockPoisoned)?;
+        let related_knowledge_entry_ids = request.related_knowledge_entry_ids();
+        let package = AnswerCachePackage {
+            id: Self::next_id(&packages),
+            question_id: request.question_id,
+            answer_id: request.answer_id.clone(),
+            version: Self::next_version_for_answer(&packages, &request.answer_id)?,
+            answer_markdown: request.answer_markdown,
+            related_knowledge_entry_ids,
+            evidence_refs: request.evidence_refs,
+            freshness_policy: request.freshness_policy,
+            created_at: request.created_at,
+            updated_at: request.created_at,
+        };
+        packages.insert(package.id.clone(), package.clone());
+        Ok(package)
+    }
+
+    async fn get_package(
+        &self,
+        id: &AnswerCachePackageId,
+    ) -> Result<Option<AnswerCachePackage>, AnswerCacheError> {
+        let packages = self
+            .packages
+            .lock()
+            .map_err(|_| AnswerCacheError::LockPoisoned)?;
+        Ok(packages.get(id).cloned())
+    }
+
+    async fn latest_for_question(
+        &self,
+        question_id: &QuestionLedgerEntryId,
+    ) -> Result<Option<AnswerCachePackage>, AnswerCacheError> {
+        let packages = self
+            .packages
+            .lock()
+            .map_err(|_| AnswerCacheError::LockPoisoned)?;
+        let mut results = packages
+            .values()
+            .filter(|package| package.question_id.as_ref() == Some(question_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| {
+            b.version
+                .cmp(&a.version)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+        Ok(results.into_iter().next())
+    }
+
+    async fn list_by_knowledge_entry(
+        &self,
+        knowledge_entry_id: &KnowledgeEntryId,
+    ) -> Result<Vec<AnswerCachePackage>, AnswerCacheError> {
+        let packages = self
+            .packages
+            .lock()
+            .map_err(|_| AnswerCacheError::LockPoisoned)?;
+        let mut results = packages
+            .values()
+            .filter(|package| {
+                package
+                    .related_knowledge_entry_ids
+                    .iter()
+                    .any(|existing| existing == knowledge_entry_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(results)
+    }
+}
+
 /// Input for `knowledge.search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeSearchActionInput {
@@ -2092,6 +2420,130 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn answer_cache_package_roundtrips_with_version_evidence_and_freshness() {
+        let package = AnswerCachePackage {
+            id: AnswerCachePackageId::from("answer-cache-1"),
+            question_id: Some(QuestionLedgerEntryId::from("question-1")),
+            answer_id: "answer-1".to_string(),
+            version: AnswerCachePackageVersion::new(2).unwrap(),
+            answer_markdown: "# Answer\n\nUse durable storage.".to_string(),
+            evidence_refs: vec![AnswerEvidenceRef::knowledge_entry(
+                KnowledgeEntryId::from("knowledge-entry-1"),
+                Some("storage section".to_string()),
+            )],
+            related_knowledge_entry_ids: vec![KnowledgeEntryId::from("knowledge-entry-1")],
+            freshness_policy: AnswerFreshnessPolicy::expires_after_days(30),
+            created_at: ts(),
+            updated_at: ts(),
+        };
+
+        let json = serde_json::to_string_pretty(&package).unwrap();
+        let decoded: AnswerCachePackage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, package);
+    }
+
+    #[test]
+    fn answer_cache_package_version_rejects_zero() {
+        assert_eq!(
+            AnswerCachePackageVersion::new(0).unwrap_err(),
+            AnswerCacheError::InvalidVersion
+        );
+        assert_eq!(AnswerCachePackageVersion::new(1).unwrap().value(), 1);
+    }
+
+    #[test]
+    fn answer_cache_create_request_collects_related_knowledge_from_evidence() {
+        let request = AnswerCacheCreateRequest::new("answer-1", "Use durable storage.", ts())
+            .with_question_id(QuestionLedgerEntryId::from("question-1"))
+            .with_evidence_refs(vec![
+                AnswerEvidenceRef::knowledge_entry(
+                    KnowledgeEntryId::from("knowledge-entry-1"),
+                    None,
+                ),
+                AnswerEvidenceRef::conversation_message("conversation-1", "message-1"),
+            ])
+            .with_freshness_policy(AnswerFreshnessPolicy::expires_after_days(14));
+
+        assert_eq!(
+            request.question_id,
+            Some(QuestionLedgerEntryId::from("question-1"))
+        );
+        assert_eq!(request.evidence_refs.len(), 2);
+        assert_eq!(
+            request.related_knowledge_entry_ids(),
+            vec![KnowledgeEntryId::from("knowledge-entry-1")]
+        );
+        assert_eq!(request.freshness_policy.expires_after_days, Some(14));
+    }
+
+    #[tokio::test]
+    async fn memory_answer_cache_creates_versions_and_gets_latest_for_question() {
+        let store = MemoryAnswerCacheStore::new();
+        let first = store
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-1", "First answer", ts())
+                    .with_question_id(QuestionLedgerEntryId::from("question-1")),
+            )
+            .await
+            .unwrap();
+        let second = store
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-1", "Second answer", ts())
+                    .with_question_id(QuestionLedgerEntryId::from("question-1")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.version.value(), 1);
+        assert_eq!(second.version.value(), 2);
+        let latest = store
+            .latest_for_question(&QuestionLedgerEntryId::from("question-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second.id);
+        assert_eq!(latest.answer_markdown, "Second answer");
+    }
+
+    #[tokio::test]
+    async fn memory_answer_cache_gets_package_and_searches_by_knowledge_entry() {
+        let store = MemoryAnswerCacheStore::new();
+        let package = store
+            .create_package(
+                AnswerCacheCreateRequest::new("answer-1", "Evidence-backed answer", ts())
+                    .with_question_id(QuestionLedgerEntryId::from("question-1"))
+                    .with_evidence_refs(vec![AnswerEvidenceRef::knowledge_entry(
+                        KnowledgeEntryId::from("knowledge-entry-1"),
+                        Some("quote".to_string()),
+                    )]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.get_package(&package.id).await.unwrap(),
+            Some(package.clone())
+        );
+        let by_knowledge = store
+            .list_by_knowledge_entry(&KnowledgeEntryId::from("knowledge-entry-1"))
+            .await
+            .unwrap();
+        assert_eq!(by_knowledge, vec![package]);
+    }
+
+    #[tokio::test]
+    async fn memory_answer_cache_rejects_blank_answers() {
+        let store = MemoryAnswerCacheStore::new();
+        assert_eq!(
+            store
+                .create_package(AnswerCacheCreateRequest::new("answer-1", "   ", ts()))
+                .await
+                .unwrap_err(),
+            AnswerCacheError::BlankAnswer
+        );
     }
 
     #[test]
