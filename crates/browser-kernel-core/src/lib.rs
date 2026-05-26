@@ -810,6 +810,140 @@ impl Default for BrowserTimeouts {
     }
 }
 
+/// Browser navigation readiness target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum NavigationWaitUntil {
+    Load,
+    DomContentLoaded,
+    NetworkIdle,
+    Selector(ElementSelector),
+}
+
+impl Default for NavigationWaitUntil {
+    fn default() -> Self {
+        Self::Load
+    }
+}
+
+impl NavigationWaitUntil {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if let Self::Selector(selector) = self {
+            selector.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Concrete navigation wait strategy for one page transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigationWaitStrategy {
+    pub wait_until: NavigationWaitUntil,
+    pub timeout_ms: u64,
+    pub poll_interval_ms: u64,
+}
+
+impl Default for NavigationWaitStrategy {
+    fn default() -> Self {
+        Self {
+            wait_until: NavigationWaitUntil::Load,
+            timeout_ms: 30_000,
+            poll_interval_ms: 200,
+        }
+    }
+}
+
+impl NavigationWaitStrategy {
+    pub fn new(wait_until: NavigationWaitUntil, timeout_ms: u64) -> Self {
+        Self {
+            wait_until,
+            timeout_ms,
+            poll_interval_ms: 200,
+        }
+    }
+
+    pub fn with_poll_interval_ms(mut self, poll_interval_ms: u64) -> Self {
+        self.poll_interval_ms = poll_interval_ms;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.timeout_ms == 0 {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation wait timeout_ms must be greater than zero".to_string(),
+            ));
+        }
+        if self.poll_interval_ms == 0 {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation wait poll_interval_ms must be greater than zero".to_string(),
+            ));
+        }
+        if self.poll_interval_ms > self.timeout_ms {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation wait poll_interval_ms cannot exceed timeout_ms".to_string(),
+            ));
+        }
+        self.wait_until.validate()
+    }
+}
+
+/// Timeout policy used to derive effective navigation wait strategies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigationTimeoutPolicy {
+    pub default_timeout_ms: u64,
+    pub max_timeout_ms: u64,
+    pub poll_interval_ms: u64,
+}
+
+impl Default for NavigationTimeoutPolicy {
+    fn default() -> Self {
+        Self {
+            default_timeout_ms: 30_000,
+            max_timeout_ms: 120_000,
+            poll_interval_ms: 200,
+        }
+    }
+}
+
+impl NavigationTimeoutPolicy {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.default_timeout_ms == 0 || self.max_timeout_ms == 0 {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation timeout policy values must be greater than zero".to_string(),
+            ));
+        }
+        if self.default_timeout_ms > self.max_timeout_ms {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation default_timeout_ms cannot exceed max_timeout_ms".to_string(),
+            ));
+        }
+        if self.poll_interval_ms == 0 || self.poll_interval_ms > self.default_timeout_ms {
+            return Err(BrowserKernelError::InvalidConfig(
+                "navigation poll_interval_ms must be between 1 and default_timeout_ms".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn effective_strategy(
+        &self,
+        wait_until: NavigationWaitUntil,
+        requested_timeout_ms: Option<u64>,
+    ) -> Result<NavigationWaitStrategy, BrowserKernelError> {
+        self.validate()?;
+        let timeout_ms = requested_timeout_ms
+            .unwrap_or(self.default_timeout_ms)
+            .min(self.max_timeout_ms);
+        let strategy = NavigationWaitStrategy {
+            wait_until,
+            timeout_ms,
+            poll_interval_ms: self.poll_interval_ms.min(timeout_ms),
+        };
+        strategy.validate()?;
+        Ok(strategy)
+    }
+}
+
 /// How Chromium should be launched or connected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -825,6 +959,7 @@ pub struct CdpBrowserConfig {
     pub launch_mode: ChromiumLaunchMode,
     pub viewport: BrowserViewport,
     pub timeouts: BrowserTimeouts,
+    pub navigation_timeout_policy: NavigationTimeoutPolicy,
     pub profile: BrowserProfileMode,
     pub max_pages: usize,
 }
@@ -835,6 +970,7 @@ impl Default for CdpBrowserConfig {
             launch_mode: ChromiumLaunchMode::Headless,
             viewport: BrowserViewport::default(),
             timeouts: BrowserTimeouts::default(),
+            navigation_timeout_policy: NavigationTimeoutPolicy::default(),
             profile: BrowserProfileMode::default(),
             max_pages: 5,
         }
@@ -854,6 +990,11 @@ impl CdpBrowserConfig {
 
     pub fn with_profile(mut self, profile: BrowserProfileMode) -> Self {
         self.profile = profile;
+        self
+    }
+
+    pub fn with_navigation_timeout_policy(mut self, policy: NavigationTimeoutPolicy) -> Self {
+        self.navigation_timeout_policy = policy;
         self
     }
 
@@ -1300,6 +1441,17 @@ struct BrowserWaitForElementInput {
     selector: String,
     #[serde(default = "default_wait_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default)]
+    wait_until: NavigationWaitUntil,
+}
+
+impl BrowserWaitForElementInput {
+    fn navigation_wait_strategy(
+        &self,
+        policy: &NavigationTimeoutPolicy,
+    ) -> Result<NavigationWaitStrategy, BrowserKernelError> {
+        policy.effective_strategy(self.wait_until.clone(), Some(self.timeout_ms))
+    }
 }
 
 fn default_wait_timeout_ms() -> u64 {
@@ -1921,6 +2073,10 @@ impl CdpBrowserExecutor {
             return Err(to_invalid_input(BrowserKernelError::EmptySelector));
         }
 
+        let strategy = input
+            .navigation_wait_strategy(&self.lifecycle.config().navigation_timeout_policy)
+            .map_err(to_invalid_input)?;
+
         let page = browser
             .new_page("about:blank")
             .await
@@ -1931,8 +2087,8 @@ impl CdpBrowserExecutor {
 
         // Poll for element with timeout
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(input.timeout_ms);
-        let poll_interval = std::time::Duration::from_millis(200);
+        let timeout = std::time::Duration::from_millis(strategy.timeout_ms);
+        let poll_interval = std::time::Duration::from_millis(strategy.poll_interval_ms);
 
         loop {
             if page.find_element(&*selector).await.is_ok() {
@@ -1960,8 +2116,8 @@ impl CdpBrowserExecutor {
 
             if start.elapsed() >= timeout {
                 return Err(to_execution_failed(format!(
-                    "Timed out waiting for element '{}' after {}ms",
-                    selector, input.timeout_ms
+                    "Timed out waiting for element '{}' after {}ms using {:?}",
+                    selector, strategy.timeout_ms, strategy.wait_until
                 )));
             }
 
@@ -2661,6 +2817,88 @@ mod tests {
         let decoded: CdpBrowserConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, config);
+    }
+
+    // ---- Navigation wait strategy tests ----
+
+    #[test]
+    fn navigation_wait_strategy_supports_load_domcontentloaded_networkidle_and_selector() {
+        let strategies = vec![
+            NavigationWaitStrategy::new(NavigationWaitUntil::Load, 1_000),
+            NavigationWaitStrategy::new(NavigationWaitUntil::DomContentLoaded, 1_000),
+            NavigationWaitStrategy::new(NavigationWaitUntil::NetworkIdle, 1_000),
+            NavigationWaitStrategy::new(
+                NavigationWaitUntil::Selector(ElementSelector::css("#ready")),
+                1_000,
+            ),
+        ];
+
+        for strategy in strategies {
+            let json = serde_json::to_string_pretty(&strategy).unwrap();
+            let decoded: NavigationWaitStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, strategy);
+            assert!(decoded.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn navigation_wait_strategy_rejects_invalid_timeout_policy_values() {
+        assert!(
+            NavigationWaitStrategy::new(NavigationWaitUntil::Load, 0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            NavigationWaitStrategy::new(
+                NavigationWaitUntil::Selector(ElementSelector::css(" ")),
+                1_000,
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NavigationWaitStrategy::new(NavigationWaitUntil::NetworkIdle, 100)
+                .with_poll_interval_ms(200)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn navigation_timeout_policy_clamps_requested_timeout_and_preserves_wait_kind() {
+        let policy = NavigationTimeoutPolicy {
+            default_timeout_ms: 5_000,
+            max_timeout_ms: 30_000,
+            poll_interval_ms: 250,
+        };
+
+        let strategy = policy
+            .effective_strategy(NavigationWaitUntil::NetworkIdle, Some(60_000))
+            .unwrap();
+
+        assert_eq!(strategy.wait_until, NavigationWaitUntil::NetworkIdle);
+        assert_eq!(strategy.timeout_ms, 30_000);
+        assert_eq!(strategy.poll_interval_ms, 250);
+    }
+
+    #[test]
+    fn browser_wait_for_element_input_builds_selector_wait_strategy() {
+        let input: BrowserWaitForElementInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "selector": "#ready",
+            "timeout_ms": 2_000,
+            "wait_until": { "kind": "selector", "value": { "kind": "css", "value": "#ready" } }
+        }))
+        .unwrap();
+        let strategy = input
+            .navigation_wait_strategy(&NavigationTimeoutPolicy::default())
+            .unwrap();
+
+        assert_eq!(strategy.timeout_ms, 2_000);
+        assert_eq!(
+            strategy.wait_until,
+            NavigationWaitUntil::Selector(ElementSelector::css("#ready"))
+        );
     }
 
     // ---- Selector tests ----
