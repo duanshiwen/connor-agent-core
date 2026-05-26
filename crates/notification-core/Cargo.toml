@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 description = "Domain model for notifications — types, sinks, and storage."
 
+[features]
+default = []
+macos = []
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true

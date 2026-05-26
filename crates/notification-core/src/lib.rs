@@ -202,6 +202,122 @@ impl NotificationStore for MemoryNotificationStore {
     }
 }
 
+// ===========================================================================
+// macOS Notification Sink (Feature Gated)
+// ===========================================================================
+
+/// Configuration for macOS notifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacOsNotificationConfig {
+    pub app_name: String,
+    pub sound: Option<String>,
+}
+
+impl Default for MacOsNotificationConfig {
+    fn default() -> Self {
+        Self {
+            app_name: "AgentOS".to_string(),
+            sound: Some("default".to_string()),
+        }
+    }
+}
+
+/// Mock macOS notification sink for testing.
+/// Records all emitted notifications without actually sending to macOS.
+pub struct MacOsMockNotificationSink {
+    config: MacOsNotificationConfig,
+    emitted: Mutex<Vec<Notification>>,
+}
+
+impl MacOsMockNotificationSink {
+    pub fn new() -> Self {
+        Self {
+            config: MacOsNotificationConfig::default(),
+            emitted: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_config(config: MacOsNotificationConfig) -> Self {
+        Self {
+            config,
+            emitted: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Get all emitted notifications.
+    pub fn all(&self) -> Vec<Notification> {
+        self.emitted.lock().unwrap().clone()
+    }
+
+    /// Get the last emitted notification.
+    pub fn last(&self) -> Option<Notification> {
+        self.emitted.lock().unwrap().last().cloned()
+    }
+
+    /// Count of emitted notifications.
+    pub fn count(&self) -> usize {
+        self.emitted.lock().unwrap().len()
+    }
+
+    /// Clear all recorded notifications.
+    pub fn clear(&self) {
+        self.emitted.lock().unwrap().clear();
+    }
+
+    /// Get the configuration.
+    pub fn config(&self) -> &MacOsNotificationConfig {
+        &self.config
+    }
+}
+
+impl Default for MacOsMockNotificationSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl NotificationSink for MacOsMockNotificationSink {
+    async fn emit(&self, notification: &Notification) -> Result<(), NotificationError> {
+        self.emitted.lock().unwrap().push(notification.clone());
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// Real macOS Notification Sink (Feature Gated)
+// ===========================================================================
+
+/// Real macOS notification sink using native notifications.
+///
+/// This is a placeholder for the actual macOS notification implementation.
+/// When the `macos` feature is enabled, this will use the macOS notification API.
+#[cfg(feature = "macos")]
+pub struct MacOsNotificationSink {
+    config: MacOsNotificationConfig,
+}
+
+#[cfg(feature = "macos")]
+impl MacOsNotificationSink {
+    pub fn new(config: MacOsNotificationConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[cfg(feature = "macos")]
+#[async_trait]
+impl NotificationSink for MacOsNotificationSink {
+    async fn emit(&self, notification: &Notification) -> Result<(), NotificationError> {
+        // In a real implementation, this would use the macOS notification API
+        // For now, we just log the notification
+        println!(
+            "[{}] {}: {}",
+            self.config.app_name, notification.title, notification.body
+        );
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -324,5 +440,96 @@ mod tests {
             result.unwrap_err(),
             NotificationError::NotFound(_)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 150: macOS notification sink
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn macos_notification_sink_config_default() {
+        let config = MacOsNotificationConfig::default();
+        assert_eq!(config.app_name, "AgentOS");
+        assert!(config.sound.is_some());
+    }
+
+    #[test]
+    fn macos_notification_sink_config_custom() {
+        let config = MacOsNotificationConfig {
+            app_name: "MyApp".to_string(),
+            sound: Some("Ping".to_string()),
+        };
+        assert_eq!(config.app_name, "MyApp");
+        assert_eq!(config.sound.as_deref(), Some("Ping"));
+    }
+
+    #[tokio::test]
+    async fn macos_mock_sink_records_notifications() {
+        let sink = MacOsMockNotificationSink::new();
+        let notification = Notification {
+            id: NotificationId::from("n-1"),
+            title: "Test".to_string(),
+            body: "Body".to_string(),
+            notification_type: NotificationType::ReminderDue,
+            source_reminder_id: None,
+            created_at: Utc::now(),
+            read_at: None,
+        };
+
+        sink.emit(&notification).await.unwrap();
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.last().unwrap().id.0, "n-1");
+    }
+
+    #[tokio::test]
+    async fn macos_mock_sink_records_multiple() {
+        let sink = MacOsMockNotificationSink::new();
+
+        for i in 0..3 {
+            let notification = Notification {
+                id: NotificationId::from(format!("n-{}", i)),
+                title: format!("Title {}", i),
+                body: format!("Body {}", i),
+                notification_type: NotificationType::Info,
+                source_reminder_id: None,
+                created_at: Utc::now(),
+                read_at: None,
+            };
+            sink.emit(&notification).await.unwrap();
+        }
+
+        assert_eq!(sink.count(), 3);
+        let all = sink.all();
+        assert_eq!(all[0].id.0, "n-0");
+        assert_eq!(all[1].id.0, "n-1");
+        assert_eq!(all[2].id.0, "n-2");
+    }
+
+    #[tokio::test]
+    async fn macos_mock_sink_clear() {
+        let sink = MacOsMockNotificationSink::new();
+        let notification = Notification {
+            id: NotificationId::from("n-1"),
+            title: "Test".to_string(),
+            body: "Body".to_string(),
+            notification_type: NotificationType::ReminderDue,
+            source_reminder_id: None,
+            created_at: Utc::now(),
+            read_at: None,
+        };
+
+        sink.emit(&notification).await.unwrap();
+        assert_eq!(sink.count(), 1);
+
+        sink.clear();
+        assert_eq!(sink.count(), 0);
+    }
+
+    #[test]
+    fn macos_mock_sink_default_is_empty() {
+        let sink = MacOsMockNotificationSink::new();
+        assert_eq!(sink.count(), 0);
+        assert!(sink.last().is_none());
+        assert!(sink.all().is_empty());
     }
 }
