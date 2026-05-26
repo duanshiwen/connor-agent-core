@@ -4,6 +4,7 @@ pub mod artifact_store;
 pub mod backup;
 pub mod lock;
 pub mod migration;
+pub mod repair;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,11 @@ pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
     MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
     StorageMigration, StorageMigrationRegistry,
+};
+pub use repair::{
+    ArtifactReferenceReport, BrokenArtifactReference, ConversationProjectionRebuildFailure,
+    ProjectionRebuildReport, StorageRepair, StorageRepairIssue, StorageRepairReport,
+    StorageRepairSeverity,
 };
 
 pub const STORAGE_LAYOUT_VERSION: u32 = 1;

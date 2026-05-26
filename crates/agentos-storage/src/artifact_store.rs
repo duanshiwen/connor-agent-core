@@ -210,7 +210,7 @@ impl FsArtifactStore {
         Ok(descriptors)
     }
 
-    fn list_artifact_ids(&self) -> StorageResult<Vec<ArtifactId>> {
+    pub fn list_artifact_ids(&self) -> StorageResult<Vec<ArtifactId>> {
         let mut ids = Vec::new();
         if !self.root.exists() {
             return Ok(ids);

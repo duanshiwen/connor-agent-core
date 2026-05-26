@@ -8,6 +8,9 @@ description = "AgentOS durable storage layout, manifest, migration, and integrit
 
 [dependencies]
 artifact-core = { path = "../artifact-core" }
+conversation-core = { path = "../conversation-core" }
+conversation-journal = { path = "../conversation-journal" }
+conversation-kernel = { path = "../conversation-kernel" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
