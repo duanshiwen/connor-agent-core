@@ -19,7 +19,7 @@ use tokio::io::AsyncWriteExt;
 // ────────────────────────────────────────────────────────────────────────────
 
 /// A single audit record for an action lifecycle event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// Unique audit event ID.
     pub audit_id: String,
@@ -184,6 +184,159 @@ impl AuditIntegrityReport {
             issues,
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Audit Query
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditQuery {
+    pub action_id: Option<String>,
+    pub action_kind: Option<String>,
+    pub requested_by: Option<String>,
+    pub approved_by: Option<String>,
+    pub user: Option<String>,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub resource: Option<String>,
+    pub policy_decision: Option<String>,
+    pub result_status: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub pagination: AuditPagination,
+}
+
+impl Default for AuditQuery {
+    fn default() -> Self {
+        Self {
+            action_id: None,
+            action_kind: None,
+            requested_by: None,
+            approved_by: None,
+            user: None,
+            conversation_id: None,
+            message_id: None,
+            resource: None,
+            policy_decision: None,
+            result_status: None,
+            from: None,
+            to: None,
+            pagination: AuditPagination::default(),
+        }
+    }
+}
+
+impl AuditQuery {
+    pub fn matches(&self, event: &AuditEvent) -> bool {
+        option_matches(self.action_id.as_deref(), &event.action_id)
+            && option_matches(self.action_kind.as_deref(), &event.action_kind)
+            && option_matches(self.requested_by.as_deref(), &event.requested_by)
+            && option_matches_optional(self.approved_by.as_deref(), event.approved_by.as_deref())
+            && user_matches(self.user.as_deref(), event)
+            && option_matches_optional(
+                self.conversation_id.as_deref(),
+                event.conversation_id.as_deref(),
+            )
+            && option_matches_optional(self.message_id.as_deref(), event.message_id.as_deref())
+            && resource_matches(self.resource.as_deref(), event)
+            && option_matches(self.policy_decision.as_deref(), &event.policy_decision)
+            && option_matches(self.result_status.as_deref(), &event.result_status)
+            && self
+                .from
+                .map(|from| event.timestamp >= from)
+                .unwrap_or(true)
+            && self.to.map(|to| event.timestamp <= to).unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditPagination {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl Default for AuditPagination {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            limit: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditQueryResult {
+    pub events: Vec<AuditEvent>,
+    pub total_matched: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+}
+
+#[async_trait]
+pub trait AuditLogQueryExt: AuditLog {
+    async fn query(&self, query: AuditQuery) -> anyhow::Result<AuditQueryResult> {
+        let mut events: Vec<_> = self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|event| query.matches(event))
+            .collect();
+        events.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.audit_id.cmp(&right.audit_id))
+        });
+
+        let total_matched = events.len();
+        let offset = query.pagination.offset;
+        let limit = query.pagination.limit;
+        let paged_events = if limit == 0 {
+            Vec::new()
+        } else {
+            events.into_iter().skip(offset).take(limit).collect()
+        };
+        let has_more = offset.saturating_add(limit) < total_matched;
+
+        Ok(AuditQueryResult {
+            events: paged_events,
+            total_matched,
+            offset,
+            limit,
+            has_more,
+        })
+    }
+}
+
+impl<T: AuditLog + ?Sized> AuditLogQueryExt for T {}
+
+fn option_matches(expected: Option<&str>, actual: &str) -> bool {
+    expected.map(|expected| expected == actual).unwrap_or(true)
+}
+
+fn option_matches_optional(expected: Option<&str>, actual: Option<&str>) -> bool {
+    expected
+        .map(|expected| Some(expected) == actual)
+        .unwrap_or(true)
+}
+
+fn user_matches(user: Option<&str>, event: &AuditEvent) -> bool {
+    user.map(|user| event.requested_by == user || event.approved_by.as_deref() == Some(user))
+        .unwrap_or(true)
+}
+
+fn resource_matches(resource: Option<&str>, event: &AuditEvent) -> bool {
+    resource
+        .map(|resource| {
+            event.input_summary.contains(resource)
+                || event
+                    .result_summary
+                    .as_deref()
+                    .map(|summary| summary.contains(resource))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(true)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -439,6 +592,280 @@ mod tests {
             message_id: Some("msg-1".to_string()),
             timestamp: audit_ts(),
         }
+    }
+
+    fn query_event(
+        audit_id: &str,
+        action_id: &str,
+        requested_by: &str,
+        approved_by: Option<&str>,
+        timestamp: &str,
+    ) -> AuditEvent {
+        let mut event = sample_audit_event(action_id);
+        event.audit_id = audit_id.to_string();
+        event.requested_by = requested_by.to_string();
+        event.approved_by = approved_by.map(ToString::to_string);
+        event.timestamp = timestamp.parse().unwrap();
+        event
+    }
+
+    fn query_events() -> Vec<AuditEvent> {
+        vec![
+            query_event(
+                "audit-003",
+                "action-003",
+                "user-2",
+                Some("approver-1"),
+                "2026-05-26T08:03:00Z",
+            ),
+            query_event(
+                "audit-001",
+                "action-001",
+                "user-1",
+                None,
+                "2026-05-26T08:01:00Z",
+            ),
+            query_event(
+                "audit-002",
+                "action-002",
+                "user-1",
+                Some("approver-2"),
+                "2026-05-26T08:02:00Z",
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_action_id() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                action_id: Some("action-002".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.events[0].audit_id, "audit-002");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_requested_user() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                requested_by: Some("user-1".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 2);
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .map(|event| event.audit_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["audit-001", "audit-002"]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_user_across_requested_and_approved() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                user: Some("approver-1".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.events[0].action_id, "action-003");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_time_range() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                from: Some("2026-05-26T08:02:00Z".parse().unwrap()),
+                to: Some("2026-05-26T08:03:00Z".parse().unwrap()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 2);
+        assert_eq!(result.events[0].audit_id, "audit-002");
+        assert_eq!(result.events[1].audit_id, "audit-003");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_conversation_run() {
+        let sink = MemoryAuditSink::new();
+        let mut first = query_event(
+            "audit-001",
+            "action-001",
+            "user-1",
+            None,
+            "2026-05-26T08:01:00Z",
+        );
+        first.conversation_id = Some("run-1".to_string());
+        let mut second = query_event(
+            "audit-002",
+            "action-002",
+            "user-1",
+            None,
+            "2026-05-26T08:02:00Z",
+        );
+        second.conversation_id = Some("run-2".to_string());
+        sink.record(first).await.unwrap();
+        sink.record(second).await.unwrap();
+
+        let result = sink
+            .query(AuditQuery {
+                conversation_id: Some("run-2".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.events[0].conversation_id.as_deref(), Some("run-2"));
+    }
+
+    #[tokio::test]
+    async fn audit_query_filters_by_resource_text() {
+        let sink = MemoryAuditSink::new();
+        let mut first = query_event(
+            "audit-001",
+            "action-001",
+            "user-1",
+            None,
+            "2026-05-26T08:01:00Z",
+        );
+        first.input_summary = "resource: knowledge/kb-main".to_string();
+        let mut second = query_event(
+            "audit-002",
+            "action-002",
+            "user-1",
+            None,
+            "2026-05-26T08:02:00Z",
+        );
+        second.result_summary = Some("resource: mail/thread-2".to_string());
+        sink.record(first).await.unwrap();
+        sink.record(second).await.unwrap();
+
+        let result = sink
+            .query(AuditQuery {
+                resource: Some("mail/thread-2".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.events[0].audit_id, "audit-002");
+    }
+
+    #[tokio::test]
+    async fn audit_query_paginates_results_and_reports_has_more() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                pagination: AuditPagination {
+                    offset: 1,
+                    limit: 1,
+                },
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 3);
+        assert_eq!(result.offset, 1);
+        assert_eq!(result.limit, 1);
+        assert!(result.has_more);
+        assert_eq!(result.events[0].audit_id, "audit-002");
+    }
+
+    #[tokio::test]
+    async fn audit_query_sorts_by_timestamp_then_audit_id() {
+        let sink = MemoryAuditSink::new();
+        sink.record(query_event(
+            "audit-b",
+            "action-b",
+            "user-1",
+            None,
+            "2026-05-26T08:01:00Z",
+        ))
+        .await
+        .unwrap();
+        sink.record(query_event(
+            "audit-a",
+            "action-a",
+            "user-1",
+            None,
+            "2026-05-26T08:01:00Z",
+        ))
+        .await
+        .unwrap();
+
+        let result = sink.query(AuditQuery::default()).await.unwrap();
+
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .map(|event| event.audit_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["audit-a", "audit-b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_audit_sink_supports_query_ext() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("audit.jsonl");
+        let sink = JsonlAuditSink::new(&file_path);
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let result = sink
+            .query(AuditQuery {
+                requested_by: Some("user-2".to_string()),
+                ..AuditQuery::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_matched, 1);
+        assert_eq!(result.events[0].audit_id, "audit-003");
     }
 
     #[test]
