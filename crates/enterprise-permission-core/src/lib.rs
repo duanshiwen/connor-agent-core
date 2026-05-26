@@ -567,9 +567,8 @@ impl OrganizationalPermissionStore {
         for membership in &self.memberships {
             if membership.user_id == *user_id
                 && membership.membership_type == MembershipType::Organization
-            {
-                if let Some(org_id) = &membership.org_id {
-                    if membership.is_active(now) {
+                && let Some(org_id) = &membership.org_id
+                    && membership.is_active(now) {
                         for (grant_org_id, grant) in &self.org_grants {
                             if grant_org_id == org_id && grant.is_active(now) {
                                 result.push(InheritedGrant {
@@ -579,16 +578,13 @@ impl OrganizationalPermissionStore {
                             }
                         }
                     }
-                }
-            }
         }
 
         // Team grants
         for membership in &self.memberships {
             if membership.user_id == *user_id && membership.membership_type == MembershipType::Team
-            {
-                if let Some(team_id) = &membership.team_id {
-                    if membership.is_active(now) {
+                && let Some(team_id) = &membership.team_id
+                    && membership.is_active(now) {
                         for (grant_team_id, grant) in &self.team_grants {
                             if grant_team_id == team_id && grant.is_active(now) {
                                 result.push(InheritedGrant {
@@ -598,16 +594,13 @@ impl OrganizationalPermissionStore {
                             }
                         }
                     }
-                }
-            }
         }
 
         // Group grants
         for membership in &self.memberships {
             if membership.user_id == *user_id && membership.membership_type == MembershipType::Group
-            {
-                if let Some(group_id) = &membership.group_id {
-                    if membership.is_active(now) {
+                && let Some(group_id) = &membership.group_id
+                    && membership.is_active(now) {
                         for (grant_group_id, grant) in &self.group_grants {
                             if grant_group_id == group_id && grant.is_active(now) {
                                 result.push(InheritedGrant {
@@ -617,8 +610,6 @@ impl OrganizationalPermissionStore {
                             }
                         }
                     }
-                }
-            }
         }
 
         result
