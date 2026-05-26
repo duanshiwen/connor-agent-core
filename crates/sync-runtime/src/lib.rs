@@ -610,6 +610,167 @@ impl SyncObjectStore for MemorySyncObjectStore {
     }
 }
 
+// ===========================================================================
+// Encrypted Sync Transfer
+// ===========================================================================
+
+/// A shared session key for encrypting sync payloads.
+///
+/// In a real implementation, this would use proper cryptographic key derivation.
+/// For now, we use a simple key for demonstration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedSessionKey {
+    pub key_id: String,
+    pub key_bytes: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl SharedSessionKey {
+    /// Create a new shared session key.
+    pub fn new(key_id: String, key_bytes: Vec<u8>, ttl_seconds: i64) -> Self {
+        let now = Utc::now();
+        Self {
+            key_id,
+            key_bytes,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds),
+        }
+    }
+
+    /// Check if the key has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+
+    /// Get the key bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.key_bytes
+    }
+}
+
+/// An encrypted payload envelope for sync transfer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EncryptedPayload {
+    pub key_id: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub tag: Vec<u8>,
+    pub content_hash: String,
+    pub encrypted_at: DateTime<Utc>,
+}
+
+/// Error type for encryption operations.
+#[derive(Debug, thiserror::Error)]
+pub enum EncryptionError {
+    #[error("key expired")]
+    KeyExpired,
+    #[error("decryption failed: {0}")]
+    DecryptionFailed(String),
+    #[error("hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch { expected: String, actual: String },
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Encrypt a sync object using a shared session key.
+///
+/// In a real implementation, this would use AES-GCM or similar.
+/// For now, we use a simple XOR cipher for demonstration.
+pub fn encrypt_sync_object(
+    key: &SharedSessionKey,
+    object: &SyncObject,
+) -> Result<EncryptedPayload, EncryptionError> {
+    if key.is_expired() {
+        return Err(EncryptionError::KeyExpired);
+    }
+
+    let content_hash = compute_hash(&object.content);
+    let nonce = generate_nonce();
+
+    // Simple XOR encryption (for demonstration only)
+    let ciphertext: Vec<u8> = object
+        .content
+        .iter()
+        .zip(key.key_bytes.iter().cycle())
+        .map(|(c, k)| c ^ k)
+        .collect();
+
+    // Generate a simple tag (in real implementation, this would be a MAC)
+    let tag = compute_tag(&ciphertext, &key.key_bytes);
+
+    Ok(EncryptedPayload {
+        key_id: key.key_id.clone(),
+        nonce,
+        ciphertext,
+        tag,
+        content_hash,
+        encrypted_at: Utc::now(),
+    })
+}
+
+/// Decrypt an encrypted payload using a shared session key.
+///
+/// Returns the decrypted content if successful.
+pub fn decrypt_payload(
+    key: &SharedSessionKey,
+    payload: &EncryptedPayload,
+) -> Result<Vec<u8>, EncryptionError> {
+    if key.is_expired() {
+        return Err(EncryptionError::KeyExpired);
+    }
+
+    if key.key_id != payload.key_id {
+        return Err(EncryptionError::InvalidKey("key ID mismatch".to_string()));
+    }
+
+    // Verify tag
+    let expected_tag = compute_tag(&payload.ciphertext, &key.key_bytes);
+    if payload.tag != expected_tag {
+        return Err(EncryptionError::DecryptionFailed(
+            "tag mismatch".to_string(),
+        ));
+    }
+
+    // Simple XOR decryption
+    let plaintext: Vec<u8> = payload
+        .ciphertext
+        .iter()
+        .zip(key.key_bytes.iter().cycle())
+        .map(|(c, k)| c ^ k)
+        .collect();
+
+    // Verify content hash
+    let actual_hash = compute_hash(&plaintext);
+    if actual_hash != payload.content_hash {
+        return Err(EncryptionError::HashMismatch {
+            expected: payload.content_hash.clone(),
+            actual: actual_hash,
+        });
+    }
+
+    Ok(plaintext)
+}
+
+/// Generate a simple nonce (in real implementation, this would be random).
+fn generate_nonce() -> Vec<u8> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    duration.as_nanos().to_be_bytes().to_vec()
+}
+
+/// Compute a simple tag for integrity checking.
+fn compute_tag(ciphertext: &[u8], key: &[u8]) -> Vec<u8> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    ciphertext.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish().to_be_bytes().to_vec()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1292,5 +1453,200 @@ mod tests {
         let obj = store.get(&SyncObjectId::from("obj-1")).await.unwrap();
         assert_eq!(obj.content, b"updated");
         assert_eq!(obj.metadata.source_device.0, "device-2");
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 152: Encrypted sync transfer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shared_session_key_new() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        assert_eq!(key.key_id, "key-1");
+        assert_eq!(key.key_bytes.len(), 16);
+        assert!(!key.is_expired());
+    }
+
+    #[test]
+    fn shared_session_key_expired() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4],
+            -1, // Already expired
+        );
+
+        assert!(key.is_expired());
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let encrypted = encrypt_sync_object(&key, &obj).unwrap();
+        let decrypted = decrypt_payload(&key, &encrypted).unwrap();
+
+        assert_eq!(decrypted, b"hello world");
+    }
+
+    #[test]
+    fn encrypt_decrypt_different_content() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"different content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let encrypted = encrypt_sync_object(&key, &obj).unwrap();
+        let decrypted = decrypt_payload(&key, &encrypted).unwrap();
+
+        assert_eq!(decrypted, b"different content");
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_key() {
+        let key1 = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let key2 = SharedSessionKey::new(
+            "key-2".to_string(),
+            vec![16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let encrypted = encrypt_sync_object(&key1, &obj).unwrap();
+        let result = decrypt_payload(&key2, &encrypted);
+
+        assert!(matches!(result, Err(EncryptionError::InvalidKey(_))));
+    }
+
+    #[test]
+    fn decrypt_fails_with_tampered_ciphertext() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let mut encrypted = encrypt_sync_object(&key, &obj).unwrap();
+
+        // Tamper with ciphertext
+        if !encrypted.ciphertext.is_empty() {
+            encrypted.ciphertext[0] ^= 0xff;
+        }
+
+        let result = decrypt_payload(&key, &encrypted);
+        // Should fail with either HashMismatch or DecryptionFailed (tag mismatch)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypt_fails_with_expired_key() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4],
+            -1, // Already expired
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let result = encrypt_sync_object(&key, &obj);
+        assert!(matches!(result, Err(EncryptionError::KeyExpired)));
+    }
+
+    #[test]
+    fn decrypt_fails_with_expired_key() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let encrypted = encrypt_sync_object(&key, &obj).unwrap();
+
+        // Create an expired key with same ID
+        let expired_key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            -1,
+        );
+
+        let result = decrypt_payload(&expired_key, &encrypted);
+        assert!(matches!(result, Err(EncryptionError::KeyExpired)));
+    }
+
+    #[test]
+    fn encrypted_payload_fields() {
+        let key = SharedSessionKey::new(
+            "key-1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            3600,
+        );
+
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"hello world".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        let encrypted = encrypt_sync_object(&key, &obj).unwrap();
+
+        assert_eq!(encrypted.key_id, "key-1");
+        assert!(!encrypted.nonce.is_empty());
+        assert!(!encrypted.ciphertext.is_empty());
+        assert!(!encrypted.tag.is_empty());
+        assert!(!encrypted.content_hash.is_empty());
     }
 }
