@@ -156,6 +156,7 @@ pub struct AgentOsConfig {
     pub storage: StorageConfig,
     pub model: ModelConfig,
     pub policy: PolicyConfig,
+    pub identity: IdentityConfig,
     pub browser: BrowserConfig,
     pub connectors: BTreeMap<String, ConnectorConfig>,
 }
@@ -167,6 +168,7 @@ impl Default for AgentOsConfig {
             storage: StorageConfig::default(),
             model: ModelConfig::default(),
             policy: PolicyConfig::default(),
+            identity: IdentityConfig::default(),
             browser: BrowserConfig::default(),
             connectors: BTreeMap::new(),
         }
@@ -313,6 +315,30 @@ impl AgentOsConfig {
             ));
         }
 
+        if !matches!(self.identity.mode.as_str(), "development" | "production") {
+            diagnostics.push(ConfigDiagnostic::error(
+                ConfigDiagnosticCode::IdentityModeInvalid,
+                "identity.mode",
+                "identity.mode must be one of: development, production",
+            ));
+        }
+
+        if !matches!(self.identity.crypto_provider.as_str(), "fake" | "ed25519") {
+            diagnostics.push(ConfigDiagnostic::error(
+                ConfigDiagnosticCode::IdentityCryptoProviderInvalid,
+                "identity.crypto_provider",
+                "identity.crypto_provider must be one of: fake, ed25519",
+            ));
+        }
+
+        if self.identity.mode == "production" && self.identity.crypto_provider == "fake" {
+            diagnostics.push(ConfigDiagnostic::error(
+                ConfigDiagnosticCode::FakeCryptoForbiddenInProduction,
+                "identity.crypto_provider",
+                "fake crypto is forbidden when identity.mode is production",
+            ));
+        }
+
         ConfigValidationReport { diagnostics }
     }
 
@@ -323,6 +349,7 @@ impl AgentOsConfig {
             storage: self.storage.clone(),
             model: self.model.redacted(),
             policy: self.policy.clone(),
+            identity: self.identity.clone(),
             browser: self.browser.clone(),
             connectors: self
                 .connectors
@@ -421,6 +448,22 @@ impl Default for PolicyConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdentityConfig {
+    pub mode: String,
+    pub crypto_provider: String,
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            mode: "development".to_string(),
+            crypto_provider: "fake".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct BrowserConfig {
@@ -445,6 +488,7 @@ pub struct AgentOsProfile {
     pub storage: Option<StorageConfigPatch>,
     pub model: Option<ModelConfigPatch>,
     pub policy: Option<PolicyConfigPatch>,
+    pub identity: Option<IdentityConfigPatch>,
     pub browser: Option<BrowserConfigPatch>,
     pub connectors: BTreeMap<String, ConnectorConfigPatch>,
 }
@@ -462,6 +506,9 @@ impl AgentOsProfile {
         }
         if let Some(patch) = &self.policy {
             patch.apply_to(&mut config.policy);
+        }
+        if let Some(patch) = &self.identity {
+            patch.apply_to(&mut config.identity);
         }
         if let Some(patch) = &self.browser {
             patch.apply_to(&mut config.browser);
@@ -564,6 +611,24 @@ impl PolicyConfigPatch {
     fn apply_to(&self, config: &mut PolicyConfig) {
         if let Some(value) = &self.mode {
             config.mode = value.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct IdentityConfigPatch {
+    pub mode: Option<String>,
+    pub crypto_provider: Option<String>,
+}
+
+impl IdentityConfigPatch {
+    fn apply_to(&self, config: &mut IdentityConfig) {
+        if let Some(value) = &self.mode {
+            config.mode = value.clone();
+        }
+        if let Some(value) = &self.crypto_provider {
+            config.crypto_provider = value.clone();
         }
     }
 }
@@ -712,6 +777,9 @@ pub enum ConfigDiagnosticCode {
     ProviderModelEmpty,
     ProviderTimeoutInvalid,
     PolicyModeInvalid,
+    IdentityModeInvalid,
+    IdentityCryptoProviderInvalid,
+    FakeCryptoForbiddenInProduction,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -752,6 +820,7 @@ pub struct RedactedAgentOsConfig {
     pub storage: StorageConfig,
     pub model: RedactedModelConfig,
     pub policy: PolicyConfig,
+    pub identity: IdentityConfig,
     pub browser: BrowserConfig,
     pub connectors: BTreeMap<String, RedactedConnectorConfig>,
 }

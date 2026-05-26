@@ -374,3 +374,163 @@ root = ".agentos"
         other => panic!("expected unsupported version error, got {other:?}"),
     }
 }
+
+#[test]
+fn production_identity_rejects_fake_crypto() {
+    let mut config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
+    config.identity.mode = "production".to_string();
+    config.identity.crypto_provider = "fake".to_string();
+
+    let report = config.validate();
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+    );
+}
+
+#[test]
+fn enterprise_production_profile_rejects_fake_crypto() {
+    let document = AgentOsConfigDocument::from_toml_str(
+        r#"
+[kernel]
+profile = "enterprise"
+
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[profiles.enterprise.identity]
+mode = "production"
+crypto_provider = "fake"
+"#,
+    )
+    .unwrap();
+
+    let resolved = document.resolve_selected_profile().unwrap();
+    let report = resolved.validate();
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+    );
+}
+
+#[test]
+fn local_production_profile_rejects_fake_crypto() {
+    let document = AgentOsConfigDocument::from_toml_str(
+        r#"
+[kernel]
+profile = "local"
+
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[profiles.local.identity]
+mode = "production"
+crypto_provider = "fake"
+"#,
+    )
+    .unwrap();
+
+    let resolved = document.resolve_selected_profile().unwrap();
+    let report = resolved.validate();
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+    );
+}
+
+#[test]
+fn production_identity_allows_ed25519() {
+    let mut config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
+    config.identity.mode = "production".to_string();
+    config.identity.crypto_provider = "ed25519".to_string();
+
+    let report = config.validate();
+
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+    );
+}
+
+#[test]
+fn development_identity_allows_fake_crypto() {
+    let config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
+
+    let report = config.validate();
+
+    assert_eq!(config.identity.mode, "development");
+    assert_eq!(config.identity.crypto_provider, "fake");
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+    );
+}
+
+#[test]
+fn identity_profile_patch_merges_deterministically() {
+    let document = AgentOsConfigDocument::from_toml_str(
+        r#"
+[kernel]
+profile = "child"
+
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[profiles.parent.identity]
+mode = "production"
+
+[profiles.child]
+extends = "parent"
+
+[profiles.child.identity]
+crypto_provider = "ed25519"
+"#,
+    )
+    .unwrap();
+
+    let resolved = document.resolve_selected_profile().unwrap();
+
+    assert_eq!(resolved.identity.mode, "production");
+    assert_eq!(resolved.identity.crypto_provider, "ed25519");
+    assert!(resolved.validate().is_valid());
+}

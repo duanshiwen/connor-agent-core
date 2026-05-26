@@ -133,6 +133,62 @@ pub enum IdentityError {
 }
 
 // ---------------------------------------------------------------------------
+// Identity runtime policy
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityRuntimeMode {
+    Development,
+    Production,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityCryptoProviderKind {
+    Fake,
+    Ed25519,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRuntimePolicy {
+    pub mode: IdentityRuntimeMode,
+    pub crypto_provider: IdentityCryptoProviderKind,
+}
+
+impl Default for IdentityRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            mode: IdentityRuntimeMode::Development,
+            crypto_provider: IdentityCryptoProviderKind::Fake,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IdentityRuntimePolicyError {
+    #[error("fake crypto is forbidden in production identity mode")]
+    FakeCryptoForbiddenInProduction,
+}
+
+impl IdentityRuntimePolicy {
+    pub fn validate(&self) -> Result<(), IdentityRuntimePolicyError> {
+        if self.is_production() && self.uses_fake_crypto() {
+            return Err(IdentityRuntimePolicyError::FakeCryptoForbiddenInProduction);
+        }
+        Ok(())
+    }
+
+    pub fn is_production(&self) -> bool {
+        self.mode == IdentityRuntimeMode::Production
+    }
+
+    pub fn uses_fake_crypto(&self) -> bool {
+        self.crypto_provider == IdentityCryptoProviderKind::Fake
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Real crypto provider boundary
 // ---------------------------------------------------------------------------
 
@@ -1409,5 +1465,49 @@ mod tests {
         assert!(
             matches!(result, Err(IdentityError::InvalidEncoding(reason)) if reason.contains("hex"))
         );
+    }
+
+    #[test]
+    fn development_identity_allows_fake_crypto() {
+        let policy = IdentityRuntimePolicy {
+            mode: IdentityRuntimeMode::Development,
+            crypto_provider: IdentityCryptoProviderKind::Fake,
+        };
+
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn production_identity_rejects_fake_crypto() {
+        let policy = IdentityRuntimePolicy {
+            mode: IdentityRuntimeMode::Production,
+            crypto_provider: IdentityCryptoProviderKind::Fake,
+        };
+
+        assert!(matches!(
+            policy.validate(),
+            Err(IdentityRuntimePolicyError::FakeCryptoForbiddenInProduction)
+        ));
+    }
+
+    #[test]
+    fn production_identity_allows_ed25519() {
+        let policy = IdentityRuntimePolicy {
+            mode: IdentityRuntimeMode::Production,
+            crypto_provider: IdentityCryptoProviderKind::Ed25519,
+        };
+
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn identity_runtime_policy_helpers_report_state() {
+        let policy = IdentityRuntimePolicy {
+            mode: IdentityRuntimeMode::Production,
+            crypto_provider: IdentityCryptoProviderKind::Fake,
+        };
+
+        assert!(policy.is_production());
+        assert!(policy.uses_fake_crypto());
     }
 }
