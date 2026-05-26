@@ -287,29 +287,56 @@ pub trait KnowledgeIndex: Send + Sync {
     ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError>;
 }
 
-/// Deterministic in-memory full-text index for tests and fake backends.
-#[derive(Debug, Clone, Default)]
-pub struct MemoryFullTextKnowledgeIndex {
-    documents: HashMap<KnowledgeEntryId, KnowledgeIndexDocument>,
+/// Selected full-text backend implementation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeFullTextBackendKind {
+    /// Dependency-free deterministic backend used until Tantivy/SQLite FTS is selected.
+    DeterministicInProcess,
 }
 
-impl MemoryFullTextKnowledgeIndex {
+impl Default for KnowledgeFullTextBackendKind {
+    fn default() -> Self {
+        Self::DeterministicInProcess
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FullTextTermWeights {
+    title: u32,
+    body: u32,
+    tags: u32,
+    frontmatter: u32,
+}
+
+impl Default for FullTextTermWeights {
+    fn default() -> Self {
+        Self {
+            title: 4,
+            body: 2,
+            tags: 3,
+            frontmatter: 1,
+        }
+    }
+}
+
+/// First full-text backend: deterministic, dependency-free, in-process search.
+#[derive(Debug, Clone, Default)]
+pub struct DeterministicFullTextKnowledgeBackend {
+    documents: HashMap<KnowledgeEntryId, KnowledgeIndexDocument>,
+    weights: FullTextTermWeights,
+}
+
+impl DeterministicFullTextKnowledgeBackend {
     pub fn new() -> Self {
         Self::default()
     }
 
     fn matches(document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> bool {
-        let text = query.text.trim().to_ascii_lowercase();
-        let haystack = format!(
-            "{}\n{}\n{}\n{}",
-            document.entry.title,
-            document.body_markdown,
-            document.tags.join(" "),
-            document.frontmatter
-        )
-        .to_ascii_lowercase();
+        let terms = query_terms(&query.text);
+        let searchable = indexed_text(document);
         let matches_text =
-            text.is_empty() || text.split_whitespace().all(|term| haystack.contains(term));
+            terms.is_empty() || terms.iter().all(|term| searchable.contains(term.as_str()));
         let matches_tags = query
             .tags
             .iter()
@@ -325,17 +352,21 @@ impl MemoryFullTextKnowledgeIndex {
         matches_text && matches_tags && matches_frontmatter
     }
 
-    fn score(document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> f32 {
-        let text = query.text.trim().to_ascii_lowercase();
-        if text.is_empty() {
+    fn score(&self, document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> f32 {
+        let terms = query_terms(&query.text);
+        if terms.is_empty() {
             return 0.0;
         }
         let title = document.entry.title.to_ascii_lowercase();
         let body = document.body_markdown.to_ascii_lowercase();
-        text.split_whitespace().fold(0.0, |score, term| {
+        let tags = document.tags.join(" ").to_ascii_lowercase();
+        let frontmatter = document.frontmatter.to_string().to_ascii_lowercase();
+        terms.into_iter().fold(0.0, |score, term| {
             score
-                + if title.contains(term) { 2.0 } else { 0.0 }
-                + if body.contains(term) { 1.0 } else { 0.0 }
+                + weighted_contains(&title, &term, self.weights.title)
+                + weighted_contains(&body, &term, self.weights.body)
+                + weighted_contains(&tags, &term, self.weights.tags)
+                + weighted_contains(&frontmatter, &term, self.weights.frontmatter)
         })
     }
 
@@ -344,8 +375,36 @@ impl MemoryFullTextKnowledgeIndex {
     }
 }
 
+fn query_terms(text: &str) -> Vec<String> {
+    text.to_ascii_lowercase()
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn indexed_text(document: &KnowledgeIndexDocument) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        document.entry.title,
+        document.body_markdown,
+        document.tags.join(" "),
+        document.frontmatter
+    )
+    .to_ascii_lowercase()
+}
+
+fn weighted_contains(text: &str, term: &str, weight: u32) -> f32 {
+    if text.contains(term) {
+        weight as f32
+    } else {
+        0.0
+    }
+}
+
 #[async_trait]
-impl KnowledgeIndex for MemoryFullTextKnowledgeIndex {
+impl KnowledgeIndex for DeterministicFullTextKnowledgeBackend {
     async fn upsert(
         &mut self,
         document: KnowledgeIndexDocument,
@@ -374,7 +433,7 @@ impl KnowledgeIndex for MemoryFullTextKnowledgeIndex {
             .filter(|document| Self::matches(document, query))
             .map(|document| KnowledgeSearchResult {
                 entry: document.entry.clone(),
-                score: Self::score(document, query),
+                score: self.score(document, query),
                 snippet: Self::snippet(document),
             })
             .collect::<Vec<_>>();
@@ -405,6 +464,9 @@ impl KnowledgeIndex for MemoryFullTextKnowledgeIndex {
         })
     }
 }
+
+/// Deterministic in-memory full-text index alias kept for the PR134 fake-index boundary.
+pub type MemoryFullTextKnowledgeIndex = DeterministicFullTextKnowledgeBackend;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KnowledgeValidationError {
@@ -981,6 +1043,154 @@ mod tests {
             policy
                 .evaluate_with_registry(&request, &registry)
                 .is_denied()
+        );
+    }
+
+    #[test]
+    fn knowledge_fulltext_backend_kind_defaults_to_deterministic_in_process() {
+        assert_eq!(
+            KnowledgeFullTextBackendKind::default(),
+            KnowledgeFullTextBackendKind::DeterministicInProcess
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_fulltext_backend_ranks_title_matches_above_body_matches() {
+        let mut backend = DeterministicFullTextKnowledgeBackend::new();
+        backend
+            .rebuild(KnowledgeIndexRebuildRequest {
+                documents: vec![
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-1"),
+                            title: "Architecture Notes".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "agent memory architecture details".to_string(),
+                    ),
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-2"),
+                            title: "Memory Architecture".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "short note".to_string(),
+                    ),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = backend
+            .query(&KnowledgeFullTextQuery::new("memory"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-2")
+        );
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[tokio::test]
+    async fn deterministic_fulltext_backend_indexes_title_body_tags_and_frontmatter() {
+        let mut backend = DeterministicFullTextKnowledgeBackend::new();
+        backend
+            .rebuild(KnowledgeIndexRebuildRequest {
+                documents: vec![
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-1"),
+                            title: "AgentOS Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "long-term governance".to_string(),
+                    )
+                    .with_tags(vec!["knowledge".to_string()])
+                    .with_frontmatter(serde_json::json!({ "domain": "memory" })),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        for query in ["agentos", "governance", "knowledge", "memory"] {
+            let results = backend
+                .query(&KnowledgeFullTextQuery::new(query))
+                .await
+                .unwrap();
+            assert_eq!(
+                results.len(),
+                1,
+                "query should match indexed field: {query}"
+            );
+            assert_eq!(
+                results[0].entry.id,
+                KnowledgeEntryId::from("knowledge-entry-1")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deterministic_fulltext_backend_breaks_score_ties_by_entry_id() {
+        let mut backend = DeterministicFullTextKnowledgeBackend::new();
+        backend
+            .rebuild(KnowledgeIndexRebuildRequest {
+                documents: vec![
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-b"),
+                            title: "Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "body".to_string(),
+                    ),
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-a"),
+                            title: "Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "body".to_string(),
+                    ),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = backend
+            .query(&KnowledgeFullTextQuery::new("memory"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| &result.entry.id)
+                .collect::<Vec<_>>(),
+            vec![
+                &KnowledgeEntryId::from("knowledge-entry-a"),
+                &KnowledgeEntryId::from("knowledge-entry-b")
+            ]
         );
     }
 

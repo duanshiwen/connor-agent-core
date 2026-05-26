@@ -1,5 +1,43 @@
 # Roadmap Progress
 
+## 2026-05-26 — M22 PR135: Full-text search backend
+
+Status: implemented.
+
+### Scope
+
+- Chose and implemented the first full-text backend as a dependency-free deterministic in-process backend:
+  - `KnowledgeFullTextBackendKind::DeterministicInProcess`
+  - `DeterministicFullTextKnowledgeBackend`
+- Indexed title/body/tags/frontmatter through one backend implementation shared with the PR134 fake index boundary.
+- Added weighted deterministic ranking:
+  - title matches outrank body matches
+  - tag matches contribute to score
+  - frontmatter matches contribute to score
+  - score ties break by stable entry id
+- Kept Tantivy/SQLite FTS out of this PR to avoid introducing a storage dependency before the broader runtime/storage choice is made; the backend kind documents the current first implementation choice.
+
+### Acceptance coverage
+
+- Backend kind defaults to deterministic in-process full-text backend.
+- Title matches rank above body-only matches for the same query term.
+- Backend indexes title, body, tags, and frontmatter text.
+- Ranking is deterministic when scores tie by sorting by entry id.
+- Existing memory/full-text fake index tests continue to pass through the shared backend implementation.
+
+### Verification commands
+
+```bash
+cargo test -p knowledge-entity deterministic_fulltext_backend
+cargo test -p knowledge-entity memory_fulltext_index
+cargo test -p knowledge-entity knowledge_fulltext_backend_kind
+cargo test -p knowledge-entity
+```
+
+### Next planned step
+
+M22 PR136: Embedding / semantic search boundary.
+
 ## 2026-05-26 — M22 PR134: Knowledge index abstraction
 
 Status: implemented.
