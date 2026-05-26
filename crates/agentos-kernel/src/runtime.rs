@@ -121,6 +121,7 @@ impl KernelRuntime {
             runtime_config,
             self.health_check(),
             self.services.audit_log.as_ref(),
+            self.services.storage.as_deref(),
         )
         .await
     }

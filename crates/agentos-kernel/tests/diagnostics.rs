@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use action_core::ActionRegistry;
 use agentos_kernel::{KernelRuntime, KernelRuntimeBuilder, KernelRuntimeState};
+use agentos_storage::{AgentOsStorage, STORAGE_LAYOUT_VERSION};
 use audit_log::{AuditEvent, AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
 use chrono::Utc;
@@ -10,18 +11,26 @@ use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use model_adapter::{FakeModelAdapter, ModelAdapter};
 
 fn runtime() -> KernelRuntime {
+    runtime_with_storage(None)
+}
+
+fn runtime_with_storage(storage: Option<Arc<AgentOsStorage>>) -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
     let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
-    KernelRuntimeBuilder::new()
+    let mut builder = KernelRuntimeBuilder::new()
         .conversation_journal(journal)
         .model_adapter(model_adapter)
         .action_registry(Arc::new(ActionRegistry::new()))
         .capability_policy(Arc::new(CapabilityPolicy::default_safe()))
-        .audit_log(audit_log)
-        .build()
-        .unwrap()
+        .audit_log(audit_log);
+
+    if let Some(storage) = storage {
+        builder = builder.storage(storage);
+    }
+
+    builder.build().unwrap()
 }
 
 fn audit_event(action_id: &str) -> AuditEvent {
@@ -92,6 +101,23 @@ async fn diagnostics_bundle_includes_storage_manifest_placeholder_and_audit_summ
     assert_eq!(
         bundle.recent_audit_summary.recent_events[0].policy_decision,
         "allow"
+    );
+}
+
+#[tokio::test]
+async fn diagnostics_bundle_reports_configured_storage_manifest() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(AgentOsStorage::init(temp_dir.path()).unwrap());
+    let expected_root = storage.root().display().to_string();
+    let runtime = runtime_with_storage(Some(storage));
+
+    let bundle = runtime.diagnostics_bundle(BTreeMap::new()).await.unwrap();
+
+    assert_eq!(bundle.storage_manifest.status, "configured");
+    assert_eq!(bundle.storage_manifest.storage_root, Some(expected_root));
+    assert_eq!(
+        bundle.storage_manifest.manifest_version,
+        Some(STORAGE_LAYOUT_VERSION)
     );
 }
 

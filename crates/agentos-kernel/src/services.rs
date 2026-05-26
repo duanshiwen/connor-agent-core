@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use action_core::ActionRegistry;
+use agentos_storage::AgentOsStorage;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
 use conversation_kernel::ConversationKernel;
@@ -15,4 +16,5 @@ pub struct KernelServices {
     pub capability_policy: Arc<CapabilityPolicy>,
     pub audit_log: Arc<dyn AuditLog>,
     pub permission_store: Option<Arc<Mutex<PermissionStore>>>,
+    pub storage: Option<Arc<AgentOsStorage>>,
 }

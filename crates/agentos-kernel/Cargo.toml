@@ -8,6 +8,7 @@ description = "AgentOS kernel composition root and runtime container."
 
 [dependencies]
 action-core = { path = "../action-core" }
+agentos-storage = { path = "../agentos-storage" }
 audit-log = { path = "../audit-log" }
 capability-policy = { path = "../capability-policy" }
 conversation-journal = { path = "../conversation-journal" }
@@ -22,3 +23,6 @@ serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

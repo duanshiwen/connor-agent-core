@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use action_core::ActionRegistry;
+use agentos_storage::AgentOsStorage;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
 use conversation_journal::ConversationJournal;
@@ -18,6 +19,7 @@ pub struct KernelRuntimeBuilder {
     capability_policy: Option<Arc<CapabilityPolicy>>,
     audit_log: Option<Arc<dyn AuditLog>>,
     permission_store: Option<Arc<Mutex<PermissionStore>>>,
+    storage: Option<Arc<AgentOsStorage>>,
 }
 
 impl KernelRuntimeBuilder {
@@ -52,6 +54,11 @@ impl KernelRuntimeBuilder {
 
     pub fn permission_store(mut self, permission_store: Arc<Mutex<PermissionStore>>) -> Self {
         self.permission_store = Some(permission_store);
+        self
+    }
+
+    pub fn storage(mut self, storage: Arc<AgentOsStorage>) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -93,6 +100,7 @@ impl KernelRuntimeBuilder {
             capability_policy,
             audit_log,
             permission_store: self.permission_store,
+            storage: self.storage,
         };
 
         Ok(KernelRuntime::new(services))

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use action_core::ActionRegistry;
 use agentos_kernel::{KernelError, KernelRuntimeBuilder};
+use agentos_storage::AgentOsStorage;
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
@@ -100,6 +101,24 @@ fn builder_requires_audit_log() {
             .build(),
         "audit_log",
     );
+}
+
+#[test]
+fn builder_accepts_optional_storage() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(AgentOsStorage::init(temp_dir.path()).unwrap());
+
+    let runtime = KernelRuntimeBuilder::new()
+        .conversation_journal(conversation_journal())
+        .model_adapter(model_adapter())
+        .action_registry(action_registry())
+        .capability_policy(capability_policy())
+        .audit_log(audit_log())
+        .storage(storage)
+        .build()
+        .unwrap();
+
+    assert!(runtime.services().storage.is_some());
 }
 
 #[test]

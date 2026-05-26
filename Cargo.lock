@@ -83,6 +83,7 @@ name = "agentos-kernel"
 version = "0.1.0"
 dependencies = [
  "action-core",
+ "agentos-storage",
  "anyhow",
  "async-trait",
  "audit-log",
@@ -95,6 +96,7 @@ dependencies = [
  "model-adapter",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
