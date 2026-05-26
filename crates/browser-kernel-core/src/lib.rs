@@ -5,10 +5,11 @@
 //! This crate intentionally does not launch Chromium yet. It defines the stable
 //! boundary that later PRs can connect to a real CDP implementation.
 
-use artifact_core::ArtifactId;
+use artifact_core::{ArtifactDescriptor, ArtifactId, ArtifactKind};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1169,6 +1170,143 @@ pub struct BrowserActionResult {
 }
 
 // ---------------------------------------------------------------------------
+// Download artifacts
+// ---------------------------------------------------------------------------
+
+/// Input contract for a browser download action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserDownloadInput {
+    pub url: String,
+    #[serde(default)]
+    pub suggested_filename: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+impl BrowserDownloadInput {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.url.trim().is_empty() {
+            return Err(BrowserKernelError::EmptyUrl);
+        }
+        if let Some(filename) = &self.suggested_filename
+            && filename.trim().is_empty()
+        {
+            return Err(BrowserKernelError::InvalidConfig(
+                "download suggested_filename cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Captured metadata for one browser download artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserDownloadArtifact {
+    pub artifact_id: ArtifactId,
+    pub source_url: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub downloaded_at: DateTime<Utc>,
+}
+
+impl BrowserDownloadArtifact {
+    pub fn from_bytes(
+        artifact_id: ArtifactId,
+        source_url: impl Into<String>,
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        bytes: &[u8],
+        downloaded_at: DateTime<Utc>,
+    ) -> Result<Self, BrowserKernelError> {
+        let source_url = source_url.into();
+        if source_url.trim().is_empty() {
+            return Err(BrowserKernelError::EmptyUrl);
+        }
+        let filename = filename.into();
+        if filename.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "download filename cannot be empty".to_string(),
+            ));
+        }
+        let content_type = content_type.into();
+        if content_type.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "download content_type cannot be empty".to_string(),
+            ));
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let sha256 = format!("{:x}", hasher.finalize());
+
+        Ok(Self {
+            artifact_id,
+            source_url,
+            filename,
+            content_type,
+            size_bytes: bytes.len() as u64,
+            sha256,
+            downloaded_at,
+        })
+    }
+
+    pub fn to_artifact_descriptor(&self) -> ArtifactDescriptor {
+        let kind = if self.content_type == "application/pdf" {
+            ArtifactKind::Pdf
+        } else if self.content_type.starts_with("image/") {
+            ArtifactKind::Image
+        } else {
+            ArtifactKind::Document
+        };
+
+        let mut descriptor =
+            ArtifactDescriptor::new(self.artifact_id.clone(), kind, self.downloaded_at);
+        descriptor.title = Some(self.filename.clone());
+        descriptor.source_uri = Some(self.source_url.clone());
+        descriptor.mime_type = Some(self.content_type.clone());
+        descriptor.metadata = serde_json::json!({
+            "filename": self.filename,
+            "content_type": self.content_type,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "downloaded_at": self.downloaded_at,
+        });
+        descriptor
+    }
+}
+
+/// Result of handling a browser download.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserDownloadResult {
+    pub download: BrowserDownloadArtifact,
+    pub artifact: ArtifactDescriptor,
+}
+
+impl BrowserDownloadResult {
+    pub fn from_bytes(
+        artifact_id: ArtifactId,
+        source_url: impl Into<String>,
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        bytes: &[u8],
+        downloaded_at: DateTime<Utc>,
+    ) -> Result<Self, BrowserKernelError> {
+        let download = BrowserDownloadArtifact::from_bytes(
+            artifact_id,
+            source_url,
+            filename,
+            content_type,
+            bytes,
+            downloaded_at,
+        )?;
+        let artifact = download.to_artifact_descriptor();
+        Ok(Self { download, artifact })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Chromium lifecycle manager
 // ---------------------------------------------------------------------------
 
@@ -1465,6 +1603,25 @@ struct BrowserScreenshotInput {
     full_page: bool,
     quality: Option<u8>,
     element_selector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserDownloadActionInput {
+    url: String,
+    #[serde(default)]
+    suggested_filename: Option<String>,
+    #[serde(default)]
+    content_type: Option<String>,
+}
+
+impl From<BrowserDownloadActionInput> for BrowserDownloadInput {
+    fn from(input: BrowserDownloadActionInput) -> Self {
+        Self {
+            url: input.url,
+            suggested_filename: input.suggested_filename,
+            content_type: input.content_type,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2233,6 +2390,70 @@ impl CdpBrowserExecutor {
 
         Ok(result)
     }
+
+    async fn download_file(
+        &self,
+        input: BrowserDownloadInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        input.validate().map_err(to_invalid_input)?;
+        let url = Self::validate_url(&input.url).map_err(to_invalid_input)?;
+        let filename = input
+            .suggested_filename
+            .clone()
+            .unwrap_or_else(|| infer_download_filename(&url));
+        let content_type = input
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let downloaded_at = chrono::Utc::now();
+
+        // PR125 defines the stable action/artifact boundary. Actual browser-backed
+        // bytes are wired by later CDP download plumbing; until then we create a
+        // deterministic zero-byte descriptor for mock/download metadata tests.
+        let result = BrowserDownloadResult::from_bytes(
+            ArtifactId(format!("download-{}", downloaded_at.timestamp_millis())),
+            url.clone(),
+            filename,
+            content_type,
+            &[],
+            downloaded_at,
+        )
+        .map_err(to_invalid_input)?;
+
+        if let Some(ref store) = self.artifact_store {
+            store.put(result.artifact.clone()).await.map_err(|e| {
+                to_execution_failed(format!("failed to store download artifact: {}", e))
+            })?;
+        }
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Download artifact recorded for {} as {}",
+                result.download.source_url, result.download.filename
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "success": true,
+                "artifact_id": result.download.artifact_id,
+                "url": result.download.source_url,
+                "filename": result.download.filename,
+                "content_type": result.download.content_type,
+                "size_bytes": result.download.size_bytes,
+                "sha256": result.download.sha256,
+                "downloaded_at": result.download.downloaded_at,
+            })),
+            completed_at: downloaded_at,
+        })
+    }
+}
+
+fn infer_download_filename(url: &str) -> String {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.trim().is_empty())
+        .unwrap_or("download.bin")
+        .to_string()
 }
 
 const PAGE_TITLE_JS: &str = "document.title || ''";
@@ -2393,6 +2614,7 @@ const KNOWN_BROWSER_ACTIONS: &[&str] = &[
     "browser.execute_js",
     "browser.get_page_screenshot",
     "browser.get_interactive_snapshot",
+    "browser.download_file",
 ];
 
 #[async_trait::async_trait]
@@ -2494,6 +2716,13 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                     action_core::ActionExecutorError::InvalidInput(e.to_string())
                 })?;
                 self.get_page_screenshot(browser, input).await
+            }
+            "browser.download_file" => {
+                let input: BrowserDownloadActionInput =
+                    serde_json::from_value(request.input.clone()).map_err(|e| {
+                        action_core::ActionExecutorError::InvalidInput(e.to_string())
+                    })?;
+                self.download_file(input.into()).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
@@ -3047,6 +3276,97 @@ mod tests {
         let decoded: BrowserActionResult = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, result);
+    }
+
+    // ---- Download artifact tests ----
+
+    #[test]
+    fn browser_download_input_validates_url_and_filename() {
+        assert!(
+            BrowserDownloadInput {
+                url: " ".to_string(),
+                suggested_filename: None,
+                content_type: None,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            BrowserDownloadInput {
+                url: "https://example.com/file.txt".to_string(),
+                suggested_filename: Some(" ".to_string()),
+                content_type: None,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn browser_download_artifact_records_filename_content_type_size_and_hash() {
+        let bytes = b"hello browser download";
+        let result = BrowserDownloadResult::from_bytes(
+            ArtifactId::from("download-1"),
+            "https://example.com/report.txt",
+            "report.txt",
+            "text/plain",
+            bytes,
+            ts(),
+        )
+        .unwrap();
+
+        assert_eq!(result.download.filename, "report.txt");
+        assert_eq!(result.download.content_type, "text/plain");
+        assert_eq!(result.download.size_bytes, bytes.len() as u64);
+        assert_eq!(
+            result.download.sha256,
+            "800b164878d61ce3df8bc591daacdabde133651cd47885194305ce4f4a3d2a30"
+        );
+        assert_eq!(result.artifact.id, ArtifactId::from("download-1"));
+        assert_eq!(result.artifact.kind, ArtifactKind::Document);
+        assert_eq!(result.artifact.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(result.artifact.metadata["filename"], "report.txt");
+        assert_eq!(result.artifact.metadata["content_type"], "text/plain");
+        assert_eq!(result.artifact.metadata["size_bytes"], bytes.len());
+        assert_eq!(result.artifact.metadata["sha256"], result.download.sha256);
+    }
+
+    #[test]
+    fn browser_download_artifact_classifies_pdf_and_image_artifacts() {
+        let pdf = BrowserDownloadResult::from_bytes(
+            ArtifactId::from("download-pdf"),
+            "https://example.com/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            b"%PDF",
+            ts(),
+        )
+        .unwrap();
+        let image = BrowserDownloadResult::from_bytes(
+            ArtifactId::from("download-image"),
+            "https://example.com/image.png",
+            "image.png",
+            "image/png",
+            b"png",
+            ts(),
+        )
+        .unwrap();
+
+        assert_eq!(pdf.artifact.kind, ArtifactKind::Pdf);
+        assert_eq!(image.artifact.kind, ArtifactKind::Image);
+    }
+
+    #[test]
+    fn infer_download_filename_uses_url_tail_or_default() {
+        assert_eq!(
+            infer_download_filename("https://example.com/files/a.pdf"),
+            "a.pdf"
+        );
+        assert_eq!(
+            infer_download_filename("https://example.com/files/"),
+            "files"
+        );
+        assert_eq!(infer_download_filename(""), "download.bin");
     }
 
     // ---- Lifecycle manager tests ----
