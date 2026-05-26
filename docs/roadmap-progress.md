@@ -1,5 +1,48 @@
 # Roadmap Progress
 
+## 2026-05-26 — M22 PR134: Knowledge index abstraction
+
+Status: implemented.
+
+### Scope
+
+- Added first stable knowledge index boundary in `knowledge-entity`:
+  - `KnowledgeIndex` trait
+  - `KnowledgeFullTextQuery`
+  - `KnowledgeIndexDocument`
+  - `KnowledgeIndexRebuildRequest`
+  - `KnowledgeIndexRebuildReport`
+  - `KnowledgeIndexError`
+- Added deterministic in-memory full-text fake index: `MemoryFullTextKnowledgeIndex`.
+- Added query boundary support for:
+  - text terms
+  - tag filters
+  - frontmatter key/value filters
+  - limit handling
+- Added index rebuild API that replaces the in-memory document set and returns indexed/deleted counts.
+- Kept Tantivy/SQLite FTS backend selection outside this PR; PR134 defines the backend-agnostic abstraction and fake test backend.
+
+### Acceptance coverage
+
+- Memory full-text fake index rebuilds from documents and queries title/body/tags/frontmatter text.
+- Full-text query returns deterministic ranking and snippets.
+- Tag and frontmatter filters constrain search results.
+- Upsert replaces existing documents by entry id.
+- Delete removes documents from subsequent query results.
+- Query defaults are stable.
+
+### Verification commands
+
+```bash
+cargo test -p knowledge-entity memory_fulltext_index
+cargo test -p knowledge-entity knowledge_fulltext_query_defaults
+cargo test -p knowledge-entity
+```
+
+### Next planned step
+
+M22 PR135: Full-text search backend.
+
 ## 2026-05-26 — M21 PR133: Browser security policy
 
 Status: implemented.

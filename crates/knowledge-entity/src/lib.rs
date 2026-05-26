@@ -175,6 +175,237 @@ pub struct KnowledgeSearchResult {
     pub snippet: Option<String>,
 }
 
+/// Full-text query boundary for knowledge indexes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeFullTextQuery {
+    pub text: String,
+    pub tags: Vec<String>,
+    pub frontmatter_filters: Vec<(String, String)>,
+    pub limit: usize,
+}
+
+impl KnowledgeFullTextQuery {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tags: vec![],
+            frontmatter_filters: vec![],
+            limit: 10,
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub fn with_frontmatter_filter(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.frontmatter_filters.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+/// Indexable knowledge document containing search body and metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeIndexDocument {
+    pub entry: KnowledgeEntryRef,
+    pub body_markdown: String,
+    pub tags: Vec<String>,
+    pub frontmatter: serde_json::Value,
+}
+
+impl KnowledgeIndexDocument {
+    pub fn new(entry: KnowledgeEntryRef, body_markdown: impl Into<String>) -> Self {
+        Self {
+            entry,
+            body_markdown: body_markdown.into(),
+            tags: vec![],
+            frontmatter: serde_json::json!({}),
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub fn with_frontmatter(mut self, frontmatter: serde_json::Value) -> Self {
+        self.frontmatter = frontmatter;
+        self
+    }
+}
+
+/// Request to rebuild an index from a complete document set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeIndexRebuildRequest {
+    pub documents: Vec<KnowledgeIndexDocument>,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// Report returned by a full index rebuild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeIndexRebuildReport {
+    pub indexed_count: usize,
+    pub deleted_count: usize,
+    pub rebuilt_at: DateTime<Utc>,
+}
+
+/// Errors from knowledge index operations.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KnowledgeIndexError {
+    #[error("knowledge index lock poisoned")]
+    LockPoisoned,
+    #[error("invalid knowledge index query: {0}")]
+    InvalidQuery(String),
+}
+
+/// Search backend abstraction for knowledge indexes.
+#[async_trait]
+pub trait KnowledgeIndex: Send + Sync {
+    async fn upsert(&mut self, document: KnowledgeIndexDocument)
+    -> Result<(), KnowledgeIndexError>;
+
+    async fn delete(&mut self, id: &KnowledgeEntryId) -> Result<(), KnowledgeIndexError>;
+
+    async fn query(
+        &self,
+        query: &KnowledgeFullTextQuery,
+    ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError>;
+
+    async fn rebuild(
+        &mut self,
+        request: KnowledgeIndexRebuildRequest,
+    ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError>;
+}
+
+/// Deterministic in-memory full-text index for tests and fake backends.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryFullTextKnowledgeIndex {
+    documents: HashMap<KnowledgeEntryId, KnowledgeIndexDocument>,
+}
+
+impl MemoryFullTextKnowledgeIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn matches(document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> bool {
+        let text = query.text.trim().to_ascii_lowercase();
+        let haystack = format!(
+            "{}\n{}\n{}\n{}",
+            document.entry.title,
+            document.body_markdown,
+            document.tags.join(" "),
+            document.frontmatter
+        )
+        .to_ascii_lowercase();
+        let matches_text =
+            text.is_empty() || text.split_whitespace().all(|term| haystack.contains(term));
+        let matches_tags = query
+            .tags
+            .iter()
+            .all(|tag| document.tags.iter().any(|candidate| candidate == tag));
+        let matches_frontmatter = query.frontmatter_filters.iter().all(|(key, value)| {
+            document
+                .frontmatter
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(|candidate| candidate == value)
+                .unwrap_or(false)
+        });
+        matches_text && matches_tags && matches_frontmatter
+    }
+
+    fn score(document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> f32 {
+        let text = query.text.trim().to_ascii_lowercase();
+        if text.is_empty() {
+            return 0.0;
+        }
+        let title = document.entry.title.to_ascii_lowercase();
+        let body = document.body_markdown.to_ascii_lowercase();
+        text.split_whitespace().fold(0.0, |score, term| {
+            score
+                + if title.contains(term) { 2.0 } else { 0.0 }
+                + if body.contains(term) { 1.0 } else { 0.0 }
+        })
+    }
+
+    fn snippet(document: &KnowledgeIndexDocument) -> Option<String> {
+        Some(document.body_markdown.chars().take(160).collect())
+    }
+}
+
+#[async_trait]
+impl KnowledgeIndex for MemoryFullTextKnowledgeIndex {
+    async fn upsert(
+        &mut self,
+        document: KnowledgeIndexDocument,
+    ) -> Result<(), KnowledgeIndexError> {
+        self.documents.insert(document.entry.id.clone(), document);
+        Ok(())
+    }
+
+    async fn delete(&mut self, id: &KnowledgeEntryId) -> Result<(), KnowledgeIndexError> {
+        self.documents.remove(id);
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        query: &KnowledgeFullTextQuery,
+    ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError> {
+        if query.limit == 0 {
+            return Err(KnowledgeIndexError::InvalidQuery(
+                "knowledge full-text query limit must be greater than zero".to_string(),
+            ));
+        }
+        let mut results = self
+            .documents
+            .values()
+            .filter(|document| Self::matches(document, query))
+            .map(|document| KnowledgeSearchResult {
+                entry: document.entry.clone(),
+                score: Self::score(document, query),
+                snippet: Self::snippet(document),
+            })
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entry.id.0.cmp(&b.entry.id.0))
+        });
+        results.truncate(query.limit);
+        Ok(results)
+    }
+
+    async fn rebuild(
+        &mut self,
+        request: KnowledgeIndexRebuildRequest,
+    ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError> {
+        let deleted_count = self.documents.len();
+        self.documents = request
+            .documents
+            .into_iter()
+            .map(|document| (document.entry.id.clone(), document))
+            .collect();
+        Ok(KnowledgeIndexRebuildReport {
+            indexed_count: self.documents.len(),
+            deleted_count,
+            rebuilt_at: request.requested_at,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KnowledgeValidationError {
     #[error("knowledge draft title cannot be blank")]
@@ -751,6 +982,172 @@ mod tests {
                 .evaluate_with_registry(&request, &registry)
                 .is_denied()
         );
+    }
+
+    #[tokio::test]
+    async fn memory_fulltext_index_rebuilds_and_queries_entries() {
+        let mut index = MemoryFullTextKnowledgeIndex::new();
+        let first = KnowledgeIndexDocument::new(
+            KnowledgeEntryRef {
+                id: KnowledgeEntryId::from("knowledge-entry-1"),
+                title: "AgentOS Memory".to_string(),
+                source_uri: None,
+                artifact_id: None,
+                asset_id: None,
+                created_at: ts(),
+            },
+            "long-term memory and asset governance".to_string(),
+        )
+        .with_tags(vec!["memory".to_string(), "agent-os".to_string()])
+        .with_frontmatter(serde_json::json!({ "status": "active" }));
+        let second = KnowledgeIndexDocument::new(
+            KnowledgeEntryRef {
+                id: KnowledgeEntryId::from("knowledge-entry-2"),
+                title: "Browser Kernel".to_string(),
+                source_uri: None,
+                artifact_id: None,
+                asset_id: None,
+                created_at: ts(),
+            },
+            "browser security policy and takeover boundary".to_string(),
+        )
+        .with_tags(vec!["browser".to_string()]);
+
+        let report = index
+            .rebuild(KnowledgeIndexRebuildRequest {
+                documents: vec![first, second],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.indexed_count, 2);
+        assert_eq!(report.deleted_count, 0);
+        assert_eq!(report.rebuilt_at, ts());
+
+        let results = index
+            .query(&KnowledgeFullTextQuery::new("memory governance").with_limit(5))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.title, "AgentOS Memory");
+        assert!(results[0].score > 0.0);
+        assert!(results[0].snippet.as_ref().unwrap().contains("memory"));
+    }
+
+    #[tokio::test]
+    async fn memory_fulltext_index_filters_by_tags_and_frontmatter() {
+        let mut index = MemoryFullTextKnowledgeIndex::new();
+        index
+            .rebuild(KnowledgeIndexRebuildRequest {
+                documents: vec![
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-1"),
+                            title: "Published Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "memory index content".to_string(),
+                    )
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter(serde_json::json!({ "status": "published" })),
+                    KnowledgeIndexDocument::new(
+                        KnowledgeEntryRef {
+                            id: KnowledgeEntryId::from("knowledge-entry-2"),
+                            title: "Draft Memory".to_string(),
+                            source_uri: None,
+                            artifact_id: None,
+                            asset_id: None,
+                            created_at: ts(),
+                        },
+                        "memory index content".to_string(),
+                    )
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter(serde_json::json!({ "status": "draft" })),
+                ],
+                requested_at: ts(),
+            })
+            .await
+            .unwrap();
+
+        let results = index
+            .query(
+                &KnowledgeFullTextQuery::new("memory")
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter_filter("status", "published"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_fulltext_index_upserts_and_deletes_documents() {
+        let mut index = MemoryFullTextKnowledgeIndex::new();
+        let doc = KnowledgeIndexDocument::new(
+            KnowledgeEntryRef {
+                id: KnowledgeEntryId::from("knowledge-entry-1"),
+                title: "Original".to_string(),
+                source_uri: None,
+                artifact_id: None,
+                asset_id: None,
+                created_at: ts(),
+            },
+            "original content".to_string(),
+        );
+        index.upsert(doc).await.unwrap();
+        index
+            .upsert(KnowledgeIndexDocument::new(
+                KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("knowledge-entry-1"),
+                    title: "Updated".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                "updated content".to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let results = index
+            .query(&KnowledgeFullTextQuery::new("updated"))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.title, "Updated");
+
+        index
+            .delete(&KnowledgeEntryId::from("knowledge-entry-1"))
+            .await
+            .unwrap();
+        assert!(
+            index
+                .query(&KnowledgeFullTextQuery::new("updated"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn knowledge_fulltext_query_defaults_are_stable() {
+        let query = KnowledgeFullTextQuery::new("agent memory");
+
+        assert_eq!(query.text, "agent memory");
+        assert_eq!(query.limit, 10);
+        assert!(query.tags.is_empty());
+        assert!(query.frontmatter_filters.is_empty());
     }
 
     #[tokio::test]
