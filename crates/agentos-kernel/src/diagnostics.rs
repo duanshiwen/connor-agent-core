@@ -4,13 +4,14 @@ use agentos_config::AgentOsConfig;
 use agentos_storage::AgentOsStorage;
 use serde::{Deserialize, Serialize};
 
-use crate::{KernelHealthReport, KernelResult};
+use crate::{KernelHealthReport, KernelResult, KernelRuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelDiagnosticsBundle {
     pub runtime_config: RedactedRuntimeConfig,
     pub service_health: KernelHealthReport,
     pub storage_manifest: StorageManifestDump,
+    pub failure_summary: KernelFailureSummary,
     pub recent_audit_summary: RecentAuditSummary,
 }
 
@@ -80,6 +81,109 @@ impl StorageManifestDump {
             storage_root: Some(storage.root().display().to_string()),
             manifest_version: Some(storage.manifest().storage_version),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelFailureSummary {
+    pub status: String,
+    pub classifications: Vec<KernelFailureClassification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelFailureClassification {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+}
+
+impl KernelFailureSummary {
+    pub fn from_health_and_storage(
+        service_health: &KernelHealthReport,
+        _storage_manifest: &StorageManifestDump,
+    ) -> Self {
+        let mut classifications = Vec::new();
+
+        match service_health.state {
+            KernelRuntimeState::Recovering => classifications.push(KernelFailureClassification {
+                code: "kernel_recovering".to_string(),
+                severity: "warning".to_string(),
+                message: "kernel runtime is recovering and not currently serving".to_string(),
+            }),
+            KernelRuntimeState::ShuttingDown | KernelRuntimeState::Shutdown => {
+                classifications.push(KernelFailureClassification {
+                    code: "kernel_not_running".to_string(),
+                    severity: "error".to_string(),
+                    message: "kernel runtime is shutting down or already shutdown".to_string(),
+                });
+            }
+            KernelRuntimeState::New
+            | KernelRuntimeState::Initialized
+            | KernelRuntimeState::Started => {}
+        }
+
+        push_missing_service(
+            &mut classifications,
+            service_health.conversation_kernel_available,
+            "conversation_kernel_unavailable",
+            "conversation kernel service is unavailable",
+        );
+        push_missing_service(
+            &mut classifications,
+            service_health.model_adapter_available,
+            "model_adapter_unavailable",
+            "model adapter service is unavailable",
+        );
+        push_missing_service(
+            &mut classifications,
+            service_health.action_registry_available,
+            "action_registry_unavailable",
+            "action registry service is unavailable",
+        );
+        push_missing_service(
+            &mut classifications,
+            service_health.capability_policy_available,
+            "capability_policy_unavailable",
+            "capability policy service is unavailable",
+        );
+        push_missing_service(
+            &mut classifications,
+            service_health.audit_log_available,
+            "audit_log_unavailable",
+            "audit log service is unavailable",
+        );
+
+        let status = if classifications
+            .iter()
+            .any(|classification| classification.severity == "error")
+        {
+            "unavailable"
+        } else if classifications.is_empty() {
+            "ok"
+        } else {
+            "degraded"
+        }
+        .to_string();
+
+        Self {
+            status,
+            classifications,
+        }
+    }
+}
+
+fn push_missing_service(
+    classifications: &mut Vec<KernelFailureClassification>,
+    available: bool,
+    code: &str,
+    message: &str,
+) {
+    if !available {
+        classifications.push(KernelFailureClassification {
+            code: code.to_string(),
+            severity: "error".to_string(),
+            message: message.to_string(),
+        });
     }
 }
 
@@ -164,11 +268,14 @@ pub(crate) async fn build_diagnostics_bundle_from_redacted_config(
     let storage_manifest = storage
         .map(StorageManifestDump::from_storage)
         .unwrap_or_else(StorageManifestDump::not_configured);
+    let failure_summary =
+        KernelFailureSummary::from_health_and_storage(&service_health, &storage_manifest);
 
     Ok(KernelDiagnosticsBundle {
         runtime_config,
         service_health,
         storage_manifest,
+        failure_summary,
         recent_audit_summary: RecentAuditSummary::from_audit_log(audit_log).await?,
     })
 }

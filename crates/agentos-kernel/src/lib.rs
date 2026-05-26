@@ -14,8 +14,8 @@ mod services;
 
 pub use builder::KernelRuntimeBuilder;
 pub use diagnostics::{
-    AuditEventSummary, KernelDiagnosticsBundle, RecentAuditSummary, RedactedRuntimeConfig,
-    StorageManifestDump,
+    AuditEventSummary, KernelDiagnosticsBundle, KernelFailureClassification, KernelFailureSummary,
+    RecentAuditSummary, RedactedRuntimeConfig, StorageManifestDump,
 };
 pub use error::{KernelError, KernelResult};
 pub use host_api::{

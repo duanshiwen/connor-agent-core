@@ -194,6 +194,35 @@ async fn diagnostics_bundle_for_invalid_config_reports_error_count() {
 }
 
 #[tokio::test]
+async fn diagnostics_bundle_reports_ok_failure_summary_for_healthy_runtime() {
+    let runtime = runtime();
+    runtime.start().unwrap();
+
+    let bundle = runtime.diagnostics_bundle(BTreeMap::new()).await.unwrap();
+
+    assert_eq!(bundle.failure_summary.status, "ok");
+    assert!(bundle.failure_summary.classifications.is_empty());
+}
+
+#[tokio::test]
+async fn diagnostics_bundle_classifies_shutdown_runtime_as_unavailable() {
+    let runtime = runtime();
+    runtime.shutdown().unwrap();
+
+    let bundle = runtime.diagnostics_bundle(BTreeMap::new()).await.unwrap();
+
+    assert_eq!(bundle.failure_summary.status, "unavailable");
+    assert!(
+        bundle
+            .failure_summary
+            .classifications
+            .iter()
+            .any(|classification| classification.code == "kernel_not_running"
+                && classification.severity == "error")
+    );
+}
+
+#[tokio::test]
 async fn diagnostics_bundle_has_deterministic_snapshot_shape() {
     let runtime = runtime();
     runtime.init().unwrap();
@@ -208,6 +237,7 @@ async fn diagnostics_bundle_has_deterministic_snapshot_shape() {
     assert!(json.contains("\"runtime_config\""));
     assert!(json.contains("\"service_health\""));
     assert!(json.contains("\"storage_manifest\""));
+    assert!(json.contains("\"failure_summary\""));
     assert!(json.contains("\"recent_audit_summary\""));
     assert!(json.contains("\"api_token\": \"<redacted>\""));
     assert!(!json.contains("token-value"));
