@@ -19,6 +19,9 @@ use artifact_core::ArtifactId;
 use asset_core::{AssetId, WorkObjectId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use enterprise_permission_core::{
+    EnterpriseUserId, PermissionAction, PermissionStore, ResourceType,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -173,6 +176,8 @@ pub struct KnowledgeSearchResult {
     pub entry: KnowledgeEntryRef,
     pub score: f32,
     pub snippet: Option<String>,
+    pub permission_required: bool,
+    pub confidentiality: Option<String>,
 }
 
 /// Full-text query boundary for knowledge indexes.
@@ -781,6 +786,8 @@ impl KnowledgeIndex for DeterministicFullTextKnowledgeBackend {
                 entry: document.entry.clone(),
                 score: self.score(document, query),
                 snippet: Self::snippet(document),
+                permission_required: false,
+                confidentiality: None,
             })
             .collect::<Vec<_>>();
         results.sort_by(|a, b| {
@@ -912,6 +919,8 @@ impl KnowledgeEmbeddingIndex for DeterministicEmbeddingKnowledgeBackend {
                 entry: document.entry.clone(),
                 score: Self::cosine_similarity(&document.embedding, &query.embedding)?,
                 snippet: None,
+                permission_required: false,
+                confidentiality: None,
             });
         }
         results.sort_by(|a, b| {
@@ -2153,6 +2162,108 @@ impl<Q: QuestionLedger, A: AnswerCacheStore> WorkObjectCrossEntityCoordinator<Q,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Permission-aware knowledge search
+// ---------------------------------------------------------------------------
+
+/// Wrapper around any `KnowledgeIndex` that filters results based on
+/// enterprise permission grants.
+#[derive(Debug, Clone)]
+pub struct PermissionAwareKnowledgeSearch<I: KnowledgeIndex> {
+    inner: I,
+    permission_store: PermissionStore,
+}
+
+impl<I: KnowledgeIndex> PermissionAwareKnowledgeSearch<I> {
+    pub fn new(inner: I, permission_store: PermissionStore) -> Self {
+        Self {
+            inner,
+            permission_store,
+        }
+    }
+
+    /// Search with permission filtering.
+    /// Entries where the user lacks `Read` on `KnowledgeBase` are excluded.
+    pub async fn query_with_permissions(
+        &self,
+        query: &KnowledgeFullTextQuery,
+        user_id: &EnterpriseUserId,
+    ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError> {
+        let results = self.inner.query(query).await?;
+        let filtered = results
+            .into_iter()
+            .filter(|result| {
+                let resource_id =
+                    enterprise_permission_core::ResourceId::from(result.entry.id.0.clone());
+                let decision = self.permission_store.check(
+                    user_id,
+                    &ResourceType::KnowledgeBase,
+                    &resource_id,
+                    &PermissionAction::Read,
+                    Utc::now(),
+                );
+                decision.is_allowed()
+            })
+            .collect();
+        Ok(filtered)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Permission-aware citation evidence filtering
+// ---------------------------------------------------------------------------
+
+/// Wrapper around `CitationEvidenceStore` that filters evidence traces
+/// based on enterprise permission grants.
+#[derive(Debug, Clone)]
+pub struct PermissionAwareCitationEvidenceStore<S: CitationEvidenceStore> {
+    inner: S,
+    permission_store: PermissionStore,
+}
+
+impl<S: CitationEvidenceStore> PermissionAwareCitationEvidenceStore<S> {
+    pub fn new(inner: S, permission_store: PermissionStore) -> Self {
+        Self {
+            inner,
+            permission_store,
+        }
+    }
+
+    /// Trace an answer's evidence, filtering out evidence the user cannot access.
+    pub async fn trace_answer_with_permissions(
+        &self,
+        answer_id: &str,
+        user_id: &EnterpriseUserId,
+    ) -> Result<AnswerCitationTrace, CitationEvidenceError> {
+        let trace = self.inner.trace_answer(answer_id).await?;
+        let filtered_evidence: Vec<CitationEvidenceRecord> = trace
+            .evidence
+            .into_iter()
+            .filter(|record| match &record.source_ref {
+                CitationEvidenceRef::SourceUri { .. } => true,
+                CitationEvidenceRef::ConversationMessage { .. } => true,
+                CitationEvidenceRef::BrowserSnapshot { .. } => true,
+                CitationEvidenceRef::Artifact { artifact_id } => {
+                    let resource_id =
+                        enterprise_permission_core::ResourceId::from(artifact_id.0.clone());
+                    let decision = self.permission_store.check(
+                        user_id,
+                        &ResourceType::KnowledgeBase,
+                        &resource_id,
+                        &PermissionAction::Read,
+                        Utc::now(),
+                    );
+                    decision.is_allowed()
+                }
+            })
+            .collect();
+        Ok(AnswerCitationTrace {
+            answer_id: trace.answer_id,
+            evidence: filtered_evidence,
+        })
+    }
+}
+
 /// Input for `knowledge.search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeSearchActionInput {
@@ -2376,6 +2487,8 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
                 entry: entry.entry_ref.clone(),
                 score: if text.is_empty() { 0.0 } else { 1.0 },
                 snippet: Some(entry.content_markdown.chars().take(120).collect()),
+                permission_required: false,
+                confidentiality: None,
             })
             .collect::<Vec<_>>();
         results.sort_by(|a, b| a.entry.id.0.cmp(&b.entry.id.0));
@@ -2608,6 +2721,8 @@ mod tests {
             },
             score: 1.0,
             snippet: Some("Foundation notes".to_string()),
+            permission_required: false,
+            confidentiality: None,
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -4564,5 +4679,239 @@ mod tests {
         assert!(result.question_ids.is_empty());
         assert!(result.answer_ids.is_empty());
         assert!(result.knowledge_entry_ids.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 145: Knowledge permission filtering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn knowledge_search_result_permission_fields_roundtrip() {
+        let result = KnowledgeSearchResult {
+            entry: KnowledgeEntryRef {
+                id: KnowledgeEntryId::from("knowledge-entry-1"),
+                title: "AgentOS Notes".to_string(),
+                source_uri: None,
+                artifact_id: None,
+                asset_id: None,
+                created_at: ts(),
+            },
+            score: 1.0,
+            snippet: Some("Foundation notes".to_string()),
+            permission_required: true,
+            confidentiality: Some("internal".to_string()),
+        };
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let decoded: KnowledgeSearchResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, result);
+        assert!(decoded.permission_required);
+        assert_eq!(decoded.confidentiality.as_deref(), Some("internal"));
+    }
+
+    #[tokio::test]
+    async fn permission_aware_search_filters_unauthorized_entries() {
+        use enterprise_permission_core::{EnterpriseRole, PermissionGrant, ResourceId};
+
+        let mut index = MemoryFullTextKnowledgeIndex::default();
+        index
+            .upsert(KnowledgeIndexDocument {
+                entry: KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("public-entry"),
+                    title: "Public Knowledge".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                body_markdown: "public content".to_string(),
+                tags: vec![],
+                frontmatter: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        index
+            .upsert(KnowledgeIndexDocument {
+                entry: KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("secret-entry"),
+                    title: "Secret Knowledge".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                body_markdown: "secret content".to_string(),
+                tags: vec![],
+                frontmatter: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let mut store = PermissionStore::new();
+        store.add_grant(PermissionGrant {
+            grant_id: "grant-1".to_string(),
+            user_id: EnterpriseUserId::from("user-1"),
+            role: EnterpriseRole::User,
+            resource_type: ResourceType::KnowledgeBase,
+            resource_id: ResourceId::from("public-entry"),
+            actions: vec![PermissionAction::Read],
+            granted_at: ts(),
+            expires_at: None,
+            revoked: false,
+        });
+
+        let search = PermissionAwareKnowledgeSearch::new(index, store);
+        let user = EnterpriseUserId::from("user-1");
+        let query = KnowledgeFullTextQuery::new("knowledge");
+
+        let results = search.query_with_permissions(&query, &user).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id.0, "public-entry");
+    }
+
+    #[tokio::test]
+    async fn permission_aware_search_allows_super_admin() {
+        use enterprise_permission_core::{EnterpriseRole, PermissionGrant, ResourceId};
+
+        let mut index = MemoryFullTextKnowledgeIndex::default();
+        index
+            .upsert(KnowledgeIndexDocument {
+                entry: KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("secret-entry"),
+                    title: "Secret Knowledge".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                body_markdown: "secret content".to_string(),
+                tags: vec![],
+                frontmatter: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let mut store = PermissionStore::new();
+        store.add_grant(PermissionGrant {
+            grant_id: "grant-1".to_string(),
+            user_id: EnterpriseUserId::from("admin-1"),
+            role: EnterpriseRole::SuperAdmin,
+            resource_type: ResourceType::KnowledgeBase,
+            resource_id: ResourceId::from("secret-entry"),
+            actions: vec![PermissionAction::Read, PermissionAction::Admin],
+            granted_at: ts(),
+            expires_at: None,
+            revoked: false,
+        });
+
+        let search = PermissionAwareKnowledgeSearch::new(index, store);
+        let user = EnterpriseUserId::from("admin-1");
+        let query = KnowledgeFullTextQuery::new("knowledge");
+
+        let results = search.query_with_permissions(&query, &user).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id.0, "secret-entry");
+    }
+
+    #[tokio::test]
+    async fn permission_aware_citation_filters_unauthorized_evidence() {
+        use enterprise_permission_core::{EnterpriseRole, PermissionGrant, ResourceId};
+
+        let store_inner = MemoryCitationEvidenceStore::new();
+        let evidence = store_inner
+            .register_evidence(
+                CitationEvidenceRef::artifact(ArtifactId::from("artifact-1")),
+                Some("excerpt".to_string()),
+                ts(),
+            )
+            .await
+            .unwrap();
+        store_inner
+            .cite_answer("answer-1", &evidence.id, ts())
+            .await
+            .unwrap();
+
+        let perm_store = PermissionStore::new();
+        // No grant for artifact-1 -> should be filtered
+
+        let wrapper = PermissionAwareCitationEvidenceStore::new(store_inner, perm_store);
+        let user = EnterpriseUserId::from("user-1");
+        let trace = wrapper
+            .trace_answer_with_permissions("answer-1", &user)
+            .await
+            .unwrap();
+        assert!(
+            trace.evidence.is_empty(),
+            "evidence without grant must be filtered"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_aware_citation_allows_authorized_evidence() {
+        use enterprise_permission_core::{EnterpriseRole, PermissionGrant, ResourceId};
+
+        let store_inner = MemoryCitationEvidenceStore::new();
+        let evidence = store_inner
+            .register_evidence(
+                CitationEvidenceRef::artifact(ArtifactId::from("artifact-1")),
+                Some("excerpt".to_string()),
+                ts(),
+            )
+            .await
+            .unwrap();
+        store_inner
+            .cite_answer("answer-1", &evidence.id, ts())
+            .await
+            .unwrap();
+
+        let mut perm_store = PermissionStore::new();
+        perm_store.add_grant(PermissionGrant {
+            grant_id: "grant-1".to_string(),
+            user_id: EnterpriseUserId::from("user-1"),
+            role: EnterpriseRole::User,
+            resource_type: ResourceType::KnowledgeBase,
+            resource_id: ResourceId::from("artifact-1"),
+            actions: vec![PermissionAction::Read],
+            granted_at: ts(),
+            expires_at: None,
+            revoked: false,
+        });
+
+        let wrapper = PermissionAwareCitationEvidenceStore::new(store_inner, perm_store);
+        let user = EnterpriseUserId::from("user-1");
+        let trace = wrapper
+            .trace_answer_with_permissions("answer-1", &user)
+            .await
+            .unwrap();
+        assert_eq!(trace.evidence.len(), 1, "authorized evidence must pass");
+    }
+
+    #[tokio::test]
+    async fn permission_aware_citation_allows_non_permission_refs() {
+        let store_inner = MemoryCitationEvidenceStore::new();
+        let evidence = store_inner
+            .register_evidence(
+                CitationEvidenceRef::source_uri("https://example.com"),
+                Some("excerpt".to_string()),
+                ts(),
+            )
+            .await
+            .unwrap();
+        store_inner
+            .cite_answer("answer-1", &evidence.id, ts())
+            .await
+            .unwrap();
+
+        let perm_store = PermissionStore::new();
+        let wrapper = PermissionAwareCitationEvidenceStore::new(store_inner, perm_store);
+        let user = EnterpriseUserId::from("user-1");
+        let trace = wrapper
+            .trace_answer_with_permissions("answer-1", &user)
+            .await
+            .unwrap();
+        assert_eq!(
+            trace.evidence.len(),
+            1,
+            "source_uri evidence should always pass"
+        );
     }
 }

@@ -478,6 +478,8 @@ impl KnowledgeRepository for MarkdownKnowledgeRepository {
                     entry: Self::entry_ref_from_frontmatter(id, &fm),
                     score,
                     snippet,
+                    permission_required: false,
+                    confidentiality: None,
                 });
             }
         }

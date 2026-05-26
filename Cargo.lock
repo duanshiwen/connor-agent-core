@@ -1322,6 +1322,7 @@ dependencies = [
  "async-trait",
  "capability-policy",
  "chrono",
+ "enterprise-permission-core",
  "entity-core",
  "serde",
  "serde_json",

@@ -10,6 +10,7 @@ description = "Knowledge entity domain model and deterministic in-memory reposit
 action-core = { path = "../action-core" }
 artifact-core = { path = "../artifact-core" }
 asset-core = { path = "../asset-core" }
+enterprise-permission-core = { path = "../enterprise-permission-core" }
 entity-core = { path = "../entity-core" }
 async-trait.workspace = true
 chrono.workspace = true
