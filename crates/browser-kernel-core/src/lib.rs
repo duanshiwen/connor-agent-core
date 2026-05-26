@@ -444,6 +444,206 @@ impl BrowserPageLifecycleManager {
     pub fn active_page(&self) -> Option<&BrowserPageInfo> {
         self.session.active_page()
     }
+
+    pub fn record_crash(&mut self, event: BrowserCrashEvent) -> Result<(), BrowserKernelError> {
+        event.validate()?;
+        match event.scope {
+            BrowserCrashScope::Page => {
+                let page_id = event.page_id.as_ref().ok_or_else(|| {
+                    BrowserKernelError::InvalidConfig(
+                        "page crash event must include page_id".to_string(),
+                    )
+                })?;
+                self.session.update_page_health(
+                    page_id,
+                    BrowserPageHealth::crashed(event.message, event.detected_at),
+                    event.detected_at,
+                )?;
+            }
+            BrowserCrashScope::BrowserProcess => {
+                for page in &mut self.session.pages {
+                    if page.status != BrowserPageStatus::Closed {
+                        page.status = BrowserPageStatus::Crashed;
+                        page.health =
+                            BrowserPageHealth::crashed(event.message.clone(), event.detected_at);
+                        page.updated_at = event.detected_at;
+                    }
+                }
+                self.session.updated_at = event.detected_at;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn recover_from_crash(
+        &mut self,
+        event: BrowserCrashEvent,
+        policy: &BrowserRecoveryPolicy,
+    ) -> Result<BrowserRecoveryPlan, BrowserKernelError> {
+        self.record_crash(event.clone())?;
+        policy.plan_recovery(&self.session, &event)
+    }
+}
+
+/// Scope of a browser crash event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCrashScope {
+    Page,
+    BrowserProcess,
+}
+
+/// Provider-neutral browser crash reason classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCrashReason {
+    PageCrashed,
+    BrowserDisconnected,
+    RendererUnresponsive,
+    ProcessExited,
+    Unknown,
+}
+
+/// Crash event captured by browser supervision or deterministic tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserCrashEvent {
+    pub scope: BrowserCrashScope,
+    pub page_id: Option<BrowserPageId>,
+    pub reason: BrowserCrashReason,
+    pub message: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+impl BrowserCrashEvent {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.message.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser crash message cannot be empty".to_string(),
+            ));
+        }
+        if self.scope == BrowserCrashScope::Page && self.page_id.is_none() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "page crash event must include page_id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// High-level browser crash recovery strategy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRecoveryStrategy {
+    FailFast,
+    ReopenActivePage,
+    RelaunchSession,
+}
+
+/// Policy controlling deterministic recovery plan generation after a crash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserRecoveryPolicy {
+    pub strategy: BrowserRecoveryStrategy,
+    pub max_relaunch_attempts: u32,
+    pub retry_after_relaunch: bool,
+}
+
+impl Default for BrowserRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: BrowserRecoveryStrategy::RelaunchSession,
+            max_relaunch_attempts: 1,
+            retry_after_relaunch: true,
+        }
+    }
+}
+
+impl BrowserRecoveryPolicy {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.strategy == BrowserRecoveryStrategy::RelaunchSession
+            && self.max_relaunch_attempts == 0
+        {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser recovery max_relaunch_attempts must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn plan_recovery(
+        &self,
+        session: &BrowserSession,
+        event: &BrowserCrashEvent,
+    ) -> Result<BrowserRecoveryPlan, BrowserKernelError> {
+        self.validate()?;
+        event.validate()?;
+        let action = match self.strategy {
+            BrowserRecoveryStrategy::FailFast => BrowserRecoveryAction::Fail {
+                reason: format!("browser crash recovery fail-fast: {}", event.message),
+            },
+            BrowserRecoveryStrategy::ReopenActivePage => {
+                let page_id = event
+                    .page_id
+                    .clone()
+                    .or_else(|| session.active_page_id.clone())
+                    .ok_or_else(|| {
+                        BrowserKernelError::BrowserCrashed(
+                            "cannot reopen page because session has no active page".to_string(),
+                        )
+                    })?;
+                let page = session.page(&page_id)?;
+                BrowserRecoveryAction::ReopenPage {
+                    page_id,
+                    url: page.url.clone(),
+                }
+            }
+            BrowserRecoveryStrategy::RelaunchSession => BrowserRecoveryAction::RelaunchSession {
+                session_id: session.session_id.clone(),
+                profile: session.profile.clone(),
+                pages: session
+                    .pages
+                    .iter()
+                    .filter(|page| page.status != BrowserPageStatus::Closed)
+                    .cloned()
+                    .collect(),
+                retry_after_relaunch: self.retry_after_relaunch,
+            },
+        };
+
+        Ok(BrowserRecoveryPlan {
+            event: event.clone(),
+            strategy: self.strategy.clone(),
+            action,
+            planned_at: event.detected_at,
+        })
+    }
+}
+
+/// Deterministic recovery action selected by [`BrowserRecoveryPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum BrowserRecoveryAction {
+    Fail {
+        reason: String,
+    },
+    ReopenPage {
+        page_id: BrowserPageId,
+        url: Option<String>,
+    },
+    RelaunchSession {
+        session_id: BrowserSessionId,
+        profile: BrowserSessionProfileBinding,
+        pages: Vec<BrowserPageInfo>,
+        retry_after_relaunch: bool,
+    },
+}
+
+/// Recovery plan returned to host/runtime after a browser crash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserRecoveryPlan {
+    pub event: BrowserCrashEvent,
+    pub strategy: BrowserRecoveryStrategy,
+    pub action: BrowserRecoveryAction,
+    pub planned_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,6 +1364,7 @@ pub struct CdpBrowserConfig {
     pub timeouts: BrowserTimeouts,
     pub navigation_timeout_policy: NavigationTimeoutPolicy,
     pub prompt_policy: BrowserPromptPolicy,
+    pub recovery_policy: BrowserRecoveryPolicy,
     pub profile: BrowserProfileMode,
     pub max_pages: usize,
 }
@@ -1176,6 +1377,7 @@ impl Default for CdpBrowserConfig {
             timeouts: BrowserTimeouts::default(),
             navigation_timeout_policy: NavigationTimeoutPolicy::default(),
             prompt_policy: BrowserPromptPolicy::default(),
+            recovery_policy: BrowserRecoveryPolicy::default(),
             profile: BrowserProfileMode::default(),
             max_pages: 5,
         }
@@ -1208,6 +1410,11 @@ impl CdpBrowserConfig {
         self
     }
 
+    pub fn with_recovery_policy(mut self, policy: BrowserRecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
+        self
+    }
+
     pub fn with_max_pages(mut self, max_pages: usize) -> Self {
         self.max_pages = max_pages;
         self
@@ -1231,6 +1438,8 @@ pub enum BrowserKernelError {
     InvalidConfig(String),
     #[error("chromium browser is not available")]
     ChromiumNotAvailable,
+    #[error("browser crashed: {0}")]
+    BrowserCrashed(String),
     #[error("unsupported browser action: {0}")]
     UnsupportedAction(String),
     #[error("browser action failed: {0}")]
@@ -3533,6 +3742,271 @@ mod tests {
         assert!(matches!(error, BrowserKernelError::ActionFailed(_)));
     }
 
+    // ---- Browser crash recovery tests ----
+
+    #[test]
+    fn browser_crash_event_requires_page_id_for_page_scope() {
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::Page,
+            page_id: None,
+            reason: BrowserCrashReason::PageCrashed,
+            message: "renderer crashed".to_string(),
+            detected_at: ts(),
+        };
+
+        assert!(matches!(
+            event.validate(),
+            Err(BrowserKernelError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn browser_crash_event_rejects_empty_message() {
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::BrowserProcess,
+            page_id: None,
+            reason: BrowserCrashReason::ProcessExited,
+            message: " ".to_string(),
+            detected_at: ts(),
+        };
+
+        assert!(matches!(
+            event.validate(),
+            Err(BrowserKernelError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn browser_recovery_policy_fail_fast_returns_typed_plan() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::BrowserProcess,
+            page_id: None,
+            reason: BrowserCrashReason::BrowserDisconnected,
+            message: "websocket disconnected".to_string(),
+            detected_at: now,
+        };
+        let policy = BrowserRecoveryPolicy {
+            strategy: BrowserRecoveryStrategy::FailFast,
+            ..BrowserRecoveryPolicy::default()
+        };
+
+        let plan = policy.plan_recovery(&session, &event).unwrap();
+
+        assert_eq!(plan.strategy, BrowserRecoveryStrategy::FailFast);
+        assert!(matches!(plan.action, BrowserRecoveryAction::Fail { .. }));
+    }
+
+    #[test]
+    fn browser_recovery_policy_reopen_active_page_preserves_url() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        session
+            .open_page(
+                page_1.clone(),
+                Some("https://example.com/app".to_string()),
+                Some("App".to_string()),
+                now,
+            )
+            .unwrap();
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::Page,
+            page_id: Some(page_1.clone()),
+            reason: BrowserCrashReason::PageCrashed,
+            message: "renderer crashed".to_string(),
+            detected_at: now,
+        };
+        let policy = BrowserRecoveryPolicy {
+            strategy: BrowserRecoveryStrategy::ReopenActivePage,
+            ..BrowserRecoveryPolicy::default()
+        };
+
+        let plan = policy.plan_recovery(&session, &event).unwrap();
+
+        assert_eq!(plan.strategy, BrowserRecoveryStrategy::ReopenActivePage);
+        assert_eq!(
+            plan.action,
+            BrowserRecoveryAction::ReopenPage {
+                page_id: page_1,
+                url: Some("https://example.com/app".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_recovery_policy_relaunch_session_preserves_profile_and_pages() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(
+                BrowserProfileMode::Named("work".to_string()),
+                Some(PathBuf::from("/tmp/browser-profiles/work")),
+            ),
+            now,
+        );
+        session
+            .open_page(
+                BrowserPageId::new("page-1").unwrap(),
+                Some("https://example.com".to_string()),
+                Some("Example".to_string()),
+                now,
+            )
+            .unwrap();
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::BrowserProcess,
+            page_id: None,
+            reason: BrowserCrashReason::ProcessExited,
+            message: "chromium exited".to_string(),
+            detected_at: now,
+        };
+
+        let plan = BrowserRecoveryPolicy::default()
+            .plan_recovery(&session, &event)
+            .unwrap();
+
+        match plan.action {
+            BrowserRecoveryAction::RelaunchSession {
+                session_id,
+                profile,
+                pages,
+                retry_after_relaunch,
+            } => {
+                assert_eq!(session_id, BrowserSessionId("session-1".to_string()));
+                assert_eq!(profile.mode, BrowserProfileMode::Named("work".to_string()));
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].url.as_deref(), Some("https://example.com"));
+                assert!(retry_after_relaunch);
+            }
+            other => panic!("unexpected recovery action: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn browser_recovery_policy_rejects_zero_relaunch_attempts() {
+        let policy = BrowserRecoveryPolicy {
+            max_relaunch_attempts: 0,
+            ..BrowserRecoveryPolicy::default()
+        };
+
+        assert!(matches!(
+            policy.validate(),
+            Err(BrowserKernelError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn page_lifecycle_manager_records_page_crash() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 2).unwrap();
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        manager.open_page(page_1.clone(), None, None, now).unwrap();
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::Page,
+            page_id: Some(page_1.clone()),
+            reason: BrowserCrashReason::PageCrashed,
+            message: "renderer crashed".to_string(),
+            detected_at: now,
+        };
+
+        manager.record_crash(event).unwrap();
+
+        assert_eq!(
+            manager.session.page(&page_1).unwrap().status,
+            BrowserPageStatus::Crashed
+        );
+        assert_eq!(
+            manager.session.page(&page_1).unwrap().health.status,
+            BrowserPageHealthStatus::Crashed
+        );
+    }
+
+    #[test]
+    fn page_lifecycle_manager_records_browser_process_crash_for_open_pages() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 3).unwrap();
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        let page_2 = BrowserPageId::new("page-2").unwrap();
+        manager.open_page(page_1.clone(), None, None, now).unwrap();
+        manager.open_page(page_2.clone(), None, None, now).unwrap();
+        manager.close_page(&page_2, now).unwrap();
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::BrowserProcess,
+            page_id: None,
+            reason: BrowserCrashReason::ProcessExited,
+            message: "chromium exited".to_string(),
+            detected_at: now,
+        };
+
+        manager.record_crash(event).unwrap();
+
+        assert_eq!(
+            manager.session.page(&page_1).unwrap().status,
+            BrowserPageStatus::Crashed
+        );
+        assert_eq!(
+            manager.session.page(&page_2).unwrap().status,
+            BrowserPageStatus::Closed
+        );
+    }
+
+    #[test]
+    fn page_lifecycle_manager_recovery_plan_does_not_retry_mutation_actions_implicitly() {
+        let now = ts();
+        let session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let mut manager = BrowserPageLifecycleManager::new(session, 2).unwrap();
+        manager
+            .open_page(
+                BrowserPageId::new("page-1").unwrap(),
+                Some("https://example.com".to_string()),
+                None,
+                now,
+            )
+            .unwrap();
+        let event = BrowserCrashEvent {
+            scope: BrowserCrashScope::BrowserProcess,
+            page_id: None,
+            reason: BrowserCrashReason::ProcessExited,
+            message: "chromium exited".to_string(),
+            detected_at: now,
+        };
+
+        let plan = manager
+            .recover_from_crash(event, &BrowserRecoveryPolicy::default())
+            .unwrap();
+
+        match plan.action {
+            BrowserRecoveryAction::RelaunchSession {
+                retry_after_relaunch,
+                ..
+            } => assert!(retry_after_relaunch),
+            other => panic!("unexpected recovery action: {:?}", other),
+        }
+    }
+
     // ---- Config tests ----
 
     #[test]
@@ -3547,6 +4021,7 @@ mod tests {
         assert_eq!(config.timeouts.action_timeout_ms, 10_000);
         assert_eq!(config.timeouts.idle_shutdown_ms, 300_000);
         assert_eq!(config.prompt_policy, BrowserPromptPolicy::default());
+        assert_eq!(config.recovery_policy, BrowserRecoveryPolicy::default());
         assert_eq!(
             config.profile,
             BrowserProfileMode::Named("default".to_string())
@@ -3563,12 +4038,20 @@ mod tests {
                 device_scale_factor: 2.0,
             })
             .with_max_pages(3)
+            .with_recovery_policy(BrowserRecoveryPolicy {
+                strategy: BrowserRecoveryStrategy::FailFast,
+                ..BrowserRecoveryPolicy::default()
+            })
             .with_profile(BrowserProfileMode::Named("work".to_string()));
 
         assert_eq!(config.viewport.width, 1920);
         assert_eq!(config.viewport.height, 1080);
         assert_eq!(config.viewport.device_scale_factor, 2.0);
         assert_eq!(config.max_pages, 3);
+        assert_eq!(
+            config.recovery_policy.strategy,
+            BrowserRecoveryStrategy::FailFast
+        );
         assert_eq!(
             config.profile,
             BrowserProfileMode::Named("work".to_string())

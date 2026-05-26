@@ -1,41 +1,46 @@
 # Roadmap Progress
 
-## 2026-05-26 — Next action: M21 PR128 Browser crash recovery
+## 2026-05-26 — M21 PR128: Browser crash recovery
 
-Status: planned.
+Status: implemented.
 
-### Current baseline
+### Scope
 
-- Latest completed M21 work: PR127 Dialog / permission prompt handling.
-- Verification baseline: `cargo test --workspace` equivalent via manifest path passed with 1149 passed, 2 ignored.
-- Existing browser primitives include `BrowserPageHealthStatus::{Healthy, Unresponsive, Crashed, Closed}`, `BrowserPageStatus::Crashed`, `BrowserSession`, and `BrowserPageLifecycleManager`.
+- Added browser crash classification types:
+  - `BrowserCrashScope`
+  - `BrowserCrashReason`
+  - `BrowserCrashEvent`
+- Added deterministic session recovery policy and plan types:
+  - `BrowserRecoveryStrategy`
+  - `BrowserRecoveryPolicy`
+  - `BrowserRecoveryAction`
+  - `BrowserRecoveryPlan`
+- Added `BrowserPageLifecycleManager::record_crash(...)` to mark crashed pages or all open pages after browser process crash.
+- Added `BrowserPageLifecycleManager::recover_from_crash(...)` to produce host/runtime recovery plans after recording crash state.
+- Added `CdpBrowserConfig::recovery_policy` and `with_recovery_policy(...)` builder support.
+- Added typed `BrowserKernelError::BrowserCrashed(...)` for future CDP supervision integration.
+- Kept actual Chromium process supervision/relaunch plumbing outside this PR; PR128 defines the stable, testable recovery boundary.
 
-### Recommended scope
+### Acceptance coverage
 
-- Add browser crash classification types.
-- Add session/page recovery policy.
-- Add deterministic recovery plan generation.
-- Add retry-after-relaunch boundary without performing real process relaunch yet.
-- Keep actual CDP process supervision as a later integration step if needed.
+- Simulated page crash marks page status and health as crashed.
+- Browser process crash marks all non-closed pages as crashed while preserving closed pages.
+- Recovery policy supports fail-fast, reopen-active-page, and relaunch-session plans.
+- Relaunch recovery preserves session id, profile binding, page metadata, and retry-after-relaunch boundary.
+- Invalid page crash events and invalid relaunch policies are rejected with typed config errors.
+- Recovery plan does not replay mutation actions implicitly; it only exposes a host/runtime retry boundary.
 
-### Acceptance tests
+### Verification commands
 
-- Simulated page crash marks page status/health as crashed.
-- Recovery policy can choose fail-fast, reopen-active-page, or relaunch-session plan.
-- Recovery plan preserves profile binding and page URL metadata.
-- Non-idempotent mutation actions are not automatically retried after crash.
-- `cargo test -p browser-kernel-core` passes.
-- `cargo test --workspace` passes.
+```bash
+cargo test -p browser-kernel-core browser_crash_event
+cargo test -p browser-kernel-core browser_recovery_policy
+cargo test -p browser-kernel-core page_lifecycle_manager_records
+cargo test -p browser-kernel-core page_lifecycle_manager_recovery
+cargo test -p browser-kernel-core
+```
 
-### Implementation sequence
-
-1. RED: add failing tests for crash classification and recovery plan generation.
-2. GREEN: add minimal types and pure functions in `browser-kernel-core`.
-3. RED: add tests for lifecycle integration with `BrowserPageLifecycleManager`.
-4. GREEN: wire crash marking and recovery plan derivation into lifecycle manager.
-5. Verify with fmt, clippy, browser crate tests, workspace tests.
-
-### Next planned step after PR128
+### Next planned step
 
 M21 PR129: Frame / iframe support.
 
