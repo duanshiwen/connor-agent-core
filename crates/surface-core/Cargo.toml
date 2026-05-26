@@ -11,7 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+action-core = { path = "../action-core" }
 artifact-core = { path = "../artifact-core" }
+capability-policy = { path = "../capability-policy" }
 
 [dev-dependencies]
 tokio.workspace = true
