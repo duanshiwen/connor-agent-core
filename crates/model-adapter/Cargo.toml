@@ -12,7 +12,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 wiremock = "0.6"

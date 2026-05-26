@@ -16,6 +16,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Unique model identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -353,6 +355,201 @@ pub enum ModelAdapterError {
     EmptyResponse,
 }
 
+/// Retry/backoff configuration for model calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRetryConfig {
+    pub initial_delay: Duration,
+    pub multiplier: u32,
+    pub max_delay: Duration,
+    /// Maximum total attempts, including the initial attempt.
+    pub max_attempts: u32,
+}
+
+impl Default for ModelRetryConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_millis(250),
+            multiplier: 2,
+            max_delay: Duration::from_secs(10),
+            max_attempts: 3,
+        }
+    }
+}
+
+/// Provider-neutral model error classes used by retry policy decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRetryErrorClass {
+    RateLimited,
+    Timeout,
+    TransientNetwork,
+    ServerError,
+    Auth,
+    Validation,
+    PermissionDenied,
+    EmptyRequest,
+    EmptyResponse,
+    Unknown,
+}
+
+impl ModelRetryErrorClass {
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited | Self::Timeout | Self::TransientNetwork | Self::ServerError
+        )
+    }
+}
+
+/// Deterministic retry policy decision for one model call attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelRetryDecision {
+    Retry {
+        error_class: ModelRetryErrorClass,
+        attempt: u32,
+        delay: Duration,
+    },
+    DoNotRetry {
+        error_class: ModelRetryErrorClass,
+        attempt: u32,
+        reason: String,
+    },
+    Exhausted {
+        error_class: ModelRetryErrorClass,
+        attempt: u32,
+    },
+}
+
+/// Classify model adapter errors and calculate retry backoff.
+pub trait ModelRetryPolicy: Send + Sync {
+    fn classify_error(&self, error: &ModelAdapterError) -> ModelRetryErrorClass;
+    fn backoff_delay(&self, attempt: u32) -> Option<Duration>;
+
+    fn decide(&self, error: &ModelAdapterError, attempt: u32) -> ModelRetryDecision {
+        let error_class = self.classify_error(error);
+        if !error_class.is_retryable() {
+            return ModelRetryDecision::DoNotRetry {
+                error_class,
+                attempt,
+                reason: format!("{error_class:?} is not retryable"),
+            };
+        }
+
+        match self.backoff_delay(attempt) {
+            Some(delay) => ModelRetryDecision::Retry {
+                error_class,
+                attempt,
+                delay,
+            },
+            None => ModelRetryDecision::Exhausted {
+                error_class,
+                attempt,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultModelRetryPolicy {
+    config: ModelRetryConfig,
+}
+
+impl DefaultModelRetryPolicy {
+    pub fn new(config: ModelRetryConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> &ModelRetryConfig {
+        &self.config
+    }
+}
+
+impl Default for DefaultModelRetryPolicy {
+    fn default() -> Self {
+        Self::new(ModelRetryConfig::default())
+    }
+}
+
+impl ModelRetryPolicy for DefaultModelRetryPolicy {
+    fn classify_error(&self, error: &ModelAdapterError) -> ModelRetryErrorClass {
+        classify_model_adapter_error(error)
+    }
+
+    fn backoff_delay(&self, attempt: u32) -> Option<Duration> {
+        if attempt == 0 || attempt >= self.config.max_attempts {
+            return None;
+        }
+        let exponent = attempt.saturating_sub(1);
+        let factor = self.config.multiplier.saturating_pow(exponent);
+        let delay = self.config.initial_delay.saturating_mul(factor);
+        Some(delay.min(self.config.max_delay))
+    }
+}
+
+pub fn classify_model_adapter_error(error: &ModelAdapterError) -> ModelRetryErrorClass {
+    match error {
+        ModelAdapterError::RateLimitExceeded => ModelRetryErrorClass::RateLimited,
+        ModelAdapterError::AuthError(_) => ModelRetryErrorClass::Auth,
+        ModelAdapterError::EmptyRequest => ModelRetryErrorClass::EmptyRequest,
+        ModelAdapterError::EmptyResponse => ModelRetryErrorClass::EmptyResponse,
+        ModelAdapterError::MalformedToolCallArguments(_)
+        | ModelAdapterError::MissingToolCallName
+        | ModelAdapterError::MissingToolCallId => ModelRetryErrorClass::Validation,
+        ModelAdapterError::ConfigError(_)
+        | ModelAdapterError::ModelNotFound(_)
+        | ModelAdapterError::DuplicateModelId(_)
+        | ModelAdapterError::DefaultModelNotSet => ModelRetryErrorClass::Validation,
+        ModelAdapterError::HttpError(message) | ModelAdapterError::ExecutorFailed(message) => {
+            classify_model_error_message(message)
+        }
+    }
+}
+
+pub fn classify_model_error_message(message: &str) -> ModelRetryErrorClass {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("429")
+        || normalized.contains("rate limit")
+        || normalized.contains("too many requests")
+    {
+        return ModelRetryErrorClass::RateLimited;
+    }
+    if normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("deadline")
+    {
+        return ModelRetryErrorClass::Timeout;
+    }
+    if normalized.contains("401")
+        || normalized.contains("403")
+        || normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+        || normalized.contains("permission denied")
+    {
+        return ModelRetryErrorClass::PermissionDenied;
+    }
+    if normalized.contains("400")
+        || normalized.contains("bad request")
+        || normalized.contains("invalid request")
+        || normalized.contains("validation")
+    {
+        return ModelRetryErrorClass::Validation;
+    }
+    if normalized.contains("500") || normalized.contains("server error") {
+        return ModelRetryErrorClass::ServerError;
+    }
+    if normalized.contains("network")
+        || normalized.contains("connection reset")
+        || normalized.contains("connection refused")
+        || normalized.contains("temporarily unavailable")
+        || normalized.contains("502")
+        || normalized.contains("503")
+        || normalized.contains("504")
+    {
+        return ModelRetryErrorClass::TransientNetwork;
+    }
+    ModelRetryErrorClass::Unknown
+}
+
 /// Async model adapter trait — text-only completion.
 #[async_trait]
 pub trait ModelAdapter: Send + Sync {
@@ -370,6 +567,85 @@ pub trait StreamingModelAdapter: ModelAdapter {
         &self,
         request: ModelRequest,
     ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError>;
+}
+
+/// Adapter wrapper that retries provider calls according to a deterministic policy.
+pub struct RetryingModelAdapter<A> {
+    inner: A,
+    policy: Arc<dyn ModelRetryPolicy>,
+}
+
+impl<A> RetryingModelAdapter<A> {
+    pub fn new(inner: A, policy: impl ModelRetryPolicy + 'static) -> Self {
+        Self {
+            inner,
+            policy: Arc::new(policy),
+        }
+    }
+
+    pub fn inner(&self) -> &A {
+        &self.inner
+    }
+}
+
+impl<A> fmt::Debug for RetryingModelAdapter<A>
+where
+    A: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetryingModelAdapter")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl<A> ModelAdapter for RetryingModelAdapter<A>
+where
+    A: ModelAdapter + Send + Sync,
+{
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+        let mut attempt = 1;
+        loop {
+            match self.inner.complete(request.clone()).await {
+                Ok(output) => return Ok(output),
+                Err(error) => match self.policy.decide(&error, attempt) {
+                    ModelRetryDecision::Retry { delay, .. } => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    ModelRetryDecision::DoNotRetry { .. }
+                    | ModelRetryDecision::Exhausted { .. } => return Err(error),
+                },
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<A> StreamingModelAdapter for RetryingModelAdapter<A>
+where
+    A: StreamingModelAdapter + Send + Sync,
+{
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        let mut attempt = 1;
+        loop {
+            match self.inner.stream(request.clone()).await {
+                Ok(events) => return Ok(events),
+                Err(error) => match self.policy.decide(&error, attempt) {
+                    ModelRetryDecision::Retry { delay, .. } => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    ModelRetryDecision::DoNotRetry { .. }
+                    | ModelRetryDecision::Exhausted { .. } => return Err(error),
+                },
+            }
+        }
+    }
 }
 
 /// Extended adapter that supports tool / function calling.
@@ -600,6 +876,148 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Debug)]
+    struct FlakyModelAdapter {
+        failures_before_success: u32,
+        calls: Arc<AtomicU32>,
+        error: ModelAdapterError,
+    }
+
+    #[async_trait]
+    impl ModelAdapter for FlakyModelAdapter {
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call <= self.failures_before_success {
+                return Err(self.error.clone());
+            }
+            Ok(ModelOutput::Text {
+                text: "ok".to_string(),
+                usage: None,
+            })
+        }
+    }
+
+    fn no_delay_retry_policy(max_attempts: u32) -> DefaultModelRetryPolicy {
+        DefaultModelRetryPolicy::new(ModelRetryConfig {
+            initial_delay: Duration::ZERO,
+            multiplier: 2,
+            max_delay: Duration::ZERO,
+            max_attempts,
+        })
+    }
+
+    #[test]
+    fn retry_classifier_marks_429_5xx_timeout_and_validation() {
+        assert_eq!(
+            classify_model_adapter_error(&ModelAdapterError::RateLimitExceeded),
+            ModelRetryErrorClass::RateLimited
+        );
+        assert_eq!(
+            classify_model_adapter_error(&ModelAdapterError::ExecutorFailed(
+                "provider returned HTTP 503 temporarily unavailable".to_string()
+            )),
+            ModelRetryErrorClass::TransientNetwork
+        );
+        assert_eq!(
+            classify_model_adapter_error(&ModelAdapterError::HttpError(
+                "request timeout exceeded".to_string()
+            )),
+            ModelRetryErrorClass::Timeout
+        );
+        assert_eq!(
+            classify_model_adapter_error(&ModelAdapterError::ExecutorFailed(
+                "invalid request: bad request 400".to_string()
+            )),
+            ModelRetryErrorClass::Validation
+        );
+    }
+
+    #[test]
+    fn retry_backoff_is_deterministic_and_capped() {
+        let policy = DefaultModelRetryPolicy::new(ModelRetryConfig {
+            initial_delay: Duration::from_millis(100),
+            multiplier: 2,
+            max_delay: Duration::from_millis(250),
+            max_attempts: 5,
+        });
+
+        assert_eq!(policy.backoff_delay(0), None);
+        assert_eq!(policy.backoff_delay(1), Some(Duration::from_millis(100)));
+        assert_eq!(policy.backoff_delay(2), Some(Duration::from_millis(200)));
+        assert_eq!(policy.backoff_delay(3), Some(Duration::from_millis(250)));
+        assert_eq!(policy.backoff_delay(5), None);
+    }
+
+    #[tokio::test]
+    async fn retrying_adapter_retries_rate_limit_then_succeeds() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let inner = FlakyModelAdapter {
+            failures_before_success: 2,
+            calls: Arc::clone(&calls),
+            error: ModelAdapterError::RateLimitExceeded,
+        };
+        let adapter = RetryingModelAdapter::new(inner, no_delay_retry_policy(3));
+
+        let output = adapter
+            .complete(ModelRequest::new(
+                "fake/default",
+                vec![ModelMessage::user("hi")],
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(output.text(), Some("ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retrying_adapter_does_not_retry_validation_error() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let inner = FlakyModelAdapter {
+            failures_before_success: 1,
+            calls: Arc::clone(&calls),
+            error: ModelAdapterError::MalformedToolCallArguments("bad json".to_string()),
+        };
+        let adapter = RetryingModelAdapter::new(inner, no_delay_retry_policy(3));
+
+        let err = adapter
+            .complete(ModelRequest::new(
+                "fake/default",
+                vec![ModelMessage::user("hi")],
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            ModelAdapterError::MalformedToolCallArguments("bad json".to_string())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retrying_adapter_stops_at_max_attempts() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let inner = FlakyModelAdapter {
+            failures_before_success: 99,
+            calls: Arc::clone(&calls),
+            error: ModelAdapterError::RateLimitExceeded,
+        };
+        let adapter = RetryingModelAdapter::new(inner, no_delay_retry_policy(2));
+
+        let err = adapter
+            .complete(ModelRequest::new(
+                "fake/default",
+                vec![ModelMessage::user("hi")],
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, ModelAdapterError::RateLimitExceeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn stream_event_serde_roundtrip() {
