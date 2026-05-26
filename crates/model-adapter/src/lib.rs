@@ -53,28 +53,114 @@ pub enum ModelProvider {
     Custom(String),
 }
 
+/// Provider-neutral capabilities supported by a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_json: bool,
+    pub max_context_tokens: Option<u32>,
+}
+
+impl ModelCapabilities {
+    pub fn text_only() -> Self {
+        Self {
+            supports_streaming: false,
+            supports_tools: false,
+            supports_vision: false,
+            supports_json: false,
+            max_context_tokens: None,
+        }
+    }
+
+    pub fn tool_calling() -> Self {
+        Self {
+            supports_tools: true,
+            supports_json: true,
+            ..Self::text_only()
+        }
+    }
+
+    pub fn streaming(mut self, supported: bool) -> Self {
+        self.supports_streaming = supported;
+        self
+    }
+
+    pub fn vision(mut self, supported: bool) -> Self {
+        self.supports_vision = supported;
+        self
+    }
+
+    pub fn json(mut self, supported: bool) -> Self {
+        self.supports_json = supported;
+        self
+    }
+
+    pub fn max_context_tokens(mut self, tokens: u32) -> Self {
+        self.max_context_tokens = Some(tokens);
+        self
+    }
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self::text_only()
+    }
+}
+
 /// Registry metadata for a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelProfile {
     pub id: ModelId,
     pub provider: ModelProvider,
     pub display_name: String,
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub max_context_tokens: Option<u32>,
+    pub capabilities: ModelCapabilities,
 }
 
 impl ModelProfile {
+    pub fn new(
+        id: impl Into<ModelId>,
+        provider: ModelProvider,
+        display_name: impl Into<String>,
+        capabilities: ModelCapabilities,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            provider,
+            display_name: display_name.into(),
+            capabilities,
+        }
+    }
+
     pub fn fake(id: impl Into<ModelId>) -> Self {
         let id = id.into();
         Self {
             display_name: id.to_string(),
             id,
             provider: ModelProvider::Fake,
-            supports_streaming: false,
-            supports_tools: false,
-            max_context_tokens: None,
+            capabilities: ModelCapabilities::text_only(),
         }
+    }
+
+    pub fn supports_streaming(&self) -> bool {
+        self.capabilities.supports_streaming
+    }
+
+    pub fn supports_tools(&self) -> bool {
+        self.capabilities.supports_tools
+    }
+
+    pub fn supports_vision(&self) -> bool {
+        self.capabilities.supports_vision
+    }
+
+    pub fn supports_json(&self) -> bool {
+        self.capabilities.supports_json
+    }
+
+    pub fn max_context_tokens(&self) -> Option<u32> {
+        self.capabilities.max_context_tokens
     }
 }
 
@@ -320,6 +406,12 @@ pub enum ModelAdapterError {
 
     #[error("model not found: {0}")]
     ModelNotFound(ModelId),
+
+    #[error("model capability unsupported: {model_id} does not support {capability}")]
+    UnsupportedModelCapability {
+        model_id: ModelId,
+        capability: &'static str,
+    },
 
     #[error("duplicate model id: {0}")]
     DuplicateModelId(ModelId),
@@ -667,6 +759,7 @@ pub fn classify_model_adapter_error(error: &ModelAdapterError) -> ModelRetryErro
         | ModelAdapterError::MissingToolCallId => ModelRetryErrorClass::Validation,
         ModelAdapterError::ConfigError(_)
         | ModelAdapterError::ModelNotFound(_)
+        | ModelAdapterError::UnsupportedModelCapability { .. }
         | ModelAdapterError::DuplicateModelId(_)
         | ModelAdapterError::DefaultModelNotSet => ModelRetryErrorClass::Validation,
         ModelAdapterError::HttpError(message) | ModelAdapterError::ExecutorFailed(message) => {
@@ -1047,6 +1140,52 @@ pub trait ToolCallingModelAdapter: ModelAdapter {
     ) -> Result<ModelOutput, ModelAdapterError>;
 }
 
+/// Tool-calling adapter wrapper that enforces registry capabilities before calls.
+pub struct CapabilityGatedToolAdapter<A> {
+    inner: A,
+    registry: Arc<ModelRegistry>,
+}
+
+impl<A> CapabilityGatedToolAdapter<A> {
+    pub fn new(inner: A, registry: Arc<ModelRegistry>) -> Self {
+        Self { inner, registry }
+    }
+
+    pub fn registry(&self) -> &ModelRegistry {
+        self.registry.as_ref()
+    }
+}
+
+#[async_trait]
+impl<A> ModelAdapter for CapabilityGatedToolAdapter<A>
+where
+    A: ToolCallingModelAdapter + Send + Sync,
+{
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+        self.inner.complete(request).await
+    }
+}
+
+#[async_trait]
+impl<A> ToolCallingModelAdapter for CapabilityGatedToolAdapter<A>
+where
+    A: ToolCallingModelAdapter + Send + Sync,
+{
+    async fn complete_with_tools(
+        &self,
+        request: ModelRequest,
+        tools: Vec<ToolDefinition>,
+        tool_choice: ToolChoice,
+    ) -> Result<ModelOutput, ModelAdapterError> {
+        if !tools.is_empty() || matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)) {
+            self.registry.require_tools(&request.model_id)?;
+        }
+        self.inner
+            .complete_with_tools(request, tools, tool_choice)
+            .await
+    }
+}
+
 /// Deterministic fake adapter for tests and early runtime integration.
 #[derive(Debug, Clone)]
 pub struct FakeModelAdapter {
@@ -1238,6 +1377,45 @@ impl ModelRegistry {
         self.models.get(model_id)
     }
 
+    pub fn require_tools(&self, model_id: &ModelId) -> Result<&ModelProfile, ModelAdapterError> {
+        self.require_capability(model_id, "tools", ModelProfile::supports_tools)
+    }
+
+    pub fn require_streaming(
+        &self,
+        model_id: &ModelId,
+    ) -> Result<&ModelProfile, ModelAdapterError> {
+        self.require_capability(model_id, "streaming", ModelProfile::supports_streaming)
+    }
+
+    pub fn require_json(&self, model_id: &ModelId) -> Result<&ModelProfile, ModelAdapterError> {
+        self.require_capability(model_id, "json", ModelProfile::supports_json)
+    }
+
+    pub fn require_vision(&self, model_id: &ModelId) -> Result<&ModelProfile, ModelAdapterError> {
+        self.require_capability(model_id, "vision", ModelProfile::supports_vision)
+    }
+
+    fn require_capability(
+        &self,
+        model_id: &ModelId,
+        capability: &'static str,
+        predicate: impl Fn(&ModelProfile) -> bool,
+    ) -> Result<&ModelProfile, ModelAdapterError> {
+        let profile = self
+            .models
+            .get(model_id)
+            .ok_or_else(|| ModelAdapterError::ModelNotFound(model_id.clone()))?;
+        if predicate(profile) {
+            Ok(profile)
+        } else {
+            Err(ModelAdapterError::UnsupportedModelCapability {
+                model_id: model_id.clone(),
+                capability,
+            })
+        }
+    }
+
     pub fn default_model(&self) -> Result<&ModelProfile, ModelAdapterError> {
         let model_id = self
             .default_model_id
@@ -1261,6 +1439,35 @@ impl ModelRegistry {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Debug)]
+    struct EchoToolAdapter;
+
+    #[async_trait]
+    impl ModelAdapter for EchoToolAdapter {
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+            Ok(ModelOutput::Text {
+                text: "ok".to_string(),
+                usage: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ToolCallingModelAdapter for EchoToolAdapter {
+        async fn complete_with_tools(
+            &self,
+            _request: ModelRequest,
+            _tools: Vec<ToolDefinition>,
+            _tool_choice: ToolChoice,
+        ) -> Result<ModelOutput, ModelAdapterError> {
+            Ok(ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+    }
 
     #[derive(Debug)]
     struct FlakyModelAdapter {
@@ -1839,6 +2046,110 @@ mod tests {
             error,
             ModelAdapterError::DuplicateModelId(ModelId::from("fake/default"))
         );
+    }
+
+    #[test]
+    fn model_registry_tracks_provider_neutral_capabilities() {
+        let profile = ModelProfile::new(
+            "openai/gpt-test",
+            ModelProvider::OpenAi,
+            "GPT Test",
+            ModelCapabilities::tool_calling()
+                .streaming(true)
+                .vision(true)
+                .max_context_tokens(128_000),
+        );
+
+        assert!(profile.supports_tools());
+        assert!(profile.supports_streaming());
+        assert!(profile.supports_vision());
+        assert!(profile.supports_json());
+        assert_eq!(profile.max_context_tokens(), Some(128_000));
+    }
+
+    #[test]
+    fn model_registry_requires_capability_before_tool_use() {
+        let mut registry = ModelRegistry::new();
+        registry
+            .register(ModelProfile::fake("fake/text-only"))
+            .unwrap();
+        registry
+            .register(ModelProfile::new(
+                "fake/tools",
+                ModelProvider::Fake,
+                "Fake Tools",
+                ModelCapabilities::tool_calling(),
+            ))
+            .unwrap();
+
+        let text_only = ModelId::from("fake/text-only");
+        let tool_model = ModelId::from("fake/tools");
+
+        assert!(matches!(
+            registry.require_tools(&text_only),
+            Err(ModelAdapterError::UnsupportedModelCapability {
+                capability: "tools",
+                ..
+            })
+        ));
+        assert_eq!(registry.require_tools(&tool_model).unwrap().id, tool_model);
+    }
+
+    #[tokio::test]
+    async fn capability_gated_tool_adapter_blocks_unsupported_model() {
+        let mut registry = ModelRegistry::new();
+        registry
+            .register(ModelProfile::fake("fake/text-only"))
+            .unwrap();
+        let adapter = CapabilityGatedToolAdapter::new(EchoToolAdapter, Arc::new(registry));
+        let err = adapter
+            .complete_with_tools(
+                ModelRequest::new("fake/text-only", vec![ModelMessage::user("search")]),
+                vec![ToolDefinition {
+                    name: "knowledge.search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                }],
+                ToolChoice::Auto,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ModelAdapterError::UnsupportedModelCapability {
+                capability: "tools",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn capability_gated_tool_adapter_allows_supported_model() {
+        let mut registry = ModelRegistry::new();
+        registry
+            .register(ModelProfile::new(
+                "fake/tools",
+                ModelProvider::Fake,
+                "Fake Tools",
+                ModelCapabilities::tool_calling(),
+            ))
+            .unwrap();
+        let adapter = CapabilityGatedToolAdapter::new(EchoToolAdapter, Arc::new(registry));
+        let output = adapter
+            .complete_with_tools(
+                ModelRequest::new("fake/tools", vec![ModelMessage::user("search")]),
+                vec![ToolDefinition {
+                    name: "knowledge.search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                }],
+                ToolChoice::Auto,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output, ModelOutput::ToolCalls { .. }));
     }
 
     #[test]
