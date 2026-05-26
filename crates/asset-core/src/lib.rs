@@ -7,6 +7,7 @@
 //! observed, captured, processed, and linked to work objects without becoming
 //! foreground conversation participants.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -278,6 +279,137 @@ impl AssetPolicy {
     }
 }
 
+/// Supported extraction pipeline boundary for assets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetExtractionKind {
+    Pdf,
+    Docx,
+    ImageOcr,
+    Spreadsheet,
+    Slide,
+    VideoMetadata,
+}
+
+impl AssetExtractionKind {
+    pub fn from_asset_kind(kind: &AssetKind) -> Result<Self, AssetExtractionError> {
+        match kind {
+            AssetKind::Pdf => Ok(Self::Pdf),
+            AssetKind::Document => Ok(Self::Docx),
+            AssetKind::Image => Ok(Self::ImageOcr),
+            AssetKind::Spreadsheet => Ok(Self::Spreadsheet),
+            AssetKind::Slide => Ok(Self::Slide),
+            AssetKind::VideoReference => Ok(Self::VideoMetadata),
+            unsupported => Err(AssetExtractionError::UnsupportedAssetKind(
+                unsupported.clone(),
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::ImageOcr => "image_ocr",
+            Self::Spreadsheet => "spreadsheet",
+            Self::Slide => "slide",
+            Self::VideoMetadata => "video_metadata",
+        }
+    }
+}
+
+/// Input to an asset processor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetExtractionRequest {
+    pub asset_id: AssetId,
+    pub asset_kind: AssetKind,
+    pub extraction_kind: AssetExtractionKind,
+    pub source_uri: Option<String>,
+    pub mime_type: Option<String>,
+    pub requested_at: DateTime<Utc>,
+}
+
+impl AssetExtractionRequest {
+    pub fn from_metadata(metadata: AssetMetadata, requested_at: DateTime<Utc>) -> Self {
+        let extraction_kind = AssetExtractionKind::from_asset_kind(&metadata.kind)
+            .unwrap_or(AssetExtractionKind::VideoMetadata);
+        Self {
+            asset_id: metadata.id,
+            asset_kind: metadata.kind,
+            extraction_kind,
+            source_uri: metadata.source.uri,
+            mime_type: metadata.mime_type,
+            requested_at,
+        }
+    }
+}
+
+/// Output from an asset processor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetExtractionResult {
+    pub asset_id: AssetId,
+    pub extraction_kind: AssetExtractionKind,
+    pub status: AssetProcessingStatus,
+    pub extracted_text: Option<String>,
+    pub metadata: serde_json::Value,
+    pub processed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AssetExtractionError {
+    #[error("unsupported asset kind for extraction: {0:?}")]
+    UnsupportedAssetKind(AssetKind),
+    #[error("asset extraction failed: {0}")]
+    Failed(String),
+}
+
+#[async_trait]
+pub trait AssetProcessor: Send + Sync {
+    async fn extract(
+        &self,
+        request: AssetExtractionRequest,
+    ) -> Result<AssetExtractionResult, AssetExtractionError>;
+}
+
+/// Deterministic fake processor for tests and early pipeline wiring.
+#[derive(Debug, Clone, Default)]
+pub struct FakeAssetProcessor;
+
+impl FakeAssetProcessor {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl AssetProcessor for FakeAssetProcessor {
+    async fn extract(
+        &self,
+        request: AssetExtractionRequest,
+    ) -> Result<AssetExtractionResult, AssetExtractionError> {
+        let extraction_kind = AssetExtractionKind::from_asset_kind(&request.asset_kind)?;
+        let metadata = serde_json::json!({
+            "processor": "fake",
+            "asset_kind": request.asset_kind,
+            "extraction_kind": extraction_kind.as_str(),
+            "source_uri": request.source_uri,
+            "mime_type": request.mime_type,
+        });
+        Ok(AssetExtractionResult {
+            extracted_text: Some(format!(
+                "fake {} extraction for {}",
+                extraction_kind.as_str(),
+                request.asset_id
+            )),
+            asset_id: request.asset_id,
+            extraction_kind,
+            status: AssetProcessingStatus::Processed,
+            metadata,
+            processed_at: request.requested_at,
+        })
+    }
+}
+
 /// Errors from asset registry operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AssetRegistryError {
@@ -354,6 +486,138 @@ mod tests {
             "2026-05-24T12:00:00Z".parse().unwrap(),
         )
         .with_title("Example Video")
+    }
+
+    #[test]
+    fn asset_extraction_kind_roundtrips() {
+        let kinds = vec![
+            AssetExtractionKind::Pdf,
+            AssetExtractionKind::Docx,
+            AssetExtractionKind::ImageOcr,
+            AssetExtractionKind::Spreadsheet,
+            AssetExtractionKind::Slide,
+            AssetExtractionKind::VideoMetadata,
+        ];
+        let json = serde_json::to_string(&kinds).unwrap();
+        let decoded: Vec<AssetExtractionKind> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, kinds);
+    }
+
+    #[test]
+    fn asset_extraction_request_infers_kind_from_asset_metadata() {
+        let pdf = AssetMetadata::new(
+            "asset-pdf-1",
+            AssetKind::Pdf,
+            AssetSource::new("2026-05-24T12:00:00Z".parse().unwrap()),
+            AssetRelevance::High,
+            "2026-05-24T12:00:00Z".parse().unwrap(),
+        );
+        let request =
+            AssetExtractionRequest::from_metadata(pdf, "2026-05-24T12:00:00Z".parse().unwrap());
+        assert_eq!(request.extraction_kind, AssetExtractionKind::Pdf);
+        assert_eq!(request.asset_id, AssetId::from("asset-pdf-1"));
+    }
+
+    #[tokio::test]
+    async fn fake_asset_processor_extracts_pdf_docx_ocr_spreadsheet_slide_and_video_metadata() {
+        let processor = FakeAssetProcessor::new();
+        let assets = vec![
+            ("asset-pdf", AssetKind::Pdf, AssetExtractionKind::Pdf),
+            ("asset-docx", AssetKind::Document, AssetExtractionKind::Docx),
+            (
+                "asset-image",
+                AssetKind::Image,
+                AssetExtractionKind::ImageOcr,
+            ),
+            (
+                "asset-sheet",
+                AssetKind::Spreadsheet,
+                AssetExtractionKind::Spreadsheet,
+            ),
+            ("asset-slide", AssetKind::Slide, AssetExtractionKind::Slide),
+            (
+                "asset-video",
+                AssetKind::VideoReference,
+                AssetExtractionKind::VideoMetadata,
+            ),
+        ];
+
+        for (id, kind, extraction_kind) in assets {
+            let metadata = AssetMetadata::new(
+                id,
+                kind,
+                AssetSource::new("2026-05-24T12:00:00Z".parse().unwrap()),
+                AssetRelevance::High,
+                "2026-05-24T12:00:00Z".parse().unwrap(),
+            );
+            let result = processor
+                .extract(AssetExtractionRequest::from_metadata(
+                    metadata,
+                    "2026-05-24T12:00:00Z".parse().unwrap(),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(result.asset_id, AssetId::from(id));
+            assert_eq!(result.extraction_kind, extraction_kind);
+            assert_eq!(result.status, AssetProcessingStatus::Processed);
+            assert!(result.extracted_text.as_ref().unwrap().contains(id));
+            assert_eq!(result.metadata["processor"], "fake");
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_asset_processor_rejects_unsupported_unknown_assets() {
+        let processor = FakeAssetProcessor::new();
+        let metadata = AssetMetadata::new(
+            "asset-unknown",
+            AssetKind::Unknown,
+            AssetSource::new("2026-05-24T12:00:00Z".parse().unwrap()),
+            AssetRelevance::Low,
+            "2026-05-24T12:00:00Z".parse().unwrap(),
+        );
+
+        assert_eq!(
+            processor
+                .extract(AssetExtractionRequest::from_metadata(
+                    metadata,
+                    "2026-05-24T12:00:00Z".parse().unwrap(),
+                ))
+                .await
+                .unwrap_err(),
+            AssetExtractionError::UnsupportedAssetKind(AssetKind::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_asset_processor_records_processed_at_and_metadata() {
+        let processor = FakeAssetProcessor::new();
+        let metadata = AssetMetadata::new(
+            "asset-video",
+            AssetKind::VideoReference,
+            AssetSource::new("2026-05-24T12:00:00Z".parse().unwrap())
+                .with_uri("https://example.com/video.mp4"),
+            AssetRelevance::Medium,
+            "2026-05-24T12:00:00Z".parse().unwrap(),
+        );
+
+        let result = processor
+            .extract(AssetExtractionRequest::from_metadata(
+                metadata,
+                "2026-05-24T13:00:00Z".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.processed_at,
+            "2026-05-24T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            result.metadata["source_uri"],
+            "https://example.com/video.mp4"
+        );
+        assert_eq!(result.metadata["extraction_kind"], "video_metadata");
     }
 
     #[test]
