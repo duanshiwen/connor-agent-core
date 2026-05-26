@@ -333,6 +333,15 @@ pub enum ModelAdapterError {
     #[error("malformed tool call arguments: {0}")]
     MalformedToolCallArguments(String),
 
+    #[error("malformed structured output: {0}")]
+    MalformedStructuredOutput(String),
+
+    #[error("structured output schema violation: {0}")]
+    StructuredOutputSchemaViolation(String),
+
+    #[error("structured output repair failed: {0}")]
+    StructuredOutputRepairFailed(String),
+
     #[error("missing tool call function name")]
     MissingToolCallName,
 
@@ -353,6 +362,164 @@ pub enum ModelAdapterError {
 
     #[error("empty response")]
     EmptyResponse,
+}
+
+/// Structured output format requested from a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredOutputFormat {
+    pub name: String,
+    pub schema: serde_json::Value,
+    pub strict: bool,
+}
+
+impl StructuredOutputFormat {
+    pub fn json_schema(name: impl Into<String>, schema: serde_json::Value) -> Self {
+        Self {
+            name: name.into(),
+            schema,
+            strict: true,
+        }
+    }
+}
+
+/// Structured output validation result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructuredOutput {
+    pub value: serde_json::Value,
+}
+
+/// Optional hook that can repair invalid structured output before validation fails.
+pub trait StructuredOutputRepairPolicy: Send + Sync {
+    fn repair(
+        &self,
+        raw: &str,
+        format: &StructuredOutputFormat,
+        error: &ModelAdapterError,
+    ) -> Option<String>;
+}
+
+/// No-op repair policy: invalid structured output remains invalid.
+#[derive(Debug, Clone, Default)]
+pub struct NoopStructuredOutputRepairPolicy;
+
+impl StructuredOutputRepairPolicy for NoopStructuredOutputRepairPolicy {
+    fn repair(
+        &self,
+        _raw: &str,
+        _format: &StructuredOutputFormat,
+        _error: &ModelAdapterError,
+    ) -> Option<String> {
+        None
+    }
+}
+
+/// Deterministic structured output validator for JSON object schemas.
+pub struct StructuredOutputValidator<'a> {
+    format: &'a StructuredOutputFormat,
+    repair_policy: Option<&'a dyn StructuredOutputRepairPolicy>,
+}
+
+impl<'a> StructuredOutputValidator<'a> {
+    pub fn new(format: &'a StructuredOutputFormat) -> Self {
+        Self {
+            format,
+            repair_policy: None,
+        }
+    }
+
+    pub fn with_repair_policy(
+        format: &'a StructuredOutputFormat,
+        repair_policy: &'a dyn StructuredOutputRepairPolicy,
+    ) -> Self {
+        Self {
+            format,
+            repair_policy: Some(repair_policy),
+        }
+    }
+
+    pub fn validate(&self, raw: &str) -> Result<StructuredOutput, ModelAdapterError> {
+        match self.validate_once(raw) {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                let Some(repair_policy) = self.repair_policy else {
+                    return Err(error);
+                };
+                let Some(repaired) = repair_policy.repair(raw, self.format, &error) else {
+                    return Err(error);
+                };
+                self.validate_once(&repaired).map_err(|repair_error| {
+                    ModelAdapterError::StructuredOutputRepairFailed(repair_error.to_string())
+                })
+            }
+        }
+    }
+
+    fn validate_once(&self, raw: &str) -> Result<StructuredOutput, ModelAdapterError> {
+        let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+            ModelAdapterError::MalformedStructuredOutput(format!("{}: {error}", self.format.name))
+        })?;
+        validate_json_schema_subset(&value, &self.format.schema)
+            .map_err(ModelAdapterError::StructuredOutputSchemaViolation)?;
+        Ok(StructuredOutput { value })
+    }
+}
+
+fn validate_json_schema_subset(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(schema_type) = schema.get("type").and_then(serde_json::Value::as_str) {
+        validate_json_type(value, schema_type, "$")?;
+    }
+
+    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "$: expected object for required properties".to_string())?;
+        for key in required.iter().filter_map(serde_json::Value::as_str) {
+            if !object.contains_key(key) {
+                return Err(format!("$: missing required property `{key}`"));
+            }
+        }
+    }
+
+    if let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "$: expected object for properties".to_string())?;
+        for (key, property_schema) in properties {
+            if let Some(property_value) = object.get(key)
+                && let Some(property_type) = property_schema
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+            {
+                validate_json_type(property_value, property_type, &format!("$.{key}"))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_json_type(value: &serde_json::Value, expected: &str, path: &str) -> Result<(), String> {
+    let valid = match expected {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => return Ok(()),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{path}: expected {expected}"))
+    }
 }
 
 /// Retry/backoff configuration for model calls.
@@ -493,6 +660,9 @@ pub fn classify_model_adapter_error(error: &ModelAdapterError) -> ModelRetryErro
         ModelAdapterError::EmptyRequest => ModelRetryErrorClass::EmptyRequest,
         ModelAdapterError::EmptyResponse => ModelRetryErrorClass::EmptyResponse,
         ModelAdapterError::MalformedToolCallArguments(_)
+        | ModelAdapterError::MalformedStructuredOutput(_)
+        | ModelAdapterError::StructuredOutputSchemaViolation(_)
+        | ModelAdapterError::StructuredOutputRepairFailed(_)
         | ModelAdapterError::MissingToolCallName
         | ModelAdapterError::MissingToolCallId => ModelRetryErrorClass::Validation,
         ModelAdapterError::ConfigError(_)
@@ -1120,6 +1290,109 @@ mod tests {
             max_delay: Duration::ZERO,
             max_attempts,
         })
+    }
+
+    fn task_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["title", "priority"],
+            "properties": {
+                "title": {"type": "string"},
+                "priority": {"type": "integer"},
+                "done": {"type": "boolean"}
+            }
+        })
+    }
+
+    #[test]
+    fn structured_output_validator_accepts_matching_json() {
+        let format = StructuredOutputFormat::json_schema("task", task_schema());
+        let output = StructuredOutputValidator::new(&format)
+            .validate(r#"{"title":"ship","priority":2,"done":false}"#)
+            .unwrap();
+
+        assert_eq!(output.value["title"], "ship");
+        assert_eq!(output.value["priority"], 2);
+    }
+
+    #[test]
+    fn structured_output_validator_rejects_malformed_json() {
+        let format = StructuredOutputFormat::json_schema("task", task_schema());
+        let error = StructuredOutputValidator::new(&format)
+            .validate("not json")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ModelAdapterError::MalformedStructuredOutput(_)
+        ));
+    }
+
+    #[test]
+    fn structured_output_validator_rejects_schema_violation() {
+        let format = StructuredOutputFormat::json_schema("task", task_schema());
+        let error = StructuredOutputValidator::new(&format)
+            .validate(r#"{"title":"ship","priority":"high"}"#)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ModelAdapterError::StructuredOutputSchemaViolation(_)
+        ));
+    }
+
+    struct StaticRepairPolicy {
+        repaired: String,
+    }
+
+    impl StructuredOutputRepairPolicy for StaticRepairPolicy {
+        fn repair(
+            &self,
+            _raw: &str,
+            _format: &StructuredOutputFormat,
+            _error: &ModelAdapterError,
+        ) -> Option<String> {
+            Some(self.repaired.clone())
+        }
+    }
+
+    #[test]
+    fn structured_output_validator_uses_repair_policy() {
+        let format = StructuredOutputFormat::json_schema("task", task_schema());
+        let repair = StaticRepairPolicy {
+            repaired: r#"{"title":"ship","priority":1}"#.to_string(),
+        };
+        let output = StructuredOutputValidator::with_repair_policy(&format, &repair)
+            .validate("not json")
+            .unwrap();
+
+        assert_eq!(output.value["priority"], 1);
+    }
+
+    #[test]
+    fn structured_output_validator_returns_typed_repair_failure() {
+        let format = StructuredOutputFormat::json_schema("task", task_schema());
+        let repair = StaticRepairPolicy {
+            repaired: r#"{"title":"ship","priority":"high"}"#.to_string(),
+        };
+        let error = StructuredOutputValidator::with_repair_policy(&format, &repair)
+            .validate("not json")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ModelAdapterError::StructuredOutputRepairFailed(_)
+        ));
+    }
+
+    #[test]
+    fn retry_classifier_treats_structured_output_errors_as_validation() {
+        assert_eq!(
+            classify_model_adapter_error(&ModelAdapterError::StructuredOutputSchemaViolation(
+                "missing title".to_string()
+            )),
+            ModelRetryErrorClass::Validation
+        );
     }
 
     #[test]
