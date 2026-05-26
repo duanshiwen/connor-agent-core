@@ -568,48 +568,53 @@ impl OrganizationalPermissionStore {
             if membership.user_id == *user_id
                 && membership.membership_type == MembershipType::Organization
                 && let Some(org_id) = &membership.org_id
-                    && membership.is_active(now) {
-                        for (grant_org_id, grant) in &self.org_grants {
-                            if grant_org_id == org_id && grant.is_active(now) {
-                                result.push(InheritedGrant {
-                                    grant: grant.clone(),
-                                    inherited_from: InheritanceSource::Organization(org_id.clone()),
-                                });
-                            }
-                        }
+                && membership.is_active(now)
+            {
+                for (grant_org_id, grant) in &self.org_grants {
+                    if grant_org_id == org_id && grant.is_active(now) {
+                        result.push(InheritedGrant {
+                            grant: grant.clone(),
+                            inherited_from: InheritanceSource::Organization(org_id.clone()),
+                        });
                     }
+                }
+            }
         }
 
         // Team grants
         for membership in &self.memberships {
-            if membership.user_id == *user_id && membership.membership_type == MembershipType::Team
+            if membership.user_id == *user_id
+                && membership.membership_type == MembershipType::Team
                 && let Some(team_id) = &membership.team_id
-                    && membership.is_active(now) {
-                        for (grant_team_id, grant) in &self.team_grants {
-                            if grant_team_id == team_id && grant.is_active(now) {
-                                result.push(InheritedGrant {
-                                    grant: grant.clone(),
-                                    inherited_from: InheritanceSource::Team(team_id.clone()),
-                                });
-                            }
-                        }
+                && membership.is_active(now)
+            {
+                for (grant_team_id, grant) in &self.team_grants {
+                    if grant_team_id == team_id && grant.is_active(now) {
+                        result.push(InheritedGrant {
+                            grant: grant.clone(),
+                            inherited_from: InheritanceSource::Team(team_id.clone()),
+                        });
                     }
+                }
+            }
         }
 
         // Group grants
         for membership in &self.memberships {
-            if membership.user_id == *user_id && membership.membership_type == MembershipType::Group
+            if membership.user_id == *user_id
+                && membership.membership_type == MembershipType::Group
                 && let Some(group_id) = &membership.group_id
-                    && membership.is_active(now) {
-                        for (grant_group_id, grant) in &self.group_grants {
-                            if grant_group_id == group_id && grant.is_active(now) {
-                                result.push(InheritedGrant {
-                                    grant: grant.clone(),
-                                    inherited_from: InheritanceSource::Group(group_id.clone()),
-                                });
-                            }
-                        }
+                && membership.is_active(now)
+            {
+                for (grant_group_id, grant) in &self.group_grants {
+                    if grant_group_id == group_id && grant.is_active(now) {
+                        result.push(InheritedGrant {
+                            grant: grant.clone(),
+                            inherited_from: InheritanceSource::Group(group_id.clone()),
+                        });
                     }
+                }
+            }
         }
 
         result
@@ -642,6 +647,274 @@ impl OrganizationalPermissionStore {
 impl Default for OrganizationalPermissionStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ===========================================================================
+// Server-backed Permission Store Boundary
+// ===========================================================================
+
+/// Permission data fetched from an enterprise permission server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerPermissionSnapshot {
+    pub snapshot_id: String,
+    pub fetched_at: DateTime<Utc>,
+    pub direct_grants: Vec<PermissionGrant>,
+    pub memberships: Vec<Membership>,
+    pub org_grants: Vec<(OrganizationId, PermissionGrant)>,
+    pub team_grants: Vec<(TeamId, PermissionGrant)>,
+    pub group_grants: Vec<(GroupId, PermissionGrant)>,
+}
+
+impl ServerPermissionSnapshot {
+    fn into_store(self) -> OrganizationalPermissionStore {
+        let mut store = OrganizationalPermissionStore::new();
+
+        for grant in self.direct_grants {
+            store.add_direct_grant(grant);
+        }
+        for membership in self.memberships {
+            store.add_membership(membership);
+        }
+        for (org_id, grant) in self.org_grants {
+            store.add_org_grant(org_id, grant);
+        }
+        for (team_id, grant) in self.team_grants {
+            store.add_team_grant(team_id, grant);
+        }
+        for (group_id, grant) in self.group_grants {
+            store.add_group_grant(group_id, grant);
+        }
+
+        store
+    }
+}
+
+/// Freshness state for a server-backed permission cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatus {
+    Fresh,
+    Stale,
+    Expired,
+}
+
+impl fmt::Display for CacheStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fresh => write!(f, "fresh"),
+            Self::Stale => write!(f, "stale"),
+            Self::Expired => write!(f, "expired"),
+        }
+    }
+}
+
+/// Cache freshness policy for server-backed permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePolicy {
+    pub fresh_for: chrono::Duration,
+    pub stale_for: chrono::Duration,
+}
+
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            fresh_for: chrono::Duration::minutes(5),
+            stale_for: chrono::Duration::minutes(30),
+        }
+    }
+}
+
+/// Result of refreshing a permission cache from a remote provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheRefreshReport {
+    pub status: CacheStatus,
+    pub snapshot_id: Option<String>,
+    pub explanation: String,
+}
+
+/// Permission decision plus cache freshness explanation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPermissionDecision {
+    pub decision: PermissionDecision,
+    pub cache_status: CacheStatus,
+    pub explanation: String,
+}
+
+/// Boundary for server-backed enterprise permission providers.
+pub trait RemotePermissionProvider: Clone {
+    fn fetch_snapshot(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<ServerPermissionSnapshot, PermissionProviderError>;
+}
+
+/// Error returned by a remote permission provider.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PermissionProviderError {
+    #[error("provider unavailable: {0}")]
+    Unavailable(String),
+    #[error("provider returned invalid snapshot: {0}")]
+    InvalidSnapshot(String),
+}
+
+/// In-memory remote permission provider used by tests and host fakes.
+#[derive(Debug, Clone)]
+pub struct MemoryRemotePermissionProvider {
+    snapshot: ServerPermissionSnapshot,
+    available: bool,
+}
+
+impl MemoryRemotePermissionProvider {
+    pub fn with_snapshot(snapshot: ServerPermissionSnapshot) -> Self {
+        Self {
+            snapshot,
+            available: true,
+        }
+    }
+
+    pub fn set_snapshot(&mut self, snapshot: ServerPermissionSnapshot) {
+        self.snapshot = snapshot;
+    }
+
+    pub fn set_available(&mut self, available: bool) {
+        self.available = available;
+    }
+}
+
+impl RemotePermissionProvider for MemoryRemotePermissionProvider {
+    fn fetch_snapshot(
+        &self,
+        _now: DateTime<Utc>,
+    ) -> Result<ServerPermissionSnapshot, PermissionProviderError> {
+        if self.available {
+            Ok(self.snapshot.clone())
+        } else {
+            Err(PermissionProviderError::Unavailable(
+                "provider unavailable".to_string(),
+            ))
+        }
+    }
+}
+
+/// Server-backed permission store with a local cache and explicit offline behavior.
+pub struct ServerBackedPermissionStore<P: RemotePermissionProvider> {
+    provider: P,
+    policy: CachePolicy,
+    cached_snapshot_id: Option<String>,
+    cached_fetched_at: Option<DateTime<Utc>>,
+    cached_store: Option<OrganizationalPermissionStore>,
+    last_status: CacheStatus,
+    last_explanation: String,
+}
+
+impl<P: RemotePermissionProvider> ServerBackedPermissionStore<P> {
+    pub fn new(provider: P, policy: CachePolicy) -> Self {
+        Self {
+            provider,
+            policy,
+            cached_snapshot_id: None,
+            cached_fetched_at: None,
+            cached_store: None,
+            last_status: CacheStatus::Expired,
+            last_explanation: "cache not populated".to_string(),
+        }
+    }
+
+    pub fn set_provider(&mut self, provider: P) {
+        self.provider = provider;
+    }
+
+    pub fn cached_snapshot_id(&self) -> Option<&str> {
+        self.cached_snapshot_id.as_deref()
+    }
+
+    pub fn refresh(&mut self, now: DateTime<Utc>) -> Result<CacheRefreshReport, PermissionError> {
+        match self.provider.fetch_snapshot(now) {
+            Ok(snapshot) => {
+                let snapshot_id = snapshot.snapshot_id.clone();
+                let fetched_at = snapshot.fetched_at;
+                self.cached_store = Some(snapshot.into_store());
+                self.cached_snapshot_id = Some(snapshot_id.clone());
+                self.cached_fetched_at = Some(fetched_at);
+                self.last_status = self.cache_status_at(now);
+                self.last_explanation = format!(
+                    "permission snapshot {} refreshed from provider",
+                    snapshot_id
+                );
+                Ok(CacheRefreshReport {
+                    status: self.last_status,
+                    snapshot_id: Some(snapshot_id),
+                    explanation: self.last_explanation.clone(),
+                })
+            }
+            Err(error) => {
+                self.last_status = self.cache_status_at(now);
+                self.last_explanation = match self.last_status {
+                    CacheStatus::Fresh | CacheStatus::Stale => {
+                        format!(
+                            "provider unavailable; using {} permission cache: {}",
+                            self.last_status, error
+                        )
+                    }
+                    CacheStatus::Expired => {
+                        format!("provider unavailable; permission cache expired: {}", error)
+                    }
+                };
+                Ok(CacheRefreshReport {
+                    status: self.last_status,
+                    snapshot_id: self.cached_snapshot_id.clone(),
+                    explanation: self.last_explanation.clone(),
+                })
+            }
+        }
+    }
+
+    pub fn check_with_inheritance(
+        &self,
+        user_id: &EnterpriseUserId,
+        resource_type: &ResourceType,
+        resource_id: &ResourceId,
+        action: &PermissionAction,
+        now: DateTime<Utc>,
+    ) -> CachedPermissionDecision {
+        let status = self.cache_status_at(now);
+
+        if status == CacheStatus::Expired {
+            return CachedPermissionDecision {
+                decision: PermissionDecision::Deny,
+                cache_status: status,
+                explanation: "permission cache expired; deny by default".to_string(),
+            };
+        }
+
+        let decision = self
+            .cached_store
+            .as_ref()
+            .map(|store| {
+                store.check_with_inheritance(user_id, resource_type, resource_id, action, now)
+            })
+            .unwrap_or(PermissionDecision::Deny);
+
+        CachedPermissionDecision {
+            decision,
+            cache_status: status,
+            explanation: self.last_explanation.clone(),
+        }
+    }
+
+    fn cache_status_at(&self, now: DateTime<Utc>) -> CacheStatus {
+        let Some(fetched_at) = self.cached_fetched_at else {
+            return CacheStatus::Expired;
+        };
+        let age = now - fetched_at;
+        if age <= self.policy.fresh_for {
+            CacheStatus::Fresh
+        } else if age <= self.policy.fresh_for + self.policy.stale_for {
+            CacheStatus::Stale
+        } else {
+            CacheStatus::Expired
+        }
     }
 }
 
@@ -1248,5 +1521,175 @@ mod tests {
         );
 
         assert_eq!(decision, PermissionDecision::Deny);
+    }
+
+    #[test]
+    fn server_backed_store_refreshes_remote_snapshot_for_inherited_check() {
+        let now = ts();
+        let snapshot = ServerPermissionSnapshot {
+            snapshot_id: "snap-1".to_string(),
+            fetched_at: now,
+            direct_grants: vec![],
+            memberships: vec![Membership {
+                membership_id: "m-1".to_string(),
+                user_id: EnterpriseUserId::from("user-1"),
+                membership_type: MembershipType::Organization,
+                org_id: Some(OrganizationId::from("org-1")),
+                team_id: None,
+                group_id: None,
+                role: EnterpriseRole::User,
+                joined_at: now,
+                expires_at: None,
+            }],
+            org_grants: vec![(
+                OrganizationId::from("org-1"),
+                PermissionGrant {
+                    grant_id: "g-1".to_string(),
+                    user_id: EnterpriseUserId::from("user-1"),
+                    role: EnterpriseRole::User,
+                    resource_type: ResourceType::KnowledgeBase,
+                    resource_id: ResourceId::from("kb-1"),
+                    actions: vec![PermissionAction::Read],
+                    granted_at: now,
+                    expires_at: None,
+                    revoked: false,
+                },
+            )],
+            team_grants: vec![],
+            group_grants: vec![],
+        };
+        let provider = MemoryRemotePermissionProvider::with_snapshot(snapshot);
+        let mut store = ServerBackedPermissionStore::new(provider, CachePolicy::default());
+
+        let refresh = store.refresh(now).unwrap();
+        assert_eq!(refresh.status, CacheStatus::Fresh);
+
+        let decision = store.check_with_inheritance(
+            &EnterpriseUserId::from("user-1"),
+            &ResourceType::KnowledgeBase,
+            &ResourceId::from("kb-1"),
+            &PermissionAction::Read,
+            now,
+        );
+
+        assert_eq!(decision.decision, PermissionDecision::Allow);
+        assert_eq!(decision.cache_status, CacheStatus::Fresh);
+    }
+
+    #[test]
+    fn server_backed_store_uses_stale_cache_when_provider_unavailable() {
+        let now = ts();
+        let stale_time = now + chrono::Duration::minutes(10);
+        let mut provider =
+            MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+                snapshot_id: "snap-1".to_string(),
+                fetched_at: now,
+                direct_grants: vec![make_grant("g-1", false)],
+                memberships: vec![],
+                org_grants: vec![],
+                team_grants: vec![],
+                group_grants: vec![],
+            });
+        let policy = CachePolicy {
+            fresh_for: chrono::Duration::minutes(5),
+            stale_for: chrono::Duration::minutes(30),
+        };
+        let mut store = ServerBackedPermissionStore::new(provider.clone(), policy);
+        store.refresh(now).unwrap();
+
+        provider.set_available(false);
+        store.set_provider(provider);
+        let refresh = store.refresh(stale_time).unwrap();
+        assert_eq!(refresh.status, CacheStatus::Stale);
+        assert!(refresh.explanation.contains("provider unavailable"));
+
+        let decision = store.check_with_inheritance(
+            &user_a(),
+            &ResourceType::KnowledgeBase,
+            &ResourceId::from("kb-main"),
+            &PermissionAction::Read,
+            stale_time,
+        );
+
+        assert_eq!(decision.decision, PermissionDecision::Allow);
+        assert_eq!(decision.cache_status, CacheStatus::Stale);
+    }
+
+    #[test]
+    fn server_backed_store_denies_when_cache_expired_and_provider_unavailable() {
+        let now = ts();
+        let expired_time = now + chrono::Duration::minutes(40);
+        let mut provider =
+            MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+                snapshot_id: "snap-1".to_string(),
+                fetched_at: now,
+                direct_grants: vec![make_grant("g-1", false)],
+                memberships: vec![],
+                org_grants: vec![],
+                team_grants: vec![],
+                group_grants: vec![],
+            });
+        let policy = CachePolicy {
+            fresh_for: chrono::Duration::minutes(5),
+            stale_for: chrono::Duration::minutes(30),
+        };
+        let mut store = ServerBackedPermissionStore::new(provider.clone(), policy);
+        store.refresh(now).unwrap();
+
+        provider.set_available(false);
+        store.set_provider(provider);
+        let refresh = store.refresh(expired_time).unwrap();
+        assert_eq!(refresh.status, CacheStatus::Expired);
+
+        let decision = store.check_with_inheritance(
+            &user_a(),
+            &ResourceType::KnowledgeBase,
+            &ResourceId::from("kb-main"),
+            &PermissionAction::Read,
+            expired_time,
+        );
+
+        assert_eq!(decision.decision, PermissionDecision::Deny);
+        assert_eq!(decision.cache_status, CacheStatus::Expired);
+    }
+
+    #[test]
+    fn server_backed_store_refresh_overwrites_revoked_cached_grant() {
+        let now = ts();
+        let mut provider =
+            MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+                snapshot_id: "snap-1".to_string(),
+                fetched_at: now,
+                direct_grants: vec![make_grant("g-1", false)],
+                memberships: vec![],
+                org_grants: vec![],
+                team_grants: vec![],
+                group_grants: vec![],
+            });
+        let mut store = ServerBackedPermissionStore::new(provider.clone(), CachePolicy::default());
+        store.refresh(now).unwrap();
+
+        provider.set_snapshot(ServerPermissionSnapshot {
+            snapshot_id: "snap-2".to_string(),
+            fetched_at: now + chrono::Duration::minutes(1),
+            direct_grants: vec![make_grant("g-1", true)],
+            memberships: vec![],
+            org_grants: vec![],
+            team_grants: vec![],
+            group_grants: vec![],
+        });
+        store.set_provider(provider);
+        store.refresh(now + chrono::Duration::minutes(1)).unwrap();
+
+        let decision = store.check_with_inheritance(
+            &user_a(),
+            &ResourceType::KnowledgeBase,
+            &ResourceId::from("kb-main"),
+            &PermissionAction::Read,
+            now + chrono::Duration::minutes(1),
+        );
+
+        assert_eq!(decision.decision, PermissionDecision::Deny);
+        assert_eq!(store.cached_snapshot_id(), Some("snap-2"));
     }
 }
