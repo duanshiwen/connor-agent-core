@@ -6,6 +6,148 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
+/// Built-in profile names recognized by AgentOS conventions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinProfile {
+    Dev,
+    Local,
+    Enterprise,
+    Test,
+}
+
+impl BuiltinProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Local => "local",
+            Self::Enterprise => "enterprise",
+            Self::Test => "test",
+        }
+    }
+}
+
+/// A full `agentos.toml` document, including optional profiles and version metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentOsConfigDocument {
+    pub version: Option<u32>,
+    #[serde(flatten)]
+    pub config: AgentOsConfig,
+    pub profiles: BTreeMap<String, AgentOsProfile>,
+}
+
+impl Default for AgentOsConfigDocument {
+    fn default() -> Self {
+        Self {
+            version: None,
+            config: AgentOsConfig::default(),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+impl AgentOsConfigDocument {
+    /// Parse a full AgentOS config document, including profile definitions.
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        toml::from_str(input).map_err(|source| ConfigError::ParseToml {
+            reason: source.to_string(),
+        })
+    }
+
+    /// Parse a full AgentOS config document from a file path.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let input = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+            path: path.display().to_string(),
+            reason: source.to_string(),
+        })?;
+        Self::from_toml_str(&input)
+    }
+
+    /// Resolve the profile selected by `kernel.profile`, or return the base config when unset.
+    pub fn resolve_selected_profile(&self) -> Result<AgentOsConfig, ConfigError> {
+        match self.config.kernel.profile.as_deref() {
+            Some(profile) if !profile.trim().is_empty() => self.resolve_profile(profile),
+            _ => Ok(self.config.clone()),
+        }
+    }
+
+    /// Resolve a named profile using deterministic parent-before-child inheritance.
+    pub fn resolve_profile(&self, profile: &str) -> Result<AgentOsConfig, ConfigError> {
+        let chain = self.resolve_profile_chain(profile, &mut Vec::new())?;
+        let mut resolved = self.config.clone();
+        for profile_name in chain {
+            let profile =
+                self.profiles
+                    .get(&profile_name)
+                    .ok_or_else(|| ConfigError::ProfileNotFound {
+                        profile: profile_name.clone(),
+                    })?;
+            profile.apply_to(&mut resolved);
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_profile_chain(
+        &self,
+        profile: &str,
+        visiting: &mut Vec<String>,
+    ) -> Result<Vec<String>, ConfigError> {
+        if let Some(index) = visiting.iter().position(|item| item == profile) {
+            let mut cycle = visiting[index..].to_vec();
+            cycle.push(profile.to_string());
+            return Err(ConfigError::ProfileCycle {
+                profile_chain: cycle,
+            });
+        }
+
+        let profile_config =
+            self.profiles
+                .get(profile)
+                .ok_or_else(|| ConfigError::ProfileNotFound {
+                    profile: profile.to_string(),
+                })?;
+
+        visiting.push(profile.to_string());
+        let mut chain = if let Some(parent) = profile_config.extends.as_deref() {
+            self.resolve_profile_chain(parent, visiting)?
+        } else {
+            Vec::new()
+        };
+        visiting.pop();
+        chain.push(profile.to_string());
+        Ok(chain)
+    }
+
+    /// Migrate the config document to the current schema version.
+    ///
+    /// PR97 only provides a no-op migration skeleton for version 1.
+    pub fn migrate_to_current(mut self) -> Result<(Self, ConfigMigrationReport), ConfigError> {
+        if let Some(version) = self.version {
+            if version > CURRENT_CONFIG_VERSION {
+                return Err(ConfigError::UnsupportedConfigVersion {
+                    version,
+                    current: CURRENT_CONFIG_VERSION,
+                });
+            }
+        }
+
+        let from_version = self.version;
+        self.version = Some(CURRENT_CONFIG_VERSION);
+        Ok((
+            self,
+            ConfigMigrationReport {
+                from_version,
+                to_version: CURRENT_CONFIG_VERSION,
+                steps: Vec::new(),
+            },
+        ))
+    }
+}
+
 /// Top-level AgentOS configuration parsed from `agentos.toml`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -294,6 +436,178 @@ pub struct ConnectorConfig {
     pub token: Option<String>,
 }
 
+/// Profile override patch. All fields are optional so omitted values inherit deterministically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentOsProfile {
+    pub extends: Option<String>,
+    pub kernel: Option<KernelConfigPatch>,
+    pub storage: Option<StorageConfigPatch>,
+    pub model: Option<ModelConfigPatch>,
+    pub policy: Option<PolicyConfigPatch>,
+    pub browser: Option<BrowserConfigPatch>,
+    pub connectors: BTreeMap<String, ConnectorConfigPatch>,
+}
+
+impl AgentOsProfile {
+    fn apply_to(&self, config: &mut AgentOsConfig) {
+        if let Some(patch) = &self.kernel {
+            patch.apply_to(&mut config.kernel);
+        }
+        if let Some(patch) = &self.storage {
+            patch.apply_to(&mut config.storage);
+        }
+        if let Some(patch) = &self.model {
+            patch.apply_to(&mut config.model);
+        }
+        if let Some(patch) = &self.policy {
+            patch.apply_to(&mut config.policy);
+        }
+        if let Some(patch) = &self.browser {
+            patch.apply_to(&mut config.browser);
+        }
+        for (connector_key, patch) in &self.connectors {
+            let connector = config.connectors.entry(connector_key.clone()).or_default();
+            patch.apply_to(connector);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KernelConfigPatch {
+    pub profile: Option<String>,
+}
+
+impl KernelConfigPatch {
+    fn apply_to(&self, config: &mut KernelConfig) {
+        if let Some(value) = &self.profile {
+            config.profile = Some(value.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StorageConfigPatch {
+    pub root: Option<String>,
+}
+
+impl StorageConfigPatch {
+    fn apply_to(&self, config: &mut StorageConfig) {
+        if let Some(value) = &self.root {
+            config.root = value.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModelConfigPatch {
+    pub default_provider: Option<String>,
+    pub default_model: Option<String>,
+    pub providers: BTreeMap<String, ModelProviderConfigPatch>,
+}
+
+impl ModelConfigPatch {
+    fn apply_to(&self, config: &mut ModelConfig) {
+        if let Some(value) = &self.default_provider {
+            config.default_provider = value.clone();
+        }
+        if let Some(value) = &self.default_model {
+            config.default_model = value.clone();
+        }
+        for (provider_key, patch) in &self.providers {
+            let provider = config.providers.entry(provider_key.clone()).or_default();
+            patch.apply_to(provider);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModelProviderConfigPatch {
+    pub provider: Option<String>,
+    pub endpoint: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+impl ModelProviderConfigPatch {
+    fn apply_to(&self, config: &mut ModelProviderConfig) {
+        if let Some(value) = &self.provider {
+            config.provider = value.clone();
+        }
+        if let Some(value) = &self.endpoint {
+            config.endpoint = value.clone();
+        }
+        if let Some(value) = &self.api_key {
+            config.api_key = Some(value.clone());
+        }
+        if let Some(value) = &self.model {
+            config.model = value.clone();
+        }
+        if let Some(value) = self.timeout_secs {
+            config.timeout_secs = Some(value);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PolicyConfigPatch {
+    pub mode: Option<String>,
+}
+
+impl PolicyConfigPatch {
+    fn apply_to(&self, config: &mut PolicyConfig) {
+        if let Some(value) = &self.mode {
+            config.mode = value.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BrowserConfigPatch {
+    pub profile: Option<String>,
+    pub allow_js: Option<bool>,
+}
+
+impl BrowserConfigPatch {
+    fn apply_to(&self, config: &mut BrowserConfig) {
+        if let Some(value) = &self.profile {
+            config.profile = Some(value.clone());
+        }
+        if let Some(value) = self.allow_js {
+            config.allow_js = value;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectorConfigPatch {
+    pub enabled: Option<bool>,
+    pub endpoint: Option<String>,
+    pub token: Option<String>,
+}
+
+impl ConnectorConfigPatch {
+    fn apply_to(&self, config: &mut ConnectorConfig) {
+        if let Some(value) = self.enabled {
+            config.enabled = value;
+        }
+        if let Some(value) = &self.endpoint {
+            config.endpoint = Some(value.clone());
+        }
+        if let Some(value) = &self.token {
+            config.token = Some(value.clone());
+        }
+    }
+}
+
 impl ConnectorConfig {
     fn redacted(&self) -> RedactedConnectorConfig {
         RedactedConnectorConfig {
@@ -407,6 +721,29 @@ pub enum ConfigError {
 
     #[error("failed to parse agentos.toml: {reason}")]
     ParseToml { reason: String },
+
+    #[error("config profile not found: {profile}")]
+    ProfileNotFound { profile: String },
+
+    #[error("config profile inheritance cycle: {profile_chain:?}")]
+    ProfileCycle { profile_chain: Vec<String> },
+
+    #[error("unsupported config version {version}; current supported version is {current}")]
+    UnsupportedConfigVersion { version: u32, current: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigMigrationReport {
+    pub from_version: Option<u32>,
+    pub to_version: u32,
+    pub steps: Vec<ConfigMigrationStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigMigrationStep {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

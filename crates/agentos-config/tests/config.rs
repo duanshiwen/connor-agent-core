@@ -1,4 +1,7 @@
-use agentos_config::{AgentOsConfig, ConfigDiagnosticCode, MapEnvSource};
+use agentos_config::{
+    AgentOsConfig, AgentOsConfigDocument, BuiltinProfile, CURRENT_CONFIG_VERSION,
+    ConfigDiagnosticCode, ConfigError, MapEnvSource,
+};
 
 fn sample_config() -> &'static str {
     r#"
@@ -177,4 +180,197 @@ fn parses_from_file() {
     let config = AgentOsConfig::from_file(&path).unwrap();
 
     assert_eq!(config.model.default_provider, "openai");
+}
+
+fn profile_document() -> &'static str {
+    r#"
+version = 1
+
+[kernel]
+profile = "dev"
+
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key = "sk-profile-secret"
+model = "gpt-4o-mini"
+timeout_secs = 120
+
+[policy]
+mode = "ask"
+
+[browser]
+profile = "default"
+allow_js = false
+
+[profiles.local.storage]
+root = ".agentos-local"
+
+[profiles.local.browser]
+profile = "local-browser"
+
+[profiles.dev]
+extends = "local"
+
+[profiles.dev.storage]
+root = ".agentos-dev"
+
+[profiles.dev.policy]
+mode = "allow"
+
+[profiles.dev.model]
+default_model = "gpt-4.1-mini"
+
+[profiles.dev.model.providers.openai]
+model = "gpt-4.1-mini"
+timeout_secs = 60
+
+[profiles.test]
+extends = "local"
+
+[profiles.test.storage]
+root = ".agentos-test"
+
+[profiles.enterprise.policy]
+mode = "deny"
+"#
+}
+
+#[test]
+fn profile_override_is_deterministic() {
+    let document = AgentOsConfigDocument::from_toml_str(profile_document()).unwrap();
+
+    let resolved = document.resolve_profile("dev").unwrap();
+    let provider = resolved.model.providers.get("openai").unwrap();
+
+    assert_eq!(resolved.storage.root, ".agentos-dev");
+    assert_eq!(resolved.policy.mode, "allow");
+    assert_eq!(resolved.browser.profile.as_deref(), Some("local-browser"));
+    assert_eq!(resolved.model.default_model, "gpt-4.1-mini");
+    assert_eq!(provider.endpoint, "https://api.openai.com/v1");
+    assert_eq!(provider.api_key.as_deref(), Some("sk-profile-secret"));
+    assert_eq!(provider.model, "gpt-4.1-mini");
+    assert_eq!(provider.timeout_secs, Some(60));
+
+    let resolved_again = document.resolve_profile("dev").unwrap();
+    assert_eq!(resolved_again, resolved);
+}
+
+#[test]
+fn resolve_selected_profile_uses_kernel_profile() {
+    let document = AgentOsConfigDocument::from_toml_str(profile_document()).unwrap();
+
+    let resolved = document.resolve_selected_profile().unwrap();
+
+    assert_eq!(resolved.kernel.profile.as_deref(), Some("dev"));
+    assert_eq!(resolved.storage.root, ".agentos-dev");
+}
+
+#[test]
+fn profile_inheritance_chain_applies_parent_before_child() {
+    let document = AgentOsConfigDocument::from_toml_str(profile_document()).unwrap();
+
+    let resolved = document.resolve_profile("test").unwrap();
+
+    assert_eq!(resolved.storage.root, ".agentos-test");
+    assert_eq!(resolved.browser.profile.as_deref(), Some("local-browser"));
+    assert_eq!(resolved.policy.mode, "ask");
+}
+
+#[test]
+fn profile_cycle_returns_typed_error() {
+    let document = AgentOsConfigDocument::from_toml_str(
+        r#"
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[profiles.a]
+extends = "b"
+
+[profiles.b]
+extends = "a"
+"#,
+    )
+    .unwrap();
+
+    let error = document.resolve_profile("a").unwrap_err();
+
+    match error {
+        ConfigError::ProfileCycle { profile_chain } => {
+            assert_eq!(profile_chain, vec!["a", "b", "a"]);
+        }
+        other => panic!("expected profile cycle error, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_profile_returns_typed_error() {
+    let document = AgentOsConfigDocument::from_toml_str(profile_document()).unwrap();
+
+    let error = document.resolve_profile("missing").unwrap_err();
+
+    match error {
+        ConfigError::ProfileNotFound { profile } => assert_eq!(profile, "missing"),
+        other => panic!("expected missing profile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn builtin_profile_names_are_stable() {
+    assert_eq!(BuiltinProfile::Dev.as_str(), "dev");
+    assert_eq!(BuiltinProfile::Local.as_str(), "local");
+    assert_eq!(BuiltinProfile::Enterprise.as_str(), "enterprise");
+    assert_eq!(BuiltinProfile::Test.as_str(), "test");
+}
+
+#[test]
+fn migration_skeleton_sets_current_version() {
+    let document = AgentOsConfigDocument::from_toml_str(sample_config()).unwrap();
+    assert_eq!(document.version, None);
+
+    let (migrated, report) = document.migrate_to_current().unwrap();
+
+    assert_eq!(migrated.version, Some(CURRENT_CONFIG_VERSION));
+    assert_eq!(report.from_version, None);
+    assert_eq!(report.to_version, CURRENT_CONFIG_VERSION);
+    assert!(report.steps.is_empty());
+}
+
+#[test]
+fn unsupported_future_config_version_returns_error() {
+    let document = AgentOsConfigDocument::from_toml_str(
+        r#"
+version = 99
+
+[storage]
+root = ".agentos"
+"#,
+    )
+    .unwrap();
+
+    let error = document.migrate_to_current().unwrap_err();
+
+    match error {
+        ConfigError::UnsupportedConfigVersion { version, current } => {
+            assert_eq!(version, 99);
+            assert_eq!(current, CURRENT_CONFIG_VERSION);
+        }
+        other => panic!("expected unsupported version error, got {other:?}"),
+    }
 }
