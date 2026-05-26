@@ -1199,6 +1199,253 @@ impl QuestionLedger for MemoryQuestionLedger {
     }
 }
 
+/// Unique identifier for browser snapshot evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BrowserSnapshotId(pub String);
+
+impl fmt::Display for BrowserSnapshotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for BrowserSnapshotId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for BrowserSnapshotId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Stable identifier for a registered citation/evidence record.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EvidenceRefId(pub String);
+
+impl fmt::Display for EvidenceRefId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for EvidenceRefId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for EvidenceRefId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Evidence source reference used by the citation pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CitationEvidenceRef {
+    SourceUri {
+        uri: String,
+    },
+    Artifact {
+        artifact_id: ArtifactId,
+    },
+    ConversationMessage {
+        conversation_id: String,
+        message_id: String,
+    },
+    BrowserSnapshot {
+        snapshot_id: BrowserSnapshotId,
+        url: Option<String>,
+    },
+}
+
+impl CitationEvidenceRef {
+    pub fn source_uri(uri: impl Into<String>) -> Self {
+        Self::SourceUri { uri: uri.into() }
+    }
+
+    pub fn artifact(artifact_id: ArtifactId) -> Self {
+        Self::Artifact { artifact_id }
+    }
+
+    pub fn conversation_message(
+        conversation_id: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self::ConversationMessage {
+            conversation_id: conversation_id.into(),
+            message_id: message_id.into(),
+        }
+    }
+
+    pub fn browser_snapshot(snapshot_id: BrowserSnapshotId, url: Option<String>) -> Self {
+        Self::BrowserSnapshot { snapshot_id, url }
+    }
+}
+
+/// Registered citation evidence with optional excerpt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitationEvidenceRecord {
+    pub id: EvidenceRefId,
+    pub source_ref: CitationEvidenceRef,
+    pub excerpt: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl CitationEvidenceRecord {
+    pub fn new(
+        id: EvidenceRefId,
+        source_ref: CitationEvidenceRef,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            source_ref,
+            excerpt: None,
+            created_at,
+        }
+    }
+
+    pub fn with_excerpt(mut self, excerpt: impl Into<String>) -> Self {
+        self.excerpt = Some(excerpt.into());
+        self
+    }
+}
+
+/// Trace result for evidence cited by an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerCitationTrace {
+    pub answer_id: String,
+    pub evidence: Vec<CitationEvidenceRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CitationEvidenceError {
+    #[error("citation evidence lock poisoned")]
+    LockPoisoned,
+    #[error("answer id cannot be blank")]
+    BlankAnswerId,
+    #[error("citation evidence not found: {0}")]
+    NotFound(String),
+}
+
+#[async_trait]
+pub trait CitationEvidenceStore: Send + Sync {
+    async fn register_evidence(
+        &self,
+        source_ref: CitationEvidenceRef,
+        excerpt: Option<String>,
+        created_at: DateTime<Utc>,
+    ) -> Result<CitationEvidenceRecord, CitationEvidenceError>;
+
+    async fn cite_answer(
+        &self,
+        answer_id: &str,
+        evidence_id: &EvidenceRefId,
+        cited_at: DateTime<Utc>,
+    ) -> Result<(), CitationEvidenceError>;
+
+    async fn trace_answer(
+        &self,
+        answer_id: &str,
+    ) -> Result<AnswerCitationTrace, CitationEvidenceError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryCitationEvidenceStore {
+    evidence: Arc<Mutex<HashMap<EvidenceRefId, CitationEvidenceRecord>>>,
+    citations: Arc<Mutex<HashMap<String, Vec<EvidenceRefId>>>>,
+}
+
+impl MemoryCitationEvidenceStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn next_id(evidence: &HashMap<EvidenceRefId, CitationEvidenceRecord>) -> EvidenceRefId {
+        EvidenceRefId::from(format!("evidence-{}", evidence.len() + 1))
+    }
+}
+
+#[async_trait]
+impl CitationEvidenceStore for MemoryCitationEvidenceStore {
+    async fn register_evidence(
+        &self,
+        source_ref: CitationEvidenceRef,
+        excerpt: Option<String>,
+        created_at: DateTime<Utc>,
+    ) -> Result<CitationEvidenceRecord, CitationEvidenceError> {
+        let mut evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| CitationEvidenceError::LockPoisoned)?;
+        let mut record =
+            CitationEvidenceRecord::new(Self::next_id(&evidence), source_ref, created_at);
+        record.excerpt = excerpt;
+        evidence.insert(record.id.clone(), record.clone());
+        Ok(record)
+    }
+
+    async fn cite_answer(
+        &self,
+        answer_id: &str,
+        evidence_id: &EvidenceRefId,
+        _cited_at: DateTime<Utc>,
+    ) -> Result<(), CitationEvidenceError> {
+        if answer_id.trim().is_empty() {
+            return Err(CitationEvidenceError::BlankAnswerId);
+        }
+        {
+            let evidence = self
+                .evidence
+                .lock()
+                .map_err(|_| CitationEvidenceError::LockPoisoned)?;
+            if !evidence.contains_key(evidence_id) {
+                return Err(CitationEvidenceError::NotFound(evidence_id.to_string()));
+            }
+        }
+        let mut citations = self
+            .citations
+            .lock()
+            .map_err(|_| CitationEvidenceError::LockPoisoned)?;
+        let ids = citations.entry(answer_id.to_string()).or_default();
+        if !ids.iter().any(|id| id == evidence_id) {
+            ids.push(evidence_id.clone());
+        }
+        Ok(())
+    }
+
+    async fn trace_answer(
+        &self,
+        answer_id: &str,
+    ) -> Result<AnswerCitationTrace, CitationEvidenceError> {
+        let citation_ids = {
+            let citations = self
+                .citations
+                .lock()
+                .map_err(|_| CitationEvidenceError::LockPoisoned)?;
+            citations.get(answer_id).cloned().unwrap_or_default()
+        };
+        let evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| CitationEvidenceError::LockPoisoned)?;
+        let mut records = citation_ids
+            .into_iter()
+            .filter_map(|id| evidence.get(&id).cloned())
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(AnswerCitationTrace {
+            answer_id: answer_id.to_string(),
+            evidence: records,
+        })
+    }
+}
+
 /// Governance lifecycle status for knowledge entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2652,6 +2899,184 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn citation_evidence_ref_roundtrips_all_supported_sources() {
+        let refs = vec![
+            CitationEvidenceRef::source_uri("https://example.com/source"),
+            CitationEvidenceRef::artifact(ArtifactId::from("artifact-1")),
+            CitationEvidenceRef::conversation_message("conversation-1", "message-1"),
+            CitationEvidenceRef::browser_snapshot(
+                BrowserSnapshotId::from("snapshot-1"),
+                Some("https://example.com/page".to_string()),
+            ),
+        ];
+
+        let json = serde_json::to_string_pretty(&refs).unwrap();
+        let decoded: Vec<CitationEvidenceRef> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, refs);
+    }
+
+    #[test]
+    fn citation_evidence_record_preserves_excerpt_and_ref() {
+        let evidence = CitationEvidenceRecord::new(
+            EvidenceRefId::from("evidence-1"),
+            CitationEvidenceRef::conversation_message("conversation-1", "message-1"),
+            ts(),
+        )
+        .with_excerpt("User asked for durable answer traceability.");
+
+        let json = serde_json::to_string_pretty(&evidence).unwrap();
+        let decoded: CitationEvidenceRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, evidence);
+        assert_eq!(
+            decoded.excerpt.as_deref(),
+            Some("User asked for durable answer traceability.")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_citation_store_links_answer_to_traceable_evidence() {
+        let store = MemoryCitationEvidenceStore::new();
+        let source = store
+            .register_evidence(
+                CitationEvidenceRef::source_uri("https://example.com/source"),
+                Some("source excerpt".to_string()),
+                ts(),
+            )
+            .await
+            .unwrap();
+        let artifact = store
+            .register_evidence(
+                CitationEvidenceRef::artifact(ArtifactId::from("artifact-1")),
+                None,
+                ts(),
+            )
+            .await
+            .unwrap();
+        let conversation = store
+            .register_evidence(
+                CitationEvidenceRef::conversation_message("conversation-1", "message-1"),
+                None,
+                ts(),
+            )
+            .await
+            .unwrap();
+        let browser = store
+            .register_evidence(
+                CitationEvidenceRef::browser_snapshot(
+                    BrowserSnapshotId::from("snapshot-1"),
+                    Some("https://example.com/page".to_string()),
+                ),
+                None,
+                ts(),
+            )
+            .await
+            .unwrap();
+
+        store
+            .cite_answer("answer-1", &browser.id, ts())
+            .await
+            .unwrap();
+        store
+            .cite_answer("answer-1", &source.id, ts())
+            .await
+            .unwrap();
+        store
+            .cite_answer("answer-1", &conversation.id, ts())
+            .await
+            .unwrap();
+        store
+            .cite_answer("answer-1", &artifact.id, ts())
+            .await
+            .unwrap();
+
+        let trace = store.trace_answer("answer-1").await.unwrap();
+        assert_eq!(trace.answer_id, "answer-1");
+        assert_eq!(
+            trace
+                .evidence
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec![source.id, artifact.id, conversation.id, browser.id]
+        );
+        assert!(
+            trace
+                .evidence
+                .iter()
+                .any(|e| matches!(e.source_ref, CitationEvidenceRef::SourceUri { .. }))
+        );
+        assert!(
+            trace
+                .evidence
+                .iter()
+                .any(|e| matches!(e.source_ref, CitationEvidenceRef::Artifact { .. }))
+        );
+        assert!(trace.evidence.iter().any(|e| matches!(
+            e.source_ref,
+            CitationEvidenceRef::ConversationMessage { .. }
+        )));
+        assert!(
+            trace
+                .evidence
+                .iter()
+                .any(|e| matches!(e.source_ref, CitationEvidenceRef::BrowserSnapshot { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_citation_store_rejects_missing_evidence_and_blank_answer() {
+        let store = MemoryCitationEvidenceStore::new();
+        assert_eq!(
+            store
+                .cite_answer("answer-1", &EvidenceRefId::from("missing"), ts())
+                .await
+                .unwrap_err(),
+            CitationEvidenceError::NotFound("missing".to_string())
+        );
+
+        let evidence = store
+            .register_evidence(
+                CitationEvidenceRef::source_uri("https://example.com/source"),
+                None,
+                ts(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .cite_answer("   ", &evidence.id, ts())
+                .await
+                .unwrap_err(),
+            CitationEvidenceError::BlankAnswerId
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_citation_store_dedupes_answer_citations() {
+        let store = MemoryCitationEvidenceStore::new();
+        let evidence = store
+            .register_evidence(
+                CitationEvidenceRef::source_uri("https://example.com/source"),
+                None,
+                ts(),
+            )
+            .await
+            .unwrap();
+
+        store
+            .cite_answer("answer-1", &evidence.id, ts())
+            .await
+            .unwrap();
+        store
+            .cite_answer("answer-1", &evidence.id, ts())
+            .await
+            .unwrap();
+
+        let trace = store.trace_answer("answer-1").await.unwrap();
+        assert_eq!(trace.evidence, vec![evidence]);
     }
 
     #[test]
