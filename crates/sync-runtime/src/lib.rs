@@ -961,6 +961,165 @@ impl SyncTransport for MemoryTransport {
     }
 }
 
+// ===========================================================================
+// Enterprise Data Sync Exclusion
+// ===========================================================================
+
+/// Data ownership type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DataOwnership {
+    /// Data owned by the personal user.
+    Personal,
+    /// Data owned by an enterprise organization.
+    Enterprise,
+}
+
+impl fmt::Display for DataOwnership {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataOwnership::Personal => write!(f, "personal"),
+            DataOwnership::Enterprise => write!(f, "enterprise"),
+        }
+    }
+}
+
+/// Sync policy for data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SyncPolicy {
+    /// Allow personal data to sync via P2P.
+    PersonalOnly,
+    /// Allow enterprise data to sync via enterprise sync.
+    EnterpriseOnly,
+    /// Allow both personal and enterprise data to sync.
+    All,
+}
+
+impl fmt::Display for SyncPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncPolicy::PersonalOnly => write!(f, "personal_only"),
+            SyncPolicy::EnterpriseOnly => write!(f, "enterprise_only"),
+            SyncPolicy::All => write!(f, "all"),
+        }
+    }
+}
+
+/// Marker for data ownership on sync objects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataOwnershipMarker {
+    pub ownership: DataOwnership,
+    pub organization_id: Option<String>,
+    pub marked_at: DateTime<Utc>,
+}
+
+impl DataOwnershipMarker {
+    /// Create a personal ownership marker.
+    pub fn personal() -> Self {
+        Self {
+            ownership: DataOwnership::Personal,
+            organization_id: None,
+            marked_at: Utc::now(),
+        }
+    }
+
+    /// Create an enterprise ownership marker.
+    pub fn enterprise(organization_id: String) -> Self {
+        Self {
+            ownership: DataOwnership::Enterprise,
+            organization_id: Some(organization_id),
+            marked_at: Utc::now(),
+        }
+    }
+
+    /// Check if this is personal data.
+    pub fn is_personal(&self) -> bool {
+        self.ownership == DataOwnership::Personal
+    }
+
+    /// Check if this is enterprise data.
+    pub fn is_enterprise(&self) -> bool {
+        self.ownership == DataOwnership::Enterprise
+    }
+}
+
+/// Sync filter for filtering objects based on ownership and policy.
+pub struct SyncFilter {
+    policy: SyncPolicy,
+}
+
+impl SyncFilter {
+    /// Create a new sync filter with the given policy.
+    pub fn new(policy: SyncPolicy) -> Self {
+        Self { policy }
+    }
+
+    /// Check if an object should be included in sync.
+    pub fn should_include(&self, marker: &DataOwnershipMarker) -> bool {
+        match self.policy {
+            SyncPolicy::PersonalOnly => marker.is_personal(),
+            SyncPolicy::EnterpriseOnly => marker.is_enterprise(),
+            SyncPolicy::All => true,
+        }
+    }
+
+    /// Filter a list of sync objects based on ownership.
+    pub fn filter_objects(
+        &self,
+        objects: &[(SyncObjectId, DataOwnershipMarker)],
+    ) -> Vec<SyncObjectId> {
+        objects
+            .iter()
+            .filter(|(_, marker)| self.should_include(marker))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Filter a manifest to only include objects that pass the sync policy.
+    pub fn filter_manifest(
+        &self,
+        manifest: &SyncManifest,
+        ownership_map: &std::collections::HashMap<SyncObjectId, DataOwnershipMarker>,
+    ) -> SyncManifest {
+        let mut filtered = SyncManifest::new(
+            manifest.device_id.clone(),
+            manifest.agent_os_id.clone(),
+            manifest.captured_at,
+        );
+
+        for (id, record) in &manifest.objects {
+            if let Some(marker) = ownership_map.get(id) && self.should_include(marker) {
+                filtered.upsert(record.clone());
+            }
+        }
+
+        filtered
+    }
+}
+
+/// Extension trait for SyncRecord to add ownership marker.
+pub trait SyncRecordExt {
+    fn with_ownership(self, marker: DataOwnershipMarker) -> SyncRecordWithOwnership;
+}
+
+/// A sync record with ownership information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncRecordWithOwnership {
+    pub record: SyncRecord,
+    pub ownership: DataOwnershipMarker,
+}
+
+impl SyncRecordWithOwnership {
+    pub fn new(record: SyncRecord, ownership: DataOwnershipMarker) -> Self {
+        Self { record, ownership }
+    }
+}
+
+impl SyncRecordExt for SyncRecord {
+    fn with_ownership(self, marker: DataOwnershipMarker) -> SyncRecordWithOwnership {
+        SyncRecordWithOwnership::new(self, marker)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1982,5 +2141,203 @@ mod tests {
         assert_eq!(announcement.device_id.0, "device-1");
         assert_eq!(announcement.agent_os_id, "agent-1");
         assert_eq!(announcement.capabilities.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 154: Enterprise data sync exclusion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn data_ownership_personal() {
+        let marker = DataOwnershipMarker::personal();
+        assert!(marker.is_personal());
+        assert!(!marker.is_enterprise());
+        assert_eq!(marker.ownership, DataOwnership::Personal);
+        assert!(marker.organization_id.is_none());
+    }
+
+    #[test]
+    fn data_ownership_enterprise() {
+        let marker = DataOwnershipMarker::enterprise("org-1".to_string());
+        assert!(!marker.is_personal());
+        assert!(marker.is_enterprise());
+        assert_eq!(marker.ownership, DataOwnership::Enterprise);
+        assert_eq!(marker.organization_id.as_deref(), Some("org-1"));
+    }
+
+    #[test]
+    fn data_ownership_display() {
+        assert_eq!(DataOwnership::Personal.to_string(), "personal");
+        assert_eq!(DataOwnership::Enterprise.to_string(), "enterprise");
+    }
+
+    #[test]
+    fn sync_policy_display() {
+        assert_eq!(SyncPolicy::PersonalOnly.to_string(), "personal_only");
+        assert_eq!(SyncPolicy::EnterpriseOnly.to_string(), "enterprise_only");
+        assert_eq!(SyncPolicy::All.to_string(), "all");
+    }
+
+    #[test]
+    fn sync_filter_personal_only() {
+        let filter = SyncFilter::new(SyncPolicy::PersonalOnly);
+
+        let personal = DataOwnershipMarker::personal();
+        let enterprise = DataOwnershipMarker::enterprise("org-1".to_string());
+
+        assert!(filter.should_include(&personal));
+        assert!(!filter.should_include(&enterprise));
+    }
+
+    #[test]
+    fn sync_filter_enterprise_only() {
+        let filter = SyncFilter::new(SyncPolicy::EnterpriseOnly);
+
+        let personal = DataOwnershipMarker::personal();
+        let enterprise = DataOwnershipMarker::enterprise("org-1".to_string());
+
+        assert!(!filter.should_include(&personal));
+        assert!(filter.should_include(&enterprise));
+    }
+
+    #[test]
+    fn sync_filter_all() {
+        let filter = SyncFilter::new(SyncPolicy::All);
+
+        let personal = DataOwnershipMarker::personal();
+        let enterprise = DataOwnershipMarker::enterprise("org-1".to_string());
+
+        assert!(filter.should_include(&personal));
+        assert!(filter.should_include(&enterprise));
+    }
+
+    #[test]
+    fn sync_filter_objects() {
+        let filter = SyncFilter::new(SyncPolicy::PersonalOnly);
+
+        let objects = vec![
+            (SyncObjectId::from("obj-1"), DataOwnershipMarker::personal()),
+            (
+                SyncObjectId::from("obj-2"),
+                DataOwnershipMarker::enterprise("org-1".to_string()),
+            ),
+            (SyncObjectId::from("obj-3"), DataOwnershipMarker::personal()),
+        ];
+
+        let filtered = filter.filter_objects(&objects);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.contains(&SyncObjectId::from("obj-1")));
+        assert!(filtered.contains(&SyncObjectId::from("obj-3")));
+    }
+
+    #[test]
+    fn sync_filter_manifest() {
+        let filter = SyncFilter::new(SyncPolicy::PersonalOnly);
+
+        let mut manifest =
+            SyncManifest::new(DeviceId::from("device-1"), "agent-1".to_string(), ts(0));
+
+        manifest.upsert(SyncRecord {
+            object_id: SyncObjectId::from("obj-1"),
+            kind: SyncObjectKind::PersonalKnowledgeEntry,
+            source_device: DeviceId::from("device-1"),
+            version_hash: "hash1".to_string(),
+            updated_at: ts(0),
+            merge_policy: MergePolicy::LastWriteWins,
+            payload: serde_json::json!(null),
+        });
+
+        manifest.upsert(SyncRecord {
+            object_id: SyncObjectId::from("obj-2"),
+            kind: SyncObjectKind::AssetMetadata,
+            source_device: DeviceId::from("device-1"),
+            version_hash: "hash2".to_string(),
+            updated_at: ts(0),
+            merge_policy: MergePolicy::LastWriteWins,
+            payload: serde_json::json!(null),
+        });
+
+        let mut ownership_map = std::collections::HashMap::new();
+        ownership_map.insert(SyncObjectId::from("obj-1"), DataOwnershipMarker::personal());
+        ownership_map.insert(
+            SyncObjectId::from("obj-2"),
+            DataOwnershipMarker::enterprise("org-1".to_string()),
+        );
+
+        let filtered = filter.filter_manifest(&manifest, &ownership_map);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.get(&SyncObjectId::from("obj-1")).is_some());
+        assert!(filtered.get(&SyncObjectId::from("obj-2")).is_none());
+    }
+
+    #[test]
+    fn sync_record_with_ownership() {
+        let record = SyncRecord {
+            object_id: SyncObjectId::from("obj-1"),
+            kind: SyncObjectKind::PersonalKnowledgeEntry,
+            source_device: DeviceId::from("device-1"),
+            version_hash: "hash1".to_string(),
+            updated_at: ts(0),
+            merge_policy: MergePolicy::LastWriteWins,
+            payload: serde_json::json!(null),
+        };
+
+        let marker = DataOwnershipMarker::personal();
+        let with_ownership = record.with_ownership(marker);
+
+        assert_eq!(with_ownership.record.object_id.0, "obj-1");
+        assert!(with_ownership.ownership.is_personal());
+    }
+
+    #[test]
+    fn enterprise_owned_object_excluded_from_personal_manifest() {
+        // This is the key test: enterprise-owned objects should not enter personal P2P manifest
+        let filter = SyncFilter::new(SyncPolicy::PersonalOnly);
+
+        let mut manifest =
+            SyncManifest::new(DeviceId::from("device-1"), "agent-1".to_string(), ts(0));
+
+        // Add personal object
+        manifest.upsert(SyncRecord {
+            object_id: SyncObjectId::from("personal-obj"),
+            kind: SyncObjectKind::PersonalKnowledgeEntry,
+            source_device: DeviceId::from("device-1"),
+            version_hash: "hash1".to_string(),
+            updated_at: ts(0),
+            merge_policy: MergePolicy::LastWriteWins,
+            payload: serde_json::json!(null),
+        });
+
+        // Add enterprise object
+        manifest.upsert(SyncRecord {
+            object_id: SyncObjectId::from("enterprise-obj"),
+            kind: SyncObjectKind::AssetMetadata,
+            source_device: DeviceId::from("device-1"),
+            version_hash: "hash2".to_string(),
+            updated_at: ts(0),
+            merge_policy: MergePolicy::LastWriteWins,
+            payload: serde_json::json!(null),
+        });
+
+        let mut ownership_map = std::collections::HashMap::new();
+        ownership_map.insert(
+            SyncObjectId::from("personal-obj"),
+            DataOwnershipMarker::personal(),
+        );
+        ownership_map.insert(
+            SyncObjectId::from("enterprise-obj"),
+            DataOwnershipMarker::enterprise("org-1".to_string()),
+        );
+
+        let filtered = filter.filter_manifest(&manifest, &ownership_map);
+
+        // Only personal object should be in the filtered manifest
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.get(&SyncObjectId::from("personal-obj")).is_some());
+        assert!(
+            filtered
+                .get(&SyncObjectId::from("enterprise-obj"))
+                .is_none()
+        );
     }
 }
