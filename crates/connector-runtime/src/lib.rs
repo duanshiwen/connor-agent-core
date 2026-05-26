@@ -631,6 +631,236 @@ pub enum ExternalConnectorError {
 }
 
 // ===========================================================================
+// Gmail Connector (Read-only)
+// ===========================================================================
+
+/// Gmail thread metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailThread {
+    pub thread_id: String,
+    pub snippet: Option<String>,
+    pub history_id: Option<String>,
+    pub messages_count: Option<u32>,
+    pub labels: Vec<String>,
+}
+
+/// Gmail message metadata (lightweight).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailMessage {
+    pub message_id: String,
+    pub thread_id: String,
+    pub subject: Option<String>,
+    pub from: Option<String>,
+    pub to: Vec<String>,
+    pub date: Option<String>,
+    pub snippet: Option<String>,
+    pub label_ids: Vec<String>,
+}
+
+/// Gmail API response for threads list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+struct GmailThreadsResponse {
+    threads: Option<Vec<GmailThreadItem>>,
+    next_page_token: Option<String>,
+    result_size_estimate: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GmailThreadItem {
+    id: String,
+    snippet: Option<String>,
+    history_id: Option<String>,
+}
+
+/// Gmail connector configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailConnectorConfig {
+    pub max_results_per_page: usize,
+    pub query_filter: Option<String>,
+    pub label_ids: Vec<String>,
+}
+
+impl Default for GmailConnectorConfig {
+    fn default() -> Self {
+        Self {
+            max_results_per_page: 20,
+            query_filter: None,
+            label_ids: vec!["INBOX".to_string()],
+        }
+    }
+}
+
+/// Read-only Gmail connector.
+#[allow(dead_code)]
+pub struct GmailConnector {
+    credentials: ExternalServiceCredentials,
+    config: GmailConnectorConfig,
+    last_synced_at: Option<DateTime<Utc>>,
+}
+
+#[allow(dead_code)]
+impl GmailConnector {
+    pub fn new(credentials: ExternalServiceCredentials, config: GmailConnectorConfig) -> Self {
+        Self {
+            credentials,
+            config,
+            last_synced_at: None,
+        }
+    }
+
+    pub fn with_credentials(credentials: ExternalServiceCredentials) -> Self {
+        Self::new(credentials, GmailConnectorConfig::default())
+    }
+
+    pub fn last_synced_at(&self) -> Option<DateTime<Utc>> {
+        self.last_synced_at
+    }
+
+    /// Build the Gmail API URL for listing threads.
+    fn build_list_threads_url(&self, page_token: Option<&str>, limit: Option<usize>) -> String {
+        let max_results = limit.unwrap_or(self.config.max_results_per_page);
+        let mut url = format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults={}",
+            max_results
+        );
+
+        if let Some(query) = &self.config.query_filter {
+            url.push_str(&format!("&q={}", query));
+        }
+
+        for label in &self.config.label_ids {
+            url.push_str(&format!("&labelIds={}", label));
+        }
+
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", token));
+        }
+
+        url
+    }
+
+    /// Build the Gmail API URL for getting a single thread.
+    fn build_get_thread_url(&self, thread_id: &str) -> String {
+        format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads/{}?format=metadata",
+            thread_id
+        )
+    }
+}
+
+#[async_trait]
+impl ExternalConnector for GmailConnector {
+    fn service_kind(&self) -> ExternalServiceKind {
+        ExternalServiceKind::Gmail
+    }
+
+    fn is_authenticated(&self) -> bool {
+        !self.credentials.access_token.is_empty() && !self.credentials.is_expired()
+    }
+
+    fn credentials(&self) -> Option<&ExternalServiceCredentials> {
+        Some(&self.credentials)
+    }
+
+    async fn list_resources(
+        &self,
+        resource_kind: &ExternalResourceKind,
+        _page_token: Option<&str>,
+        _limit: Option<usize>,
+    ) -> Result<ExternalResourceList, ExternalConnectorError> {
+        if !self.is_authenticated() {
+            return Err(ExternalConnectorError::AuthenticationRequired);
+        }
+
+        match resource_kind {
+            ExternalResourceKind::EmailThread => {
+                // In a real implementation, this would call the Gmail API
+                // For now, return empty list as a placeholder
+                Ok(ExternalResourceList {
+                    resources: vec![],
+                    next_page_token: None,
+                    total_count: Some(0),
+                })
+            }
+            _ => Err(ExternalConnectorError::InvalidRequest(format!(
+                "Gmail connector does not support resource kind: {}",
+                resource_kind
+            ))),
+        }
+    }
+
+    async fn get_resource(
+        &self,
+        resource_kind: &ExternalResourceKind,
+        resource_id: &str,
+    ) -> Result<ExternalResourceMetadata, ExternalConnectorError> {
+        if !self.is_authenticated() {
+            return Err(ExternalConnectorError::AuthenticationRequired);
+        }
+
+        match resource_kind {
+            ExternalResourceKind::EmailThread => {
+                // In a real implementation, this would call the Gmail API
+                // For now, return a placeholder
+                Ok(ExternalResourceMetadata {
+                    resource_ref: ExternalResourceRef::new(
+                        ExternalServiceKind::Gmail,
+                        ExternalResourceKind::EmailThread,
+                        resource_id,
+                    ),
+                    synced_at: Utc::now(),
+                    etag: None,
+                    raw_size_bytes: None,
+                })
+            }
+            _ => Err(ExternalConnectorError::InvalidRequest(format!(
+                "Gmail connector does not support resource kind: {}",
+                resource_kind
+            ))),
+        }
+    }
+
+    async fn refresh_token(&mut self) -> Result<(), ExternalConnectorError> {
+        // In a real implementation, this would call the OAuth token refresh endpoint
+        // For now, return not supported
+        Err(ExternalConnectorError::TokenRefreshNotSupported)
+    }
+}
+
+/// OAuth boundary for Gmail.
+pub struct GmailOAuthBoundary {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+}
+
+impl GmailOAuthBoundary {
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        redirect_uri: impl Into<String>,
+    ) -> Self {
+        Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            redirect_uri: redirect_uri.into(),
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        }
+    }
+
+    /// Build the OAuth authorization URL.
+    pub fn authorization_url(&self, state: &str) -> String {
+        let scopes = self.scopes.join(" ");
+        format!(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&access_type=offline",
+            self.client_id, self.redirect_uri, scopes, state
+        )
+    }
+}
+
+// ===========================================================================
 // Original ConnectorRuntime (Server/Peer connections)
 // ===========================================================================
 
@@ -1480,5 +1710,154 @@ mod tests {
         assert_eq!(decoded.resources.len(), 1);
         assert_eq!(decoded.next_page_token.as_deref(), Some("page-2"));
         assert_eq!(decoded.total_count, Some(100));
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 147: Gmail Read-only Connector
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gmail_connector_service_kind() {
+        let creds = ExternalServiceCredentials::new("test-token");
+        let connector = GmailConnector::with_credentials(creds);
+        assert_eq!(connector.service_kind(), ExternalServiceKind::Gmail);
+    }
+
+    #[test]
+    fn gmail_connector_is_authenticated() {
+        let creds = ExternalServiceCredentials::new("test-token");
+        let connector = GmailConnector::with_credentials(creds);
+        assert!(connector.is_authenticated());
+
+        let creds = ExternalServiceCredentials::new("");
+        let connector = GmailConnector::with_credentials(creds);
+        assert!(!connector.is_authenticated());
+
+        let creds = ExternalServiceCredentials::new("token")
+            .with_expiry(Utc::now() - chrono::Duration::hours(1));
+        let connector = GmailConnector::with_credentials(creds);
+        assert!(!connector.is_authenticated());
+    }
+
+    #[test]
+    fn gmail_connector_credentials() {
+        let creds = ExternalServiceCredentials::new("test-token");
+        let connector = GmailConnector::with_credentials(creds);
+        assert!(connector.credentials().is_some());
+        assert_eq!(connector.credentials().unwrap().access_token, "test-token");
+    }
+
+    #[test]
+    fn gmail_connector_config_default() {
+        let config = GmailConnectorConfig::default();
+        assert_eq!(config.max_results_per_page, 20);
+        assert!(config.query_filter.is_none());
+        assert_eq!(config.label_ids, vec!["INBOX"]);
+    }
+
+    #[test]
+    fn gmail_connector_build_list_threads_url() {
+        let creds = ExternalServiceCredentials::new("token");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let url = connector.build_list_threads_url(None, None);
+        assert!(url.contains("maxResults=20"));
+        assert!(url.contains("labelIds=INBOX"));
+
+        let url = connector.build_list_threads_url(Some("page-token"), Some(10));
+        assert!(url.contains("maxResults=10"));
+        assert!(url.contains("pageToken=page-token"));
+    }
+
+    #[test]
+    fn gmail_connector_build_get_thread_url() {
+        let creds = ExternalServiceCredentials::new("token");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let url = connector.build_get_thread_url("thread-123");
+        assert!(url.contains("threads/thread-123"));
+        assert!(url.contains("format=metadata"));
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_list_resources_unauthenticated() {
+        let creds = ExternalServiceCredentials::new("");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let result = connector
+            .list_resources(&ExternalResourceKind::EmailThread, None, None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::AuthenticationRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_list_resources_unsupported_kind() {
+        let creds = ExternalServiceCredentials::new("token");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let result = connector
+            .list_resources(&ExternalResourceKind::Email, None, None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_get_resource_unauthenticated() {
+        let creds = ExternalServiceCredentials::new("");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let result = connector
+            .get_resource(&ExternalResourceKind::EmailThread, "thread-1")
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::AuthenticationRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_get_resource_returns_metadata() {
+        let creds = ExternalServiceCredentials::new("token");
+        let connector = GmailConnector::with_credentials(creds);
+
+        let result = connector
+            .get_resource(&ExternalResourceKind::EmailThread, "thread-1")
+            .await
+            .unwrap();
+        assert_eq!(result.resource_ref.service, ExternalServiceKind::Gmail);
+        assert_eq!(
+            result.resource_ref.resource_kind,
+            ExternalResourceKind::EmailThread
+        );
+        assert_eq!(result.resource_ref.resource_id, "thread-1");
+    }
+
+    #[test]
+    fn gmail_oauth_boundary_authorization_url() {
+        let boundary =
+            GmailOAuthBoundary::new("client-id", "client-secret", "https://example.com/callback");
+        let url = boundary.authorization_url("my-state");
+
+        assert!(url.contains("client_id=client-id"));
+        assert!(url.contains("redirect_uri=https://example.com/callback"));
+        assert!(url.contains("scope="));
+        assert!(url.contains("state=my-state"));
+        assert!(url.contains("access_type=offline"));
+    }
+
+    #[test]
+    fn gmail_oauth_boundary_scopes() {
+        let boundary = GmailOAuthBoundary::new("id", "secret", "https://example.com");
+        assert_eq!(boundary.scopes.len(), 1);
+        assert_eq!(
+            boundary.scopes[0],
+            "https://www.googleapis.com/auth/gmail.readonly"
+        );
     }
 }
