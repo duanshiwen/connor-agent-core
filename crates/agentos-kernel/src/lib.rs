@@ -26,7 +26,8 @@ pub use host_api::{
 };
 pub use registries::{
     ActionExecutorRegistry, ConnectorRegistry, ConnectorService, ModelProviderRegistry,
-    RepositoryRegistry, RepositoryService,
+    PolicyProviderRegistry, PolicyProviderService, RepositoryRegistry, RepositoryService,
+    StorageProviderRegistry, StorageProviderService,
 };
 pub use runtime::{KernelHealthReport, KernelRuntime, KernelRuntimeState};
 pub use services::KernelServices;

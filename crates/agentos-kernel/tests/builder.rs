@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use action_core::ActionRegistry;
-use agentos_kernel::{KernelError, KernelRuntimeBuilder};
+use agentos_kernel::{
+    KernelError, KernelRuntimeBuilder, PolicyProviderRegistry, StorageProviderRegistry,
+};
 use agentos_storage::AgentOsStorage;
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
@@ -119,6 +121,23 @@ fn builder_accepts_optional_storage() {
         .unwrap();
 
     assert!(runtime.services().storage.is_some());
+}
+
+#[test]
+fn builder_accepts_optional_storage_and_policy_provider_registries() {
+    let runtime = KernelRuntimeBuilder::new()
+        .conversation_journal(conversation_journal())
+        .model_adapter(model_adapter())
+        .action_registry(action_registry())
+        .capability_policy(capability_policy())
+        .audit_log(audit_log())
+        .storage_provider_registry(Arc::new(StorageProviderRegistry::new()))
+        .policy_provider_registry(Arc::new(PolicyProviderRegistry::new()))
+        .build()
+        .unwrap();
+
+    assert!(runtime.services().storage_provider_registry.is_some());
+    assert!(runtime.services().policy_provider_registry.is_some());
 }
 
 #[test]

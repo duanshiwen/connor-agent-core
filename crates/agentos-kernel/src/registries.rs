@@ -10,6 +10,10 @@ pub trait RepositoryService: Send + Sync {}
 
 pub trait ConnectorService: Send + Sync {}
 
+pub trait StorageProviderService: Send + Sync {}
+
+pub trait PolicyProviderService: Send + Sync {}
+
 #[derive(Default)]
 pub struct ModelProviderRegistry {
     providers: BTreeMap<String, Arc<dyn ModelAdapter>>,
@@ -163,5 +167,87 @@ impl ConnectorRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.connectors.is_empty()
+    }
+}
+
+#[derive(Default)]
+pub struct StorageProviderRegistry {
+    providers: BTreeMap<String, Arc<dyn StorageProviderService>>,
+}
+
+impl StorageProviderRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        service_id: impl Into<String>,
+        provider: Arc<dyn StorageProviderService>,
+    ) {
+        self.providers.insert(service_id.into(), provider);
+    }
+
+    pub fn get(&self, service_id: &str) -> KernelResult<Arc<dyn StorageProviderService>> {
+        self.providers
+            .get(service_id)
+            .cloned()
+            .ok_or_else(|| KernelError::ServiceNotFound {
+                registry: "storage_provider",
+                service_id: service_id.to_string(),
+            })
+    }
+
+    pub fn contains(&self, service_id: &str) -> bool {
+        self.providers.contains_key(service_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.providers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+}
+
+#[derive(Default)]
+pub struct PolicyProviderRegistry {
+    providers: BTreeMap<String, Arc<dyn PolicyProviderService>>,
+}
+
+impl PolicyProviderRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        service_id: impl Into<String>,
+        provider: Arc<dyn PolicyProviderService>,
+    ) {
+        self.providers.insert(service_id.into(), provider);
+    }
+
+    pub fn get(&self, service_id: &str) -> KernelResult<Arc<dyn PolicyProviderService>> {
+        self.providers
+            .get(service_id)
+            .cloned()
+            .ok_or_else(|| KernelError::ServiceNotFound {
+                registry: "policy_provider",
+                service_id: service_id.to_string(),
+            })
+    }
+
+    pub fn contains(&self, service_id: &str) -> bool {
+        self.providers.contains_key(service_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.providers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
     }
 }

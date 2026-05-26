@@ -9,7 +9,10 @@ use conversation_kernel::ConversationKernel;
 use enterprise_permission_core::PermissionStore;
 use model_adapter::ModelAdapter;
 
-use crate::{KernelError, KernelResult, KernelRuntime, KernelServices};
+use crate::{
+    KernelError, KernelResult, KernelRuntime, KernelServices, PolicyProviderRegistry,
+    StorageProviderRegistry,
+};
 
 #[derive(Default)]
 pub struct KernelRuntimeBuilder {
@@ -20,6 +23,8 @@ pub struct KernelRuntimeBuilder {
     audit_log: Option<Arc<dyn AuditLog>>,
     permission_store: Option<Arc<Mutex<PermissionStore>>>,
     storage: Option<Arc<AgentOsStorage>>,
+    storage_provider_registry: Option<Arc<StorageProviderRegistry>>,
+    policy_provider_registry: Option<Arc<PolicyProviderRegistry>>,
 }
 
 impl KernelRuntimeBuilder {
@@ -62,6 +67,16 @@ impl KernelRuntimeBuilder {
         self
     }
 
+    pub fn storage_provider_registry(mut self, registry: Arc<StorageProviderRegistry>) -> Self {
+        self.storage_provider_registry = Some(registry);
+        self
+    }
+
+    pub fn policy_provider_registry(mut self, registry: Arc<PolicyProviderRegistry>) -> Self {
+        self.policy_provider_registry = Some(registry);
+        self
+    }
+
     pub fn enterprise_permission_store(
         self,
         permission_store: Arc<Mutex<PermissionStore>>,
@@ -101,6 +116,8 @@ impl KernelRuntimeBuilder {
             audit_log,
             permission_store: self.permission_store,
             storage: self.storage,
+            storage_provider_registry: self.storage_provider_registry,
+            policy_provider_registry: self.policy_provider_registry,
         };
 
         Ok(KernelRuntime::new(services))
