@@ -60,6 +60,44 @@ fn start_from_new_initializes_and_starts_runtime() {
 }
 
 #[test]
+fn recover_from_new_moves_runtime_to_initialized() {
+    let runtime = runtime();
+
+    runtime.recover().unwrap();
+
+    assert_eq!(runtime.state(), KernelRuntimeState::Initialized);
+}
+
+#[test]
+fn recover_is_idempotent_before_shutdown() {
+    let runtime = runtime();
+
+    runtime.start().unwrap();
+    runtime.recover().unwrap();
+    runtime.recover().unwrap();
+
+    assert_eq!(runtime.state(), KernelRuntimeState::Initialized);
+}
+
+#[test]
+fn recover_after_shutdown_returns_typed_error() {
+    let runtime = runtime();
+
+    runtime.shutdown().unwrap();
+    let err = runtime.recover().unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid kernel lifecycle transition: shutdown -> recovering"
+    );
+}
+
+#[test]
+fn recovering_state_has_stable_string() {
+    assert_eq!(KernelRuntimeState::Recovering.as_str(), "recovering");
+}
+
+#[test]
 fn shutdown_is_idempotent() {
     let runtime = runtime();
 

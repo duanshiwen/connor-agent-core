@@ -11,6 +11,7 @@ pub enum KernelRuntimeState {
     New,
     Initialized,
     Started,
+    Recovering,
     ShuttingDown,
     Shutdown,
 }
@@ -21,6 +22,7 @@ impl KernelRuntimeState {
             Self::New => "new",
             Self::Initialized => "initialized",
             Self::Started => "started",
+            Self::Recovering => "recovering",
             Self::ShuttingDown => "shutting_down",
             Self::Shutdown => "shutdown",
         }
@@ -69,6 +71,10 @@ impl KernelRuntime {
                 Ok(())
             }
             KernelRuntimeState::Initialized | KernelRuntimeState::Started => Ok(()),
+            KernelRuntimeState::Recovering => {
+                *state = KernelRuntimeState::Initialized;
+                Ok(())
+            }
             KernelRuntimeState::ShuttingDown | KernelRuntimeState::Shutdown => {
                 Err(KernelError::InvalidLifecycleTransition {
                     from: state.as_str(),
@@ -86,6 +92,10 @@ impl KernelRuntime {
                 Ok(())
             }
             KernelRuntimeState::Started => Ok(()),
+            KernelRuntimeState::Recovering => {
+                *state = KernelRuntimeState::Started;
+                Ok(())
+            }
             KernelRuntimeState::ShuttingDown | KernelRuntimeState::Shutdown => {
                 Err(KernelError::InvalidLifecycleTransition {
                     from: state.as_str(),
@@ -101,7 +111,8 @@ impl KernelRuntime {
             KernelRuntimeState::Shutdown => Ok(()),
             KernelRuntimeState::New
             | KernelRuntimeState::Initialized
-            | KernelRuntimeState::Started => {
+            | KernelRuntimeState::Started
+            | KernelRuntimeState::Recovering => {
                 *state = KernelRuntimeState::ShuttingDown;
                 *state = KernelRuntimeState::Shutdown;
                 Ok(())
@@ -109,6 +120,26 @@ impl KernelRuntime {
             KernelRuntimeState::ShuttingDown => {
                 *state = KernelRuntimeState::Shutdown;
                 Ok(())
+            }
+        }
+    }
+
+    pub fn recover(&self) -> KernelResult<()> {
+        let mut state = self.state.lock().expect("kernel runtime state poisoned");
+        match *state {
+            KernelRuntimeState::New
+            | KernelRuntimeState::Initialized
+            | KernelRuntimeState::Started
+            | KernelRuntimeState::Recovering => {
+                *state = KernelRuntimeState::Recovering;
+                *state = KernelRuntimeState::Initialized;
+                Ok(())
+            }
+            KernelRuntimeState::ShuttingDown | KernelRuntimeState::Shutdown => {
+                Err(KernelError::InvalidLifecycleTransition {
+                    from: state.as_str(),
+                    to: KernelRuntimeState::Recovering.as_str(),
+                })
             }
         }
     }
@@ -149,7 +180,8 @@ impl KernelRuntime {
         let capability_policy_available = Arc::strong_count(&self.services.capability_policy) > 0;
         let audit_log_available = Arc::strong_count(&self.services.audit_log) > 0;
         let permission_store_available = self.services.permission_store.is_some();
-        let healthy = state != KernelRuntimeState::ShuttingDown
+        let healthy = state != KernelRuntimeState::Recovering
+            && state != KernelRuntimeState::ShuttingDown
             && state != KernelRuntimeState::Shutdown
             && conversation_kernel_available
             && model_adapter_available
