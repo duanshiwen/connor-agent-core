@@ -418,6 +418,207 @@ pub trait KnowledgeEmbeddingIndex: Send + Sync {
     ) -> Result<KnowledgeIndexRebuildReport, KnowledgeIndexError>;
 }
 
+/// Weights used to fuse full-text and semantic knowledge scores.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeHybridScoreWeights {
+    pub full_text: f32,
+    pub semantic: f32,
+}
+
+impl Default for KnowledgeHybridScoreWeights {
+    fn default() -> Self {
+        Self {
+            full_text: 0.5,
+            semantic: 0.5,
+        }
+    }
+}
+
+/// First-version rerank mode marker for hybrid knowledge search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeHybridRerankMode {
+    Disabled,
+    DeterministicHook,
+}
+
+impl Default for KnowledgeHybridRerankMode {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+/// Query that combines full-text and semantic search paths.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeHybridQuery {
+    pub full_text: KnowledgeFullTextQuery,
+    pub semantic: KnowledgeSemanticQuery,
+    pub weights: KnowledgeHybridScoreWeights,
+    pub limit: usize,
+    pub rerank: KnowledgeHybridRerankMode,
+}
+
+impl KnowledgeHybridQuery {
+    pub fn new(full_text: KnowledgeFullTextQuery, semantic: KnowledgeSemanticQuery) -> Self {
+        Self {
+            full_text,
+            semantic,
+            weights: KnowledgeHybridScoreWeights::default(),
+            limit: 10,
+            rerank: KnowledgeHybridRerankMode::default(),
+        }
+    }
+
+    pub fn with_weights(mut self, weights: KnowledgeHybridScoreWeights) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    pub fn with_rerank(mut self, rerank: KnowledgeHybridRerankMode) -> Self {
+        self.rerank = rerank;
+        self
+    }
+}
+
+/// Search result produced by deterministic hybrid score fusion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeHybridSearchResult {
+    pub entry: KnowledgeEntryRef,
+    pub fused_score: f32,
+    pub full_text_score: Option<f32>,
+    pub semantic_score: Option<f32>,
+    pub snippet: Option<String>,
+}
+
+/// Rerank seam for deterministic tests and future model-backed rerankers.
+pub trait KnowledgeHybridReranker: Send + Sync {
+    fn rerank(&self, results: &mut Vec<KnowledgeHybridSearchResult>);
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopHybridReranker;
+
+impl KnowledgeHybridReranker for NoopHybridReranker {
+    fn rerank(&self, _results: &mut Vec<KnowledgeHybridSearchResult>) {}
+}
+
+/// Deterministic fake reranker used to prove the rerank seam can reorder results.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReverseHybridReranker;
+
+impl KnowledgeHybridReranker for ReverseHybridReranker {
+    fn rerank(&self, results: &mut Vec<KnowledgeHybridSearchResult>) {
+        results.reverse();
+    }
+}
+
+/// Dependency-free hybrid search coordinator over full-text and semantic indexes.
+#[derive(Debug, Clone, Copy)]
+pub struct DeterministicHybridKnowledgeSearch<'a, F, S, R = NoopHybridReranker> {
+    full_text: &'a F,
+    semantic: &'a S,
+    reranker: R,
+}
+
+impl<'a, F, S> DeterministicHybridKnowledgeSearch<'a, F, S, NoopHybridReranker> {
+    pub fn new(full_text: &'a F, semantic: &'a S) -> Self {
+        Self {
+            full_text,
+            semantic,
+            reranker: NoopHybridReranker,
+        }
+    }
+}
+
+impl<'a, F, S, R> DeterministicHybridKnowledgeSearch<'a, F, S, R> {
+    pub fn with_reranker<NextR>(
+        self,
+        reranker: NextR,
+    ) -> DeterministicHybridKnowledgeSearch<'a, F, S, NextR> {
+        DeterministicHybridKnowledgeSearch {
+            full_text: self.full_text,
+            semantic: self.semantic,
+            reranker,
+        }
+    }
+}
+
+impl<'a, F, S, R> DeterministicHybridKnowledgeSearch<'a, F, S, R>
+where
+    F: KnowledgeIndex,
+    S: KnowledgeEmbeddingIndex,
+    R: KnowledgeHybridReranker,
+{
+    pub async fn query(
+        &self,
+        query: &KnowledgeHybridQuery,
+    ) -> Result<Vec<KnowledgeHybridSearchResult>, KnowledgeIndexError> {
+        if query.limit == 0 {
+            return Err(KnowledgeIndexError::InvalidQuery(
+                "knowledge hybrid query limit must be greater than zero".to_string(),
+            ));
+        }
+
+        let mut full_text_query = query.full_text.clone();
+        full_text_query.limit = query.limit;
+        let mut semantic_query = query.semantic.clone();
+        semantic_query.limit = query.limit;
+
+        let full_text_results = self.full_text.query(&full_text_query).await?;
+        let semantic_results = self.semantic.semantic_query(&semantic_query).await?;
+        let mut merged: HashMap<KnowledgeEntryId, KnowledgeHybridSearchResult> = HashMap::new();
+
+        for result in full_text_results {
+            merged.insert(
+                result.entry.id.clone(),
+                KnowledgeHybridSearchResult {
+                    entry: result.entry,
+                    fused_score: query.weights.full_text * result.score,
+                    full_text_score: Some(result.score),
+                    semantic_score: None,
+                    snippet: result.snippet,
+                },
+            );
+        }
+
+        for result in semantic_results {
+            merged
+                .entry(result.entry.id.clone())
+                .and_modify(|existing| {
+                    existing.semantic_score = Some(result.score);
+                    existing.fused_score += query.weights.semantic * result.score;
+                    if existing.snippet.is_none() {
+                        existing.snippet = result.snippet.clone();
+                    }
+                })
+                .or_insert_with(|| KnowledgeHybridSearchResult {
+                    entry: result.entry,
+                    fused_score: query.weights.semantic * result.score,
+                    full_text_score: None,
+                    semantic_score: Some(result.score),
+                    snippet: result.snippet,
+                });
+        }
+
+        let mut results = merged.into_values().collect::<Vec<_>>();
+        results.sort_by(|a, b| {
+            b.fused_score
+                .partial_cmp(&a.fused_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entry.id.0.cmp(&b.entry.id.0))
+        });
+        results.truncate(query.limit);
+        self.reranker.rerank(&mut results);
+        results.truncate(query.limit);
+        Ok(results)
+    }
+}
+
 /// Selected full-text backend implementation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1145,6 +1346,17 @@ mod tests {
         registry
     }
 
+    fn sample_entry(id: &str, title: &str) -> KnowledgeEntryRef {
+        KnowledgeEntryRef {
+            id: KnowledgeEntryId::from(id),
+            title: title.to_string(),
+            source_uri: None,
+            artifact_id: None,
+            asset_id: None,
+            created_at: ts(),
+        }
+    }
+
     #[test]
     fn knowledge_entry_id_roundtrips() {
         let id = KnowledgeEntryId::from("knowledge-entry-1");
@@ -1646,6 +1858,252 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn knowledge_hybrid_query_defaults_are_stable() {
+        let full_text = KnowledgeFullTextQuery::new("agent memory");
+        let semantic =
+            KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap());
+        let query = KnowledgeHybridQuery::new(full_text, semantic);
+
+        assert_eq!(query.limit, 10);
+        assert_eq!(query.weights.full_text, 0.5);
+        assert_eq!(query.weights.semantic, 0.5);
+        assert_eq!(query.rerank, KnowledgeHybridRerankMode::Disabled);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_merges_and_dedupes_fulltext_and_semantic_hits() {
+        let mut full_text = MemoryFullTextKnowledgeIndex::new();
+        let mut semantic = MemorySemanticKnowledgeIndex::new();
+        let entry_a = sample_entry("knowledge-entry-a", "AgentOS Memory");
+        let entry_b = sample_entry("knowledge-entry-b", "AgentOS Runtime");
+        let entry_c = sample_entry("knowledge-entry-c", "Browser Kernel");
+
+        full_text
+            .upsert(KnowledgeIndexDocument::new(
+                entry_a.clone(),
+                "agent memory captures reusable context",
+            ))
+            .await
+            .unwrap();
+        full_text
+            .upsert(KnowledgeIndexDocument::new(
+                entry_c.clone(),
+                "agent memory browser automation notes",
+            ))
+            .await
+            .unwrap();
+        semantic
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                entry_a.clone(),
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+        semantic
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                entry_b.clone(),
+                KnowledgeEmbeddingVector::new(vec![0.8, 0.2]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let engine = DeterministicHybridKnowledgeSearch::new(&full_text, &semantic);
+        let results = engine
+            .query(&KnowledgeHybridQuery::new(
+                KnowledgeFullTextQuery::new("agent memory"),
+                KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-a")
+        );
+        assert!(results[0].full_text_score.is_some());
+        assert!(results[0].semantic_score.is_some());
+        assert!(results.iter().any(|result| {
+            result.entry.id == KnowledgeEntryId::from("knowledge-entry-b")
+                && result.full_text_score.is_none()
+                && result.semantic_score.is_some()
+        }));
+        assert!(results.iter().any(|result| {
+            result.entry.id == KnowledgeEntryId::from("knowledge-entry-c")
+                && result.full_text_score.is_some()
+                && result.semantic_score.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_breaks_fused_score_ties_by_entry_id() {
+        let mut full_text = MemoryFullTextKnowledgeIndex::new();
+        let mut semantic = MemorySemanticKnowledgeIndex::new();
+        let entry_b = sample_entry("knowledge-entry-b", "Tie B");
+        let entry_a = sample_entry("knowledge-entry-a", "Tie A");
+
+        for entry in [entry_b.clone(), entry_a.clone()] {
+            full_text
+                .upsert(KnowledgeIndexDocument::new(entry.clone(), "same"))
+                .await
+                .unwrap();
+            semantic
+                .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                    entry,
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let engine = DeterministicHybridKnowledgeSearch::new(&full_text, &semantic);
+        let results = engine
+            .query(&KnowledgeHybridQuery::new(
+                KnowledgeFullTextQuery::new("same"),
+                KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-a")
+        );
+        assert_eq!(
+            results[1].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_applies_tags_and_frontmatter_to_both_paths() {
+        let mut full_text = MemoryFullTextKnowledgeIndex::new();
+        let mut semantic = MemorySemanticKnowledgeIndex::new();
+        let matching = sample_entry("knowledge-entry-a", "AgentOS Memory");
+        let filtered = sample_entry("knowledge-entry-b", "AgentOS Memory Filtered");
+
+        for (entry, tier) in [(matching.clone(), "gold"), (filtered.clone(), "silver")] {
+            full_text
+                .upsert(
+                    KnowledgeIndexDocument::new(entry.clone(), "agent memory")
+                        .with_tags(vec!["memory".to_string()])
+                        .with_frontmatter(serde_json::json!({ "tier": tier })),
+                )
+                .await
+                .unwrap();
+            semantic
+                .upsert_embedding(
+                    KnowledgeEmbeddingDocument::new(
+                        entry,
+                        KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                    )
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter(serde_json::json!({ "tier": tier })),
+                )
+                .await
+                .unwrap();
+        }
+
+        let engine = DeterministicHybridKnowledgeSearch::new(&full_text, &semantic);
+        let results = engine
+            .query(&KnowledgeHybridQuery::new(
+                KnowledgeFullTextQuery::new("agent")
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter_filter("tier", "gold"),
+                KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap())
+                    .with_tags(vec!["memory".to_string()])
+                    .with_frontmatter_filter("tier", "gold"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_rerank_hook_can_reorder_but_not_add_entries() {
+        let mut full_text = MemoryFullTextKnowledgeIndex::new();
+        let mut semantic = MemorySemanticKnowledgeIndex::new();
+        let entry_a = sample_entry("knowledge-entry-a", "A");
+        let entry_b = sample_entry("knowledge-entry-b", "B");
+
+        for entry in [entry_a.clone(), entry_b.clone()] {
+            full_text
+                .upsert(KnowledgeIndexDocument::new(entry.clone(), "same"))
+                .await
+                .unwrap();
+            semantic
+                .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                    entry,
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let engine = DeterministicHybridKnowledgeSearch::new(&full_text, &semantic)
+            .with_reranker(ReverseHybridReranker);
+        let results = engine
+            .query(&KnowledgeHybridQuery::new(
+                KnowledgeFullTextQuery::new("same"),
+                KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-b")
+        );
+        assert_eq!(
+            results[1].entry.id,
+            KnowledgeEntryId::from("knowledge-entry-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_propagates_semantic_dimension_mismatch() {
+        let mut full_text = MemoryFullTextKnowledgeIndex::new();
+        let mut semantic = MemorySemanticKnowledgeIndex::new();
+        let entry = sample_entry("knowledge-entry-a", "AgentOS Memory");
+        full_text
+            .upsert(KnowledgeIndexDocument::new(entry.clone(), "agent memory"))
+            .await
+            .unwrap();
+        semantic
+            .upsert_embedding(KnowledgeEmbeddingDocument::new(
+                entry,
+                KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let engine = DeterministicHybridKnowledgeSearch::new(&full_text, &semantic);
+        let error = engine
+            .query(&KnowledgeHybridQuery::new(
+                KnowledgeFullTextQuery::new("agent"),
+                KnowledgeSemanticQuery::new(
+                    KnowledgeEmbeddingVector::new(vec![1.0, 0.0, 0.0]).unwrap(),
+                ),
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            KnowledgeIndexError::DimensionMismatch {
+                expected: 2,
+                actual: 3
+            }
+        );
     }
 
     #[test]
