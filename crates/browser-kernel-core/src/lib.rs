@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -945,6 +946,207 @@ impl NavigationTimeoutPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dialog and permission prompt handling
+// ---------------------------------------------------------------------------
+
+/// Browser modal dialog kind surfaced by CDP/page events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDialogKind {
+    Alert,
+    Confirm,
+    Prompt,
+    BeforeUnload,
+}
+
+/// Action selected for a modal browser dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDialogDecision {
+    Accept,
+    Dismiss,
+}
+
+/// Browser dialog event captured before it can block the executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserDialogEvent {
+    pub page_id: Option<BrowserPageId>,
+    pub kind: BrowserDialogKind,
+    pub message: String,
+    #[serde(default)]
+    pub default_prompt_text: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl BrowserDialogEvent {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.message.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser dialog message cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic resolution for a modal dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserDialogResolution {
+    pub decision: BrowserDialogDecision,
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+    pub reason: String,
+    pub resolved_at: DateTime<Utc>,
+}
+
+/// Browser permission prompt kind.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPermissionKind {
+    ClipboardRead,
+    ClipboardWrite,
+    Geolocation,
+    Camera,
+    Microphone,
+    Notifications,
+    Downloads,
+    Other(String),
+}
+
+/// Permission prompt decision. `Ask` means surface to host/human instead of auto-allowing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPermissionDecision {
+    Allow,
+    Deny,
+    Ask,
+}
+
+/// Browser permission prompt event for audit and host handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPermissionPromptEvent {
+    pub page_id: Option<BrowserPageId>,
+    pub origin: String,
+    pub permission: BrowserPermissionKind,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl BrowserPermissionPromptEvent {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.origin.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser permission prompt origin cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic resolution for a browser permission prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPermissionPromptResolution {
+    pub decision: BrowserPermissionDecision,
+    pub reason: String,
+    pub resolved_at: DateTime<Utc>,
+}
+
+/// Policy used to resolve dialogs and permission prompts without hanging automation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPromptPolicy {
+    pub timeout_ms: u64,
+    pub alert_decision: BrowserDialogDecision,
+    pub confirm_decision: BrowserDialogDecision,
+    pub prompt_decision: BrowserDialogDecision,
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+    pub before_unload_decision: BrowserDialogDecision,
+    pub default_permission_decision: BrowserPermissionDecision,
+    #[serde(default)]
+    pub allowed_permissions: BTreeSet<BrowserPermissionKind>,
+}
+
+impl Default for BrowserPromptPolicy {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            alert_decision: BrowserDialogDecision::Accept,
+            confirm_decision: BrowserDialogDecision::Dismiss,
+            prompt_decision: BrowserDialogDecision::Dismiss,
+            prompt_text: None,
+            before_unload_decision: BrowserDialogDecision::Dismiss,
+            default_permission_decision: BrowserPermissionDecision::Ask,
+            allowed_permissions: BTreeSet::new(),
+        }
+    }
+}
+
+impl BrowserPromptPolicy {
+    pub fn validate(&self) -> Result<(), BrowserKernelError> {
+        if self.timeout_ms == 0 {
+            return Err(BrowserKernelError::InvalidConfig(
+                "browser prompt timeout_ms must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn resolve_dialog(
+        &self,
+        event: &BrowserDialogEvent,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<BrowserDialogResolution, BrowserKernelError> {
+        self.validate()?;
+        event.validate()?;
+        let decision = match event.kind {
+            BrowserDialogKind::Alert => self.alert_decision.clone(),
+            BrowserDialogKind::Confirm => self.confirm_decision.clone(),
+            BrowserDialogKind::Prompt => self.prompt_decision.clone(),
+            BrowserDialogKind::BeforeUnload => self.before_unload_decision.clone(),
+        };
+        let prompt_text = if event.kind == BrowserDialogKind::Prompt
+            && decision == BrowserDialogDecision::Accept
+        {
+            self.prompt_text
+                .clone()
+                .or_else(|| event.default_prompt_text.clone())
+        } else {
+            None
+        };
+        Ok(BrowserDialogResolution {
+            decision,
+            prompt_text,
+            reason: format!(
+                "resolved {:?} dialog via non-blocking prompt policy within {}ms",
+                event.kind, self.timeout_ms
+            ),
+            resolved_at,
+        })
+    }
+
+    pub fn resolve_permission_prompt(
+        &self,
+        event: &BrowserPermissionPromptEvent,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<BrowserPermissionPromptResolution, BrowserKernelError> {
+        self.validate()?;
+        event.validate()?;
+        let decision = if self.allowed_permissions.contains(&event.permission) {
+            BrowserPermissionDecision::Allow
+        } else {
+            self.default_permission_decision.clone()
+        };
+        Ok(BrowserPermissionPromptResolution {
+            decision,
+            reason: format!(
+                "resolved {:?} permission prompt for {} via browser prompt policy",
+                event.permission, event.origin
+            ),
+            resolved_at,
+        })
+    }
+}
+
 /// How Chromium should be launched or connected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -961,6 +1163,7 @@ pub struct CdpBrowserConfig {
     pub viewport: BrowserViewport,
     pub timeouts: BrowserTimeouts,
     pub navigation_timeout_policy: NavigationTimeoutPolicy,
+    pub prompt_policy: BrowserPromptPolicy,
     pub profile: BrowserProfileMode,
     pub max_pages: usize,
 }
@@ -972,6 +1175,7 @@ impl Default for CdpBrowserConfig {
             viewport: BrowserViewport::default(),
             timeouts: BrowserTimeouts::default(),
             navigation_timeout_policy: NavigationTimeoutPolicy::default(),
+            prompt_policy: BrowserPromptPolicy::default(),
             profile: BrowserProfileMode::default(),
             max_pages: 5,
         }
@@ -996,6 +1200,11 @@ impl CdpBrowserConfig {
 
     pub fn with_navigation_timeout_policy(mut self, policy: NavigationTimeoutPolicy) -> Self {
         self.navigation_timeout_policy = policy;
+        self
+    }
+
+    pub fn with_prompt_policy(mut self, policy: BrowserPromptPolicy) -> Self {
+        self.prompt_policy = policy;
         self
     }
 
@@ -1797,6 +2006,47 @@ impl From<BrowserUploadActionInput> for BrowserUploadInput {
             filename: input.filename,
             content_type: input.content_type,
             size_bytes: input.size_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserDialogActionInput {
+    #[serde(default)]
+    page_id: Option<BrowserPageId>,
+    kind: BrowserDialogKind,
+    message: String,
+    #[serde(default)]
+    default_prompt_text: Option<String>,
+}
+
+impl BrowserDialogActionInput {
+    fn into_event(self, occurred_at: DateTime<Utc>) -> BrowserDialogEvent {
+        BrowserDialogEvent {
+            page_id: self.page_id,
+            kind: self.kind,
+            message: self.message,
+            default_prompt_text: self.default_prompt_text,
+            occurred_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserPermissionPromptActionInput {
+    #[serde(default)]
+    page_id: Option<BrowserPageId>,
+    origin: String,
+    permission: BrowserPermissionKind,
+}
+
+impl BrowserPermissionPromptActionInput {
+    fn into_event(self, occurred_at: DateTime<Utc>) -> BrowserPermissionPromptEvent {
+        BrowserPermissionPromptEvent {
+            page_id: self.page_id,
+            origin: self.origin,
+            permission: self.permission,
+            occurred_at,
         }
     }
 }
@@ -2654,6 +2904,65 @@ impl CdpBrowserExecutor {
             completed_at: requested_at,
         })
     }
+
+    async fn handle_dialog(
+        &self,
+        input: BrowserDialogActionInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let now = chrono::Utc::now();
+        let event = input.into_event(now);
+        let resolution = self
+            .lifecycle
+            .config()
+            .prompt_policy
+            .resolve_dialog(&event, now)
+            .map_err(to_invalid_input)?;
+
+        Ok(action_core::ActionResult {
+            status: action_core::ActionStatus::Completed,
+            summary: format!(
+                "Resolved browser {:?} dialog with {:?}",
+                event.kind, resolution.decision
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "event": event,
+                "resolution": resolution,
+            })),
+            completed_at: now,
+        })
+    }
+
+    async fn handle_permission_prompt(
+        &self,
+        input: BrowserPermissionPromptActionInput,
+    ) -> Result<action_core::ActionResult, action_core::ActionExecutorError> {
+        let now = chrono::Utc::now();
+        let event = input.into_event(now);
+        let resolution = self
+            .lifecycle
+            .config()
+            .prompt_policy
+            .resolve_permission_prompt(&event, now)
+            .map_err(to_invalid_input)?;
+        let status = match resolution.decision {
+            BrowserPermissionDecision::Ask => action_core::ActionStatus::ApprovalRequired,
+            BrowserPermissionDecision::Deny => action_core::ActionStatus::Denied,
+            BrowserPermissionDecision::Allow => action_core::ActionStatus::Completed,
+        };
+
+        Ok(action_core::ActionResult {
+            status,
+            summary: format!(
+                "Resolved browser {:?} permission prompt with {:?}",
+                event.permission, resolution.decision
+            ),
+            payload: action_core::ActionResultPayload::Json(serde_json::json!({
+                "event": event,
+                "resolution": resolution,
+            })),
+            completed_at: now,
+        })
+    }
 }
 
 fn infer_download_filename(url: &str) -> String {
@@ -2825,6 +3134,8 @@ const KNOWN_BROWSER_ACTIONS: &[&str] = &[
     "browser.get_interactive_snapshot",
     "browser.download_file",
     "browser.upload_file",
+    "browser.handle_dialog",
+    "browser.handle_permission_prompt",
 ];
 
 #[async_trait::async_trait]
@@ -2938,6 +3249,18 @@ impl action_core::ActionExecutor for CdpBrowserExecutor {
                 let input: BrowserUploadActionInput = serde_json::from_value(request.input.clone())
                     .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
                 self.upload_file(input.into()).await
+            }
+            "browser.handle_dialog" => {
+                let input: BrowserDialogActionInput = serde_json::from_value(request.input.clone())
+                    .map_err(|e| action_core::ActionExecutorError::InvalidInput(e.to_string()))?;
+                self.handle_dialog(input).await
+            }
+            "browser.handle_permission_prompt" => {
+                let input: BrowserPermissionPromptActionInput =
+                    serde_json::from_value(request.input.clone()).map_err(|e| {
+                        action_core::ActionExecutorError::InvalidInput(e.to_string())
+                    })?;
+                self.handle_permission_prompt(input).await
             }
             _ => Err(action_core::ActionExecutorError::NotSupported(
                 request.action_kind.clone(),
@@ -3223,6 +3546,7 @@ mod tests {
         assert_eq!(config.timeouts.navigation_timeout_ms, 30_000);
         assert_eq!(config.timeouts.action_timeout_ms, 10_000);
         assert_eq!(config.timeouts.idle_shutdown_ms, 300_000);
+        assert_eq!(config.prompt_policy, BrowserPromptPolicy::default());
         assert_eq!(
             config.profile,
             BrowserProfileMode::Named("default".to_string())
@@ -3261,6 +3585,113 @@ mod tests {
         let decoded: CdpBrowserConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, config);
+    }
+
+    // ---- Dialog / permission prompt tests ----
+
+    #[test]
+    fn browser_prompt_policy_resolves_dialogs_without_hanging() {
+        let policy = BrowserPromptPolicy::default();
+        let alert = BrowserDialogEvent {
+            page_id: Some(BrowserPageId::new("page-1").unwrap()),
+            kind: BrowserDialogKind::Alert,
+            message: "hello".to_string(),
+            default_prompt_text: None,
+            occurred_at: ts(),
+        };
+        let confirm = BrowserDialogEvent {
+            kind: BrowserDialogKind::Confirm,
+            message: "continue?".to_string(),
+            ..alert.clone()
+        };
+
+        let alert_resolution = policy.resolve_dialog(&alert, ts()).unwrap();
+        let confirm_resolution = policy.resolve_dialog(&confirm, ts()).unwrap();
+
+        assert_eq!(alert_resolution.decision, BrowserDialogDecision::Accept);
+        assert_eq!(confirm_resolution.decision, BrowserDialogDecision::Dismiss);
+        assert!(
+            alert_resolution
+                .reason
+                .contains("non-blocking prompt policy")
+        );
+    }
+
+    #[test]
+    fn browser_prompt_policy_accepts_prompt_with_prompt_text() {
+        let policy = BrowserPromptPolicy {
+            prompt_decision: BrowserDialogDecision::Accept,
+            prompt_text: Some("typed response".to_string()),
+            ..BrowserPromptPolicy::default()
+        };
+        let event = BrowserDialogEvent {
+            page_id: None,
+            kind: BrowserDialogKind::Prompt,
+            message: "name?".to_string(),
+            default_prompt_text: Some("default".to_string()),
+            occurred_at: ts(),
+        };
+
+        let resolution = policy.resolve_dialog(&event, ts()).unwrap();
+
+        assert_eq!(resolution.decision, BrowserDialogDecision::Accept);
+        assert_eq!(resolution.prompt_text.as_deref(), Some("typed response"));
+    }
+
+    #[test]
+    fn browser_prompt_policy_resolves_permission_prompts_to_ask_by_default() {
+        let policy = BrowserPromptPolicy::default();
+        let event = BrowserPermissionPromptEvent {
+            page_id: None,
+            origin: "https://example.com".to_string(),
+            permission: BrowserPermissionKind::Geolocation,
+            occurred_at: ts(),
+        };
+
+        let resolution = policy.resolve_permission_prompt(&event, ts()).unwrap();
+
+        assert_eq!(resolution.decision, BrowserPermissionDecision::Ask);
+        assert!(resolution.reason.contains("permission prompt"));
+    }
+
+    #[test]
+    fn browser_prompt_policy_allows_explicit_allowed_permissions() {
+        let policy = BrowserPromptPolicy {
+            allowed_permissions: BTreeSet::from([BrowserPermissionKind::ClipboardWrite]),
+            ..BrowserPromptPolicy::default()
+        };
+        let event = BrowserPermissionPromptEvent {
+            page_id: None,
+            origin: "https://example.com".to_string(),
+            permission: BrowserPermissionKind::ClipboardWrite,
+            occurred_at: ts(),
+        };
+
+        let resolution = policy.resolve_permission_prompt(&event, ts()).unwrap();
+
+        assert_eq!(resolution.decision, BrowserPermissionDecision::Allow);
+    }
+
+    #[test]
+    fn browser_prompt_policy_rejects_zero_timeout_and_invalid_events() {
+        let policy = BrowserPromptPolicy {
+            timeout_ms: 0,
+            ..BrowserPromptPolicy::default()
+        };
+        assert!(policy.validate().is_err());
+
+        let event = BrowserDialogEvent {
+            page_id: None,
+            kind: BrowserDialogKind::Alert,
+            message: " ".to_string(),
+            default_prompt_text: None,
+            occurred_at: ts(),
+        };
+        assert!(
+            BrowserPromptPolicy::default()
+                .resolve_dialog(&event, ts())
+                .is_err()
+        );
     }
 
     // ---- Navigation wait strategy tests ----
@@ -3678,6 +4109,51 @@ mod tests {
                 assert_eq!(payload["decision"], "ask");
                 assert_eq!(payload["audit_data"]["filename"], "report.pdf");
                 assert_eq!(payload["audit_data"]["size_bytes"], 42);
+            }
+            other => panic!("unexpected payload: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn dialog_action_returns_completed_resolution_payload() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
+        let input = BrowserDialogActionInput {
+            page_id: Some(BrowserPageId::new("page-1").unwrap()),
+            kind: BrowserDialogKind::Alert,
+            message: "hello".to_string(),
+            default_prompt_text: None,
+        };
+
+        let result = executor.handle_dialog(input).await.unwrap();
+
+        assert_eq!(result.status, action_core::ActionStatus::Completed);
+        match result.payload {
+            action_core::ActionResultPayload::Json(payload) => {
+                assert_eq!(payload["event"]["kind"], "alert");
+                assert_eq!(payload["resolution"]["decision"], "accept");
+            }
+            other => panic!("unexpected payload: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_prompt_action_returns_approval_required_by_default() {
+        let lifecycle = ChromiumLifecycleManager::new(CdpBrowserConfig::default());
+        let executor = CdpBrowserExecutor::new(lifecycle, ts(), None);
+        let input = BrowserPermissionPromptActionInput {
+            page_id: Some(BrowserPageId::new("page-1").unwrap()),
+            origin: "https://example.com".to_string(),
+            permission: BrowserPermissionKind::Camera,
+        };
+
+        let result = executor.handle_permission_prompt(input).await.unwrap();
+
+        assert_eq!(result.status, action_core::ActionStatus::ApprovalRequired);
+        match result.payload {
+            action_core::ActionResultPayload::Json(payload) => {
+                assert_eq!(payload["event"]["permission"], "camera");
+                assert_eq!(payload["resolution"]["decision"], "ask");
             }
             other => panic!("unexpected payload: {:?}", other),
         }
