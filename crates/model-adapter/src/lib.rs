@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Unique model identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -505,6 +505,138 @@ pub fn classify_model_adapter_error(error: &ModelAdapterError) -> ModelRetryErro
     }
 }
 
+/// Circuit breaker configuration for per-provider model calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCircuitBreakerConfig {
+    pub failure_threshold: u32,
+    pub cooldown: Duration,
+}
+
+impl Default for ModelCircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: 3,
+            cooldown: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Circuit breaker health state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCircuitBreakerState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+/// Snapshot of model circuit breaker health for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCircuitBreakerHealth {
+    pub provider: String,
+    pub state: ModelCircuitBreakerState,
+    pub consecutive_failures: u32,
+    pub failure_threshold: u32,
+    pub cooldown: Duration,
+}
+
+#[derive(Debug)]
+struct ModelCircuitBreakerInner {
+    state: ModelCircuitBreakerState,
+    consecutive_failures: u32,
+    opened_at: Option<Instant>,
+}
+
+/// Per-provider model circuit breaker.
+#[derive(Debug)]
+pub struct ModelCircuitBreaker {
+    provider: String,
+    config: ModelCircuitBreakerConfig,
+    inner: Mutex<ModelCircuitBreakerInner>,
+}
+
+impl ModelCircuitBreaker {
+    pub fn new(provider: impl Into<String>, config: ModelCircuitBreakerConfig) -> Self {
+        Self {
+            provider: provider.into(),
+            config,
+            inner: Mutex::new(ModelCircuitBreakerInner {
+                state: ModelCircuitBreakerState::Closed,
+                consecutive_failures: 0,
+                opened_at: None,
+            }),
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn before_call(&self) -> Result<(), ModelAdapterError> {
+        let mut inner = self.inner.lock().expect("model circuit breaker poisoned");
+        if inner.state == ModelCircuitBreakerState::Open {
+            let elapsed = inner.opened_at.map(|opened_at| opened_at.elapsed());
+            if elapsed.is_some_and(|elapsed| elapsed >= self.config.cooldown) {
+                inner.state = ModelCircuitBreakerState::HalfOpen;
+                return Ok(());
+            }
+            return Err(ModelAdapterError::ExecutorFailed(format!(
+                "model circuit breaker open for provider {}",
+                self.provider
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn record_success(&self) {
+        let mut inner = self.inner.lock().expect("model circuit breaker poisoned");
+        inner.state = ModelCircuitBreakerState::Closed;
+        inner.consecutive_failures = 0;
+        inner.opened_at = None;
+    }
+
+    pub fn record_error(&self, error: &ModelAdapterError) {
+        let error_class = classify_model_adapter_error(error);
+        if !Self::trips_on(error_class) {
+            return;
+        }
+
+        let mut inner = self.inner.lock().expect("model circuit breaker poisoned");
+        inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+        if inner.consecutive_failures >= self.config.failure_threshold {
+            inner.state = ModelCircuitBreakerState::Open;
+            inner.opened_at = Some(Instant::now());
+        }
+    }
+
+    pub fn health(&self) -> ModelCircuitBreakerHealth {
+        let inner = self.inner.lock().expect("model circuit breaker poisoned");
+        ModelCircuitBreakerHealth {
+            provider: self.provider.clone(),
+            state: inner.state,
+            consecutive_failures: inner.consecutive_failures,
+            failure_threshold: self.config.failure_threshold,
+            cooldown: self.config.cooldown,
+        }
+    }
+
+    fn trips_on(error_class: ModelRetryErrorClass) -> bool {
+        matches!(
+            error_class,
+            ModelRetryErrorClass::RateLimited
+                | ModelRetryErrorClass::Timeout
+                | ModelRetryErrorClass::TransientNetwork
+                | ModelRetryErrorClass::ServerError
+        )
+    }
+}
+
+impl Default for ModelCircuitBreaker {
+    fn default() -> Self {
+        Self::new("default", ModelCircuitBreakerConfig::default())
+    }
+}
+
 pub fn classify_model_error_message(message: &str) -> ModelRetryErrorClass {
     let normalized = message.to_ascii_lowercase();
     if normalized.contains("429")
@@ -567,6 +699,88 @@ pub trait StreamingModelAdapter: ModelAdapter {
         &self,
         request: ModelRequest,
     ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError>;
+}
+
+/// Adapter wrapper that guards provider calls with a circuit breaker.
+pub struct CircuitBreakingModelAdapter<A> {
+    inner: A,
+    breaker: Arc<ModelCircuitBreaker>,
+}
+
+impl<A> CircuitBreakingModelAdapter<A> {
+    pub fn new(inner: A, breaker: ModelCircuitBreaker) -> Self {
+        Self {
+            inner,
+            breaker: Arc::new(breaker),
+        }
+    }
+
+    pub fn with_shared_breaker(inner: A, breaker: Arc<ModelCircuitBreaker>) -> Self {
+        Self { inner, breaker }
+    }
+
+    pub fn inner(&self) -> &A {
+        &self.inner
+    }
+
+    pub fn breaker(&self) -> &Arc<ModelCircuitBreaker> {
+        &self.breaker
+    }
+}
+
+impl<A> fmt::Debug for CircuitBreakingModelAdapter<A>
+where
+    A: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CircuitBreakingModelAdapter")
+            .field("inner", &self.inner)
+            .field("health", &self.breaker.health())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<A> ModelAdapter for CircuitBreakingModelAdapter<A>
+where
+    A: ModelAdapter + Send + Sync,
+{
+    async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
+        self.breaker.before_call()?;
+        match self.inner.complete(request).await {
+            Ok(output) => {
+                self.breaker.record_success();
+                Ok(output)
+            }
+            Err(error) => {
+                self.breaker.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<A> StreamingModelAdapter for CircuitBreakingModelAdapter<A>
+where
+    A: StreamingModelAdapter + Send + Sync,
+{
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        self.breaker.before_call()?;
+        match self.inner.stream(request).await {
+            Ok(events) => {
+                self.breaker.record_success();
+                Ok(events)
+            }
+            Err(error) => {
+                self.breaker.record_error(&error);
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Adapter wrapper that retries provider calls according to a deterministic policy.
@@ -948,6 +1162,100 @@ mod tests {
         assert_eq!(policy.backoff_delay(2), Some(Duration::from_millis(200)));
         assert_eq!(policy.backoff_delay(3), Some(Duration::from_millis(250)));
         assert_eq!(policy.backoff_delay(5), None);
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_repeated_rate_limits() {
+        let breaker = ModelCircuitBreaker::new(
+            "openai",
+            ModelCircuitBreakerConfig {
+                failure_threshold: 2,
+                cooldown: Duration::from_secs(60),
+            },
+        );
+
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::Closed);
+        breaker.record_error(&ModelAdapterError::RateLimitExceeded);
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::Closed);
+        breaker.record_error(&ModelAdapterError::RateLimitExceeded);
+
+        let health = breaker.health();
+        assert_eq!(health.provider, "openai");
+        assert_eq!(health.state, ModelCircuitBreakerState::Open);
+        assert_eq!(health.consecutive_failures, 2);
+        assert!(breaker.before_call().is_err());
+    }
+
+    #[test]
+    fn circuit_breaker_ignores_validation_errors_and_resets_on_success() {
+        let breaker = ModelCircuitBreaker::new(
+            "anthropic",
+            ModelCircuitBreakerConfig {
+                failure_threshold: 1,
+                cooldown: Duration::from_secs(60),
+            },
+        );
+
+        breaker.record_error(&ModelAdapterError::MalformedToolCallArguments(
+            "bad json".to_string(),
+        ));
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::Closed);
+
+        breaker.record_error(&ModelAdapterError::RateLimitExceeded);
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::Open);
+        breaker.record_success();
+
+        let health = breaker.health();
+        assert_eq!(health.state, ModelCircuitBreakerState::Closed);
+        assert_eq!(health.consecutive_failures, 0);
+        assert!(breaker.before_call().is_ok());
+    }
+
+    #[test]
+    fn circuit_breaker_allows_half_open_after_cooldown() {
+        let breaker = ModelCircuitBreaker::new(
+            "local",
+            ModelCircuitBreakerConfig {
+                failure_threshold: 1,
+                cooldown: Duration::ZERO,
+            },
+        );
+
+        breaker.record_error(&ModelAdapterError::RateLimitExceeded);
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::Open);
+
+        assert!(breaker.before_call().is_ok());
+        assert_eq!(breaker.health().state, ModelCircuitBreakerState::HalfOpen);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaking_adapter_blocks_calls_after_threshold() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let inner = FlakyModelAdapter {
+            failures_before_success: 99,
+            calls: Arc::clone(&calls),
+            error: ModelAdapterError::RateLimitExceeded,
+        };
+        let breaker = ModelCircuitBreaker::new(
+            "openai",
+            ModelCircuitBreakerConfig {
+                failure_threshold: 1,
+                cooldown: Duration::from_secs(60),
+            },
+        );
+        let adapter = CircuitBreakingModelAdapter::new(inner, breaker);
+        let request = ModelRequest::new("fake/default", vec![ModelMessage::user("hi")]);
+
+        assert_eq!(
+            adapter.complete(request.clone()).await.unwrap_err(),
+            ModelAdapterError::RateLimitExceeded
+        );
+        let err = adapter.complete(request).await.unwrap_err();
+
+        assert!(
+            matches!(err, ModelAdapterError::ExecutorFailed(message) if message.contains("circuit breaker open"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
