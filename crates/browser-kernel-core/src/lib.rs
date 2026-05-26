@@ -13,6 +13,186 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// Browser session types
+// ---------------------------------------------------------------------------
+
+/// Stable browser session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BrowserSessionId(pub String);
+
+impl BrowserSessionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, BrowserKernelError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            Err(BrowserKernelError::InvalidConfig(
+                "browser session id cannot be empty".to_string(),
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+/// Stable browser page/tab identifier within a session.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BrowserPageId(pub String);
+
+impl BrowserPageId {
+    pub fn new(value: impl Into<String>) -> Result<Self, BrowserKernelError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            Err(BrowserKernelError::InvalidConfig(
+                "browser page id cannot be empty".to_string(),
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+/// Runtime lifecycle state for a browser page/tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPageStatus {
+    Opening,
+    Active,
+    Background,
+    Closed,
+    Crashed,
+}
+
+/// Metadata for one browser page/tab in a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPageInfo {
+    pub page_id: BrowserPageId,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub status: BrowserPageStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl BrowserPageInfo {
+    pub fn new(page_id: BrowserPageId, now: DateTime<Utc>) -> Self {
+        Self {
+            page_id,
+            url: None,
+            title: None,
+            status: BrowserPageStatus::Opening,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn with_location(
+        mut self,
+        url: impl Into<String>,
+        title: Option<impl Into<String>>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        self.url = Some(url.into());
+        self.title = title.map(Into::into);
+        self.updated_at = now;
+        self
+    }
+
+    pub fn with_status(mut self, status: BrowserPageStatus, now: DateTime<Utc>) -> Self {
+        self.status = status;
+        self.updated_at = now;
+        self
+    }
+}
+
+/// Profile binding captured in a browser session for restart/recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSessionProfileBinding {
+    pub mode: BrowserProfileMode,
+    pub resolved_path: Option<PathBuf>,
+}
+
+impl BrowserSessionProfileBinding {
+    pub fn new(mode: BrowserProfileMode, resolved_path: Option<PathBuf>) -> Self {
+        Self {
+            mode,
+            resolved_path,
+        }
+    }
+}
+
+/// Serializable browser session descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSession {
+    pub session_id: BrowserSessionId,
+    pub profile: BrowserSessionProfileBinding,
+    pub pages: Vec<BrowserPageInfo>,
+    pub active_page_id: Option<BrowserPageId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl BrowserSession {
+    pub fn new(
+        session_id: BrowserSessionId,
+        profile: BrowserSessionProfileBinding,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            session_id,
+            profile,
+            pages: Vec::new(),
+            active_page_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn add_page(&mut self, mut page: BrowserPageInfo) {
+        let now = page.updated_at;
+        if self.active_page_id.is_none() {
+            page.status = BrowserPageStatus::Active;
+            page.updated_at = now;
+            self.active_page_id = Some(page.page_id.clone());
+        }
+        self.pages.push(page);
+        self.updated_at = now;
+    }
+
+    pub fn set_active_page(
+        &mut self,
+        page_id: &BrowserPageId,
+        now: DateTime<Utc>,
+    ) -> Result<(), BrowserKernelError> {
+        if !self.pages.iter().any(|page| &page.page_id == page_id) {
+            return Err(BrowserKernelError::ActionFailed(format!(
+                "browser page not found: {}",
+                page_id.0
+            )));
+        }
+        for page in &mut self.pages {
+            if &page.page_id == page_id {
+                page.status = BrowserPageStatus::Active;
+            } else if page.status == BrowserPageStatus::Active {
+                page.status = BrowserPageStatus::Background;
+            }
+            page.updated_at = now;
+        }
+        self.active_page_id = Some(page_id.clone());
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn active_page(&self) -> Option<&BrowserPageInfo> {
+        self.active_page_id
+            .as_ref()
+            .and_then(|active_id| self.pages.iter().find(|page| &page.page_id == active_id))
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Browser profile types
 // ---------------------------------------------------------------------------
 
@@ -1949,6 +2129,88 @@ mod tests {
             message_id: Some("msg-1".to_string()),
             requested_at: ts(),
         }
+    }
+
+    // ---- BrowserSession tests ----
+
+    #[test]
+    fn browser_session_roundtrips_profile_binding_and_pages() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(
+                BrowserProfileMode::Named("work".to_string()),
+                Some(PathBuf::from("/tmp/browser-profiles/work")),
+            ),
+            now,
+        );
+        session.add_page(
+            BrowserPageInfo::new(BrowserPageId::new("page-1").unwrap(), now).with_location(
+                "https://example.com",
+                Some("Example"),
+                now,
+            ),
+        );
+
+        let json = serde_json::to_string_pretty(&session).unwrap();
+        let decoded: BrowserSession = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            decoded.session_id,
+            BrowserSessionId("session-1".to_string())
+        );
+        assert_eq!(
+            decoded.profile.mode,
+            BrowserProfileMode::Named("work".to_string())
+        );
+        assert_eq!(decoded.page_count(), 1);
+        assert_eq!(
+            decoded.active_page().unwrap().url.as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn browser_session_tracks_active_page_and_background_pages() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+        let page_1 = BrowserPageId::new("page-1").unwrap();
+        let page_2 = BrowserPageId::new("page-2").unwrap();
+        session.add_page(BrowserPageInfo::new(page_1.clone(), now));
+        session.add_page(BrowserPageInfo::new(page_2.clone(), now));
+
+        session.set_active_page(&page_2, now).unwrap();
+
+        assert_eq!(session.active_page_id, Some(page_2.clone()));
+        assert_eq!(session.active_page().unwrap().page_id, page_2);
+        assert_eq!(session.pages[0].status, BrowserPageStatus::Background);
+        assert_eq!(session.pages[1].status, BrowserPageStatus::Active);
+    }
+
+    #[test]
+    fn browser_session_rejects_missing_active_page() {
+        let now = ts();
+        let mut session = BrowserSession::new(
+            BrowserSessionId::new("session-1").unwrap(),
+            BrowserSessionProfileBinding::new(BrowserProfileMode::Ephemeral, None),
+            now,
+        );
+
+        let error = session
+            .set_active_page(&BrowserPageId::new("missing").unwrap(), now)
+            .unwrap_err();
+
+        assert!(matches!(error, BrowserKernelError::ActionFailed(_)));
+    }
+
+    #[test]
+    fn browser_session_id_rejects_empty_values() {
+        assert!(BrowserSessionId::new(" ").is_err());
+        assert!(BrowserPageId::new("").is_err());
     }
 
     // ---- Config tests ----
