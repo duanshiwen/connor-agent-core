@@ -338,6 +338,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "calendar-entity"
+version = "0.1.0"
+dependencies = [
+ "asset-core",
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "capability-policy"
 version = "0.1.0"
 dependencies = [

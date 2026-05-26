@@ -33,6 +33,7 @@ members = [
     "crates/sync-runtime",
     "crates/p2p-sync-runtime",
     "crates/person-entity",
+    "crates/calendar-entity",
     "crates/relationship-core",
     "crates/people-intelligence",
     "crates/enterprise-permission-core",

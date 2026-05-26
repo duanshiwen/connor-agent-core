@@ -1,0 +1,18 @@
+[package]
+name = "calendar-entity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Calendar event domain model and in-memory repository for AgentOS."
+
+[dependencies]
+asset-core = { path = "../asset-core" }
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
