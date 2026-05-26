@@ -376,6 +376,155 @@ pub trait CredentialCipher: Send + Sync {
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CredentialError>;
 }
 
+/// Minimal backend boundary for a macOS Keychain-like secret store.
+pub trait MacOsKeychainBackend: Send + Sync {
+    fn write_secret(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError>;
+    fn read_secret(&self, service: &str, account: &str) -> Result<String, CredentialError>;
+    fn delete_secret(&self, service: &str, account: &str) -> Result<(), CredentialError>;
+}
+
+/// CredentialStore backed by a macOS Keychain-like backend plus in-memory metadata sidecar.
+///
+/// The backend stores only secret values. Metadata is kept in a deterministic in-memory sidecar
+/// for PR99 and can be replaced by a persistent metadata store in a later PR.
+pub struct MacOsKeychainCredentialStore<B> {
+    service: String,
+    backend: B,
+    metadata: Mutex<BTreeMap<CredentialId, CredentialMetadata>>,
+}
+
+impl<B> MacOsKeychainCredentialStore<B>
+where
+    B: MacOsKeychainBackend,
+{
+    pub fn new(service: impl Into<String>, backend: B) -> Self {
+        Self {
+            service: service.into(),
+            backend,
+            metadata: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    fn account_for(id: &CredentialId) -> &str {
+        id.0.as_str()
+    }
+}
+
+impl<B> fmt::Debug for MacOsKeychainCredentialStore<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let metadata_count = self
+            .metadata
+            .lock()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        f.debug_struct("MacOsKeychainCredentialStore")
+            .field("service", &self.service)
+            .field("metadata_count", &metadata_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl<B> CredentialStore for MacOsKeychainCredentialStore<B>
+where
+    B: MacOsKeychainBackend,
+{
+    async fn write(&self, record: CredentialRecord) -> Result<(), CredentialError> {
+        self.backend.write_secret(
+            &self.service,
+            Self::account_for(&record.metadata.id),
+            record.secret.expose_secret(),
+        )?;
+        let mut metadata = self
+            .metadata
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        metadata.insert(record.metadata.id.clone(), record.metadata);
+        Ok(())
+    }
+
+    async fn read(&self, id: &CredentialId) -> Result<CredentialRecord, CredentialError> {
+        let metadata = {
+            let metadata = self
+                .metadata
+                .lock()
+                .map_err(|err| CredentialError::Internal(err.to_string()))?;
+            metadata
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CredentialError::NotFound(id.0.clone()))?
+        };
+        let secret = self
+            .backend
+            .read_secret(&self.service, Self::account_for(id))?;
+        Ok(CredentialRecord {
+            metadata,
+            secret: SecretValue::new(secret),
+        })
+    }
+
+    async fn delete(&self, id: &CredentialId) -> Result<(), CredentialError> {
+        self.backend
+            .delete_secret(&self.service, Self::account_for(id))?;
+        let mut metadata = self
+            .metadata
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        metadata.remove(id);
+        Ok(())
+    }
+
+    async fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, CredentialError> {
+        let metadata = self
+            .metadata
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        Ok(metadata.values().cloned().collect())
+    }
+}
+
+#[cfg(all(feature = "macos-keychain", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemMacOsKeychainBackend;
+
+#[cfg(all(feature = "macos-keychain", target_os = "macos"))]
+impl MacOsKeychainBackend for SystemMacOsKeychainBackend {
+    fn write_secret(
+        &self,
+        _service: &str,
+        _account: &str,
+        _secret: &str,
+    ) -> Result<(), CredentialError> {
+        Err(CredentialError::BackendUnavailable(
+            "system macOS Keychain backend is feature-gated but not linked to Security.framework in PR99"
+                .to_string(),
+        ))
+    }
+
+    fn read_secret(&self, _service: &str, _account: &str) -> Result<String, CredentialError> {
+        Err(CredentialError::BackendUnavailable(
+            "system macOS Keychain backend is feature-gated but not linked to Security.framework in PR99"
+                .to_string(),
+        ))
+    }
+
+    fn delete_secret(&self, _service: &str, _account: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::BackendUnavailable(
+            "system macOS Keychain backend is feature-gated but not linked to Security.framework in PR99"
+                .to_string(),
+        ))
+    }
+}
+
 /// Skeleton for encrypted file credential storage.
 ///
 /// PR98 intentionally does not implement real filesystem persistence or encryption.
@@ -761,5 +910,152 @@ mod tests {
             serde_json::from_str::<CredentialScope>(&connector_json).unwrap(),
             connector_scope
         );
+    }
+
+    #[derive(Default)]
+    struct MockMacOsKeychainBackend {
+        inner: Mutex<BTreeMap<(String, String), String>>,
+        fail_next_read: Mutex<Option<CredentialError>>,
+    }
+
+    impl MockMacOsKeychainBackend {
+        fn fail_next_read(&self, error: CredentialError) {
+            *self.fail_next_read.lock().unwrap() = Some(error);
+        }
+    }
+
+    impl MacOsKeychainBackend for MockMacOsKeychainBackend {
+        fn write_secret(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &str,
+        ) -> Result<(), CredentialError> {
+            self.inner.lock().unwrap().insert(
+                (service.to_string(), account.to_string()),
+                secret.to_string(),
+            );
+            Ok(())
+        }
+
+        fn read_secret(&self, service: &str, account: &str) -> Result<String, CredentialError> {
+            if let Some(error) = self.fail_next_read.lock().unwrap().take() {
+                return Err(error);
+            }
+            self.inner
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), account.to_string()))
+                .cloned()
+                .ok_or_else(|| CredentialError::NotFound(account.to_string()))
+        }
+
+        fn delete_secret(&self, service: &str, account: &str) -> Result<(), CredentialError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), account.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn macos_keychain_store_mock_write_and_read_secret() {
+        let store =
+            MacOsKeychainCredentialStore::new("agentos.test", MockMacOsKeychainBackend::default());
+        let record = sample_credential("cred-1", "keychain-secret");
+
+        store.write(record.clone()).await.unwrap();
+        let fetched = store.read(&CredentialId::from("cred-1")).await.unwrap();
+
+        assert_eq!(fetched.metadata, record.metadata);
+        assert_eq!(fetched.secret.expose_secret(), "keychain-secret");
+    }
+
+    #[tokio::test]
+    async fn macos_keychain_store_mock_delete_secret() {
+        let store =
+            MacOsKeychainCredentialStore::new("agentos.test", MockMacOsKeychainBackend::default());
+        store
+            .write(sample_credential("cred-1", "keychain-secret"))
+            .await
+            .unwrap();
+
+        store.delete(&CredentialId::from("cred-1")).await.unwrap();
+        let result = store.read(&CredentialId::from("cred-1")).await;
+
+        assert!(matches!(
+            result,
+            Err(CredentialError::NotFound(id)) if id == "cred-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn macos_keychain_store_mock_list_metadata_is_deterministic() {
+        let store =
+            MacOsKeychainCredentialStore::new("agentos.test", MockMacOsKeychainBackend::default());
+        store.write(sample_credential("cred-b", "b")).await.unwrap();
+        store.write(sample_credential("cred-a", "a")).await.unwrap();
+        store.write(sample_credential("cred-c", "c")).await.unwrap();
+
+        let ids: Vec<_> = store
+            .list_metadata()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id.0)
+            .collect();
+
+        assert_eq!(ids, vec!["cred-a", "cred-b", "cred-c"]);
+    }
+
+    #[test]
+    fn macos_keychain_store_debug_does_not_leak_secret() {
+        let store =
+            MacOsKeychainCredentialStore::new("agentos.test", MockMacOsKeychainBackend::default());
+
+        let debug = format!("{store:?}");
+
+        assert!(debug.contains("agentos.test"));
+        assert!(!debug.contains("keychain-secret"));
+    }
+
+    #[tokio::test]
+    async fn macos_keychain_backend_error_maps_to_credential_error() {
+        let backend = MockMacOsKeychainBackend::default();
+        backend.fail_next_read(CredentialError::BackendUnavailable(
+            "mock offline".to_string(),
+        ));
+        let store = MacOsKeychainCredentialStore::new("agentos.test", backend);
+        store
+            .write(sample_credential("cred-1", "keychain-secret"))
+            .await
+            .unwrap();
+
+        let result = store.read(&CredentialId::from("cred-1")).await;
+
+        assert!(matches!(
+            result,
+            Err(CredentialError::BackendUnavailable(reason)) if reason == "mock offline"
+        ));
+    }
+
+    #[cfg(all(feature = "macos-keychain", target_os = "macos"))]
+    #[tokio::test]
+    async fn real_macos_keychain_roundtrip_env_gated() {
+        if std::env::var("AGENTOS_RUN_KEYCHAIN_TESTS").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let store =
+            MacOsKeychainCredentialStore::new("agentos.test.real", SystemMacOsKeychainBackend);
+        let id = CredentialId::from("agentos-test-real-keychain");
+        let mut record = sample_credential(&id.0, "real-keychain-secret");
+        record.metadata.label = "Real Keychain Test".to_string();
+
+        store.write(record).await.unwrap();
+        let fetched = store.read(&id).await.unwrap();
+        assert_eq!(fetched.secret.expose_secret(), "real-keychain-secret");
+        store.delete(&id).await.unwrap();
     }
 }

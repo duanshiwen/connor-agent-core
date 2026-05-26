@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 description = "Domain model for AgentOS identity — local sovereignty, device IDs, and fake crypto."
 
+[features]
+default = []
+macos-keychain = []
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
