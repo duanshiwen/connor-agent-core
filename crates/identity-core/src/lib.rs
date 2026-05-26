@@ -8,6 +8,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -120,8 +122,243 @@ pub enum IdentityError {
     NotFound(String),
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+    #[error("invalid encoding: {0}")]
+    InvalidEncoding(String),
+    #[error("crypto error: {0}")]
+    Crypto(String),
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+// ---------------------------------------------------------------------------
+// Real crypto provider boundary
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoAlgorithm {
+    Ed25519,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyEncoding {
+    Hex,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPrivateKey {
+    pub algorithm: CryptoAlgorithm,
+    pub encoding: KeyEncoding,
+    pub value: String,
+}
+
+impl fmt::Debug for SerializedPrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SerializedPrivateKey")
+            .field("algorithm", &self.algorithm)
+            .field("encoding", &self.encoding)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPublicKey {
+    pub algorithm: CryptoAlgorithm,
+    pub encoding: KeyEncoding,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedSignature {
+    pub algorithm: CryptoAlgorithm,
+    pub encoding: KeyEncoding,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CryptoKeyPair {
+    pub private_key: SerializedPrivateKey,
+    pub public_key: SerializedPublicKey,
+}
+
+pub trait CryptoProvider: Send + Sync {
+    fn generate_keypair(&self) -> Result<CryptoKeyPair, IdentityError>;
+    fn sign(
+        &self,
+        message: &[u8],
+        private_key: &SerializedPrivateKey,
+    ) -> Result<SerializedSignature, IdentityError>;
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &SerializedSignature,
+        public_key: &SerializedPublicKey,
+    ) -> Result<bool, IdentityError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ed25519CryptoProvider;
+
+impl Ed25519CryptoProvider {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn sign_challenge(
+        &self,
+        challenge: &str,
+        private_key: &SerializedPrivateKey,
+        public_key: &SerializedPublicKey,
+    ) -> Result<SignedChallenge, IdentityError> {
+        let signature = self.sign(challenge.as_bytes(), private_key)?;
+        Ok(SignedChallenge {
+            challenge: challenge.to_string(),
+            signature: signature.value,
+            public_key: public_key.value.clone(),
+        })
+    }
+
+    pub fn verify_challenge(&self, signed: &SignedChallenge) -> Result<bool, IdentityError> {
+        let signature = SerializedSignature {
+            algorithm: CryptoAlgorithm::Ed25519,
+            encoding: KeyEncoding::Hex,
+            value: signed.signature.clone(),
+        };
+        let public_key = SerializedPublicKey {
+            algorithm: CryptoAlgorithm::Ed25519,
+            encoding: KeyEncoding::Hex,
+            value: signed.public_key.clone(),
+        };
+        self.verify(signed.challenge.as_bytes(), &signature, &public_key)
+    }
+}
+
+impl CryptoProvider for Ed25519CryptoProvider {
+    fn generate_keypair(&self) -> Result<CryptoKeyPair, IdentityError> {
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+
+        Ok(CryptoKeyPair {
+            private_key: SerializedPrivateKey {
+                algorithm: CryptoAlgorithm::Ed25519,
+                encoding: KeyEncoding::Hex,
+                value: encode_hex(&signing_key.to_bytes()),
+            },
+            public_key: SerializedPublicKey {
+                algorithm: CryptoAlgorithm::Ed25519,
+                encoding: KeyEncoding::Hex,
+                value: encode_hex(&verifying_key.to_bytes()),
+            },
+        })
+    }
+
+    fn sign(
+        &self,
+        message: &[u8],
+        private_key: &SerializedPrivateKey,
+    ) -> Result<SerializedSignature, IdentityError> {
+        ensure_ed25519_hex(private_key.algorithm, private_key.encoding)?;
+        let private_key_bytes = decode_hex_exact(&private_key.value, 32)?;
+        let private_key_array: [u8; 32] = private_key_bytes.try_into().map_err(|_| {
+            IdentityError::InvalidKey("ed25519 private key must be 32 bytes".to_string())
+        })?;
+        let signing_key = SigningKey::from_bytes(&private_key_array);
+        let signature = signing_key.sign(message);
+
+        Ok(SerializedSignature {
+            algorithm: CryptoAlgorithm::Ed25519,
+            encoding: KeyEncoding::Hex,
+            value: encode_hex(&signature.to_bytes()),
+        })
+    }
+
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &SerializedSignature,
+        public_key: &SerializedPublicKey,
+    ) -> Result<bool, IdentityError> {
+        ensure_ed25519_hex(signature.algorithm, signature.encoding)?;
+        ensure_ed25519_hex(public_key.algorithm, public_key.encoding)?;
+
+        let public_key_bytes = decode_hex_exact(&public_key.value, 32)?;
+        let public_key_array: [u8; 32] = public_key_bytes.try_into().map_err(|_| {
+            IdentityError::InvalidKey("ed25519 public key must be 32 bytes".to_string())
+        })?;
+        let verifying_key = VerifyingKey::from_bytes(&public_key_array)
+            .map_err(|err| IdentityError::InvalidKey(err.to_string()))?;
+
+        let signature_bytes = decode_hex_exact(&signature.value, 64)?;
+        let signature_array: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+            IdentityError::InvalidKey("ed25519 signature must be 64 bytes".to_string())
+        })?;
+        let signature = Signature::from_bytes(&signature_array);
+
+        Ok(verifying_key.verify(message, &signature).is_ok())
+    }
+}
+
+fn ensure_ed25519_hex(
+    algorithm: CryptoAlgorithm,
+    encoding: KeyEncoding,
+) -> Result<(), IdentityError> {
+    if algorithm != CryptoAlgorithm::Ed25519 {
+        return Err(IdentityError::InvalidKey(format!(
+            "unsupported algorithm: {algorithm:?}"
+        )));
+    }
+    if encoding != KeyEncoding::Hex {
+        return Err(IdentityError::InvalidEncoding(format!(
+            "unsupported encoding: {encoding:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn decode_hex_exact(value: &str, expected_len: usize) -> Result<Vec<u8>, IdentityError> {
+    if value.len() != expected_len * 2 {
+        return Err(IdentityError::InvalidEncoding(format!(
+            "hex value must be {} bytes / {} chars, got {} chars",
+            expected_len,
+            expected_len * 2,
+            value.len()
+        )));
+    }
+
+    let mut output = Vec::with_capacity(expected_len);
+    let bytes = value.as_bytes();
+    for pair in bytes.chunks_exact(2) {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        output.push((high << 4) | low);
+    }
+    Ok(output)
+}
+
+fn decode_hex_nibble(byte: u8) -> Result<u8, IdentityError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(IdentityError::InvalidEncoding(
+            "hex value contains non-hex character".to_string(),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,5 +1294,120 @@ mod tests {
         let fetched = store.read(&id).await.unwrap();
         assert_eq!(fetched.secret.expose_secret(), "real-keychain-secret");
         store.delete(&id).await.unwrap();
+    }
+
+    #[test]
+    fn ed25519_generate_keypair_uses_hex_serialization_policy() {
+        let crypto = Ed25519CryptoProvider::new();
+        let keypair = crypto.generate_keypair().unwrap();
+
+        assert_eq!(keypair.private_key.algorithm, CryptoAlgorithm::Ed25519);
+        assert_eq!(keypair.private_key.encoding, KeyEncoding::Hex);
+        assert_eq!(keypair.private_key.value.len(), 64);
+        assert!(
+            keypair
+                .private_key
+                .value
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit())
+        );
+        assert_eq!(keypair.public_key.algorithm, CryptoAlgorithm::Ed25519);
+        assert_eq!(keypair.public_key.encoding, KeyEncoding::Hex);
+        assert_eq!(keypair.public_key.value.len(), 64);
+        assert!(
+            keypair
+                .public_key
+                .value
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn ed25519_sign_and_verify_roundtrip() {
+        let crypto = Ed25519CryptoProvider::new();
+        let keypair = crypto.generate_keypair().unwrap();
+        let signature = crypto.sign(b"challenge-100", &keypair.private_key).unwrap();
+
+        assert_eq!(signature.algorithm, CryptoAlgorithm::Ed25519);
+        assert_eq!(signature.encoding, KeyEncoding::Hex);
+        assert_eq!(signature.value.len(), 128);
+        assert!(
+            crypto
+                .verify(b"challenge-100", &signature, &keypair.public_key)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn ed25519_verify_rejects_tampered_message() {
+        let crypto = Ed25519CryptoProvider::new();
+        let keypair = crypto.generate_keypair().unwrap();
+        let signature = crypto.sign(b"challenge-100", &keypair.private_key).unwrap();
+
+        assert!(
+            !crypto
+                .verify(b"tampered", &signature, &keypair.public_key)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn ed25519_verify_rejects_wrong_public_key() {
+        let crypto = Ed25519CryptoProvider::new();
+        let keypair_a = crypto.generate_keypair().unwrap();
+        let keypair_b = crypto.generate_keypair().unwrap();
+        let signature = crypto
+            .sign(b"challenge-100", &keypair_a.private_key)
+            .unwrap();
+
+        assert!(
+            !crypto
+                .verify(b"challenge-100", &signature, &keypair_b.public_key)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn serialized_private_key_debug_is_redacted() {
+        let key = SerializedPrivateKey {
+            algorithm: CryptoAlgorithm::Ed25519,
+            encoding: KeyEncoding::Hex,
+            value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        };
+
+        let debug = format!("{key:?}");
+
+        assert!(debug.contains("SerializedPrivateKey"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&key.value));
+    }
+
+    #[test]
+    fn ed25519_signed_challenge_roundtrip() {
+        let crypto = Ed25519CryptoProvider::new();
+        let keypair = crypto.generate_keypair().unwrap();
+        let signed = crypto
+            .sign_challenge("nonce-100", &keypair.private_key, &keypair.public_key)
+            .unwrap();
+
+        assert_eq!(signed.challenge, "nonce-100");
+        assert!(crypto.verify_challenge(&signed).unwrap());
+    }
+
+    #[test]
+    fn ed25519_invalid_key_returns_typed_error() {
+        let crypto = Ed25519CryptoProvider::new();
+        let bad_key = SerializedPrivateKey {
+            algorithm: CryptoAlgorithm::Ed25519,
+            encoding: KeyEncoding::Hex,
+            value: "not-hex".to_string(),
+        };
+
+        let result = crypto.sign(b"challenge-100", &bad_key);
+
+        assert!(
+            matches!(result, Err(IdentityError::InvalidEncoding(reason)) if reason.contains("hex"))
+        );
     }
 }

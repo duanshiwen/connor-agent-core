@@ -57,6 +57,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 # Error handling
 anyhow = "1"
 thiserror = "2"
