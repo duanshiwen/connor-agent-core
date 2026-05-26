@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -177,6 +177,253 @@ impl IdentityStore for MemoryIdentityStore {
     async fn list_identities(&self) -> Result<Vec<PublicIdentity>, IdentityError> {
         let store = self.inner.lock().unwrap();
         Ok(store.values().cloned().collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Credential store boundary
+// ---------------------------------------------------------------------------
+
+/// Unique identifier for a stored credential.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CredentialId(pub String);
+
+impl fmt::Display for CredentialId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for CredentialId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for CredentialId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Scope describing where a credential is valid.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CredentialScope {
+    Global,
+    Agent { agentos_id: AgentOsId },
+    Device { device_id: DeviceId },
+    Server { server_id: String },
+    Connector { connector_id: String },
+    Custom { namespace: String, id: String },
+}
+
+/// Non-secret metadata for a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialMetadata {
+    pub id: CredentialId,
+    pub scope: CredentialScope,
+    pub label: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Secret wrapper with explicit exposure and redacted debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretValue(String);
+
+impl SecretValue {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SecretValue").field(&"<redacted>").finish()
+    }
+}
+
+/// Full credential record. Debug output redacts the secret value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialRecord {
+    pub metadata: CredentialMetadata,
+    pub secret: SecretValue,
+}
+
+impl CredentialRecord {
+    pub fn new(
+        id: CredentialId,
+        scope: CredentialScope,
+        label: impl Into<String>,
+        secret: SecretValue,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            metadata: CredentialMetadata {
+                id,
+                scope,
+                label: label.into(),
+                created_at: now,
+                updated_at: now,
+            },
+            secret,
+        }
+    }
+}
+
+impl fmt::Debug for CredentialRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialRecord")
+            .field("metadata", &self.metadata)
+            .field("secret", &self.secret)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialError {
+    #[error("credential not found: {0}")]
+    NotFound(String),
+    #[error("credential already exists: {0}")]
+    AlreadyExists(String),
+    #[error("credential backend unavailable: {0}")]
+    BackendUnavailable(String),
+    #[error("credential encryption unavailable: {0}")]
+    EncryptionUnavailable(String),
+    #[error("credential internal error: {0}")]
+    Internal(String),
+}
+
+/// Trait for storing, retrieving, deleting, and listing credential metadata.
+#[async_trait]
+pub trait CredentialStore: Send + Sync {
+    async fn write(&self, record: CredentialRecord) -> Result<(), CredentialError>;
+    async fn read(&self, id: &CredentialId) -> Result<CredentialRecord, CredentialError>;
+    async fn delete(&self, id: &CredentialId) -> Result<(), CredentialError>;
+    async fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, CredentialError>;
+}
+
+/// Deterministic in-memory credential store for tests and local composition.
+pub struct MemoryCredentialStore {
+    inner: Mutex<BTreeMap<CredentialId, CredentialRecord>>,
+}
+
+impl MemoryCredentialStore {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl Default for MemoryCredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CredentialStore for MemoryCredentialStore {
+    async fn write(&self, record: CredentialRecord) -> Result<(), CredentialError> {
+        let mut store = self
+            .inner
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        store.insert(record.metadata.id.clone(), record);
+        Ok(())
+    }
+
+    async fn read(&self, id: &CredentialId) -> Result<CredentialRecord, CredentialError> {
+        let store = self
+            .inner
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        store
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CredentialError::NotFound(id.0.clone()))
+    }
+
+    async fn delete(&self, id: &CredentialId) -> Result<(), CredentialError> {
+        let mut store = self
+            .inner
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        store.remove(id);
+        Ok(())
+    }
+
+    async fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, CredentialError> {
+        let store = self
+            .inner
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        Ok(store
+            .values()
+            .map(|record| record.metadata.clone())
+            .collect())
+    }
+}
+
+/// Encryption boundary for future encrypted credential file storage.
+pub trait CredentialCipher: Send + Sync {
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CredentialError>;
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CredentialError>;
+}
+
+/// Skeleton for encrypted file credential storage.
+///
+/// PR98 intentionally does not implement real filesystem persistence or encryption.
+pub struct EncryptedFileCredentialStore {
+    path: String,
+}
+
+impl EncryptedFileCredentialStore {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn skeleton_error(&self) -> CredentialError {
+        CredentialError::EncryptionUnavailable(format!(
+            "encrypted file credential store skeleton is not yet implemented for {}",
+            self.path
+        ))
+    }
+}
+
+impl fmt::Debug for EncryptedFileCredentialStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedFileCredentialStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl CredentialStore for EncryptedFileCredentialStore {
+    async fn write(&self, _record: CredentialRecord) -> Result<(), CredentialError> {
+        Err(self.skeleton_error())
+    }
+
+    async fn read(&self, _id: &CredentialId) -> Result<CredentialRecord, CredentialError> {
+        Err(self.skeleton_error())
+    }
+
+    async fn delete(&self, _id: &CredentialId) -> Result<(), CredentialError> {
+        Err(self.skeleton_error())
+    }
+
+    async fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, CredentialError> {
+        Err(self.skeleton_error())
     }
 }
 
@@ -383,5 +630,136 @@ mod tests {
         let result = store.get_identity(&AgentOsId::from("nonexistent")).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), IdentityError::NotFound(_)));
+    }
+
+    fn sample_credential(id: &str, secret: &str) -> CredentialRecord {
+        CredentialRecord::new(
+            CredentialId::from(id),
+            CredentialScope::Agent {
+                agentos_id: AgentOsId::from("agent-1"),
+            },
+            format!("Credential {id}"),
+            SecretValue::new(secret),
+            ts(),
+        )
+    }
+
+    #[test]
+    fn secret_value_debug_is_redacted() {
+        let secret = SecretValue::new("super-secret-token");
+
+        let debug = format!("{secret:?}");
+
+        assert_eq!(secret.expose_secret(), "super-secret-token");
+        assert!(!debug.contains("super-secret-token"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn credential_record_debug_is_redacted() {
+        let record = sample_credential("cred-1", "secret-value");
+
+        let debug = format!("{record:?}");
+
+        assert!(!debug.contains("secret-value"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("cred-1"));
+    }
+
+    #[tokio::test]
+    async fn memory_credential_store_write_and_read_secret() {
+        let store = MemoryCredentialStore::new();
+        let record = sample_credential("cred-1", "secret-value");
+
+        store.write(record.clone()).await.unwrap();
+        let fetched = store.read(&CredentialId::from("cred-1")).await.unwrap();
+
+        assert_eq!(fetched.metadata, record.metadata);
+        assert_eq!(fetched.secret.expose_secret(), "secret-value");
+    }
+
+    #[tokio::test]
+    async fn memory_credential_store_delete_secret() {
+        let store = MemoryCredentialStore::new();
+        store
+            .write(sample_credential("cred-1", "secret-value"))
+            .await
+            .unwrap();
+
+        store.delete(&CredentialId::from("cred-1")).await.unwrap();
+        let result = store.read(&CredentialId::from("cred-1")).await;
+
+        assert!(matches!(
+            result,
+            Err(CredentialError::NotFound(id)) if id == "cred-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_credential_store_list_metadata_does_not_include_secret() {
+        let store = MemoryCredentialStore::new();
+        store
+            .write(sample_credential("cred-1", "secret-value"))
+            .await
+            .unwrap();
+
+        let metadata = store.list_metadata().await.unwrap();
+        let debug = format!("{metadata:?}");
+
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, CredentialId::from("cred-1"));
+        assert!(!debug.contains("secret-value"));
+    }
+
+    #[tokio::test]
+    async fn memory_credential_store_list_metadata_is_deterministic() {
+        let store = MemoryCredentialStore::new();
+        store.write(sample_credential("cred-b", "b")).await.unwrap();
+        store.write(sample_credential("cred-a", "a")).await.unwrap();
+        store.write(sample_credential("cred-c", "c")).await.unwrap();
+
+        let ids: Vec<_> = store
+            .list_metadata()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id.0)
+            .collect();
+
+        assert_eq!(ids, vec!["cred-a", "cred-b", "cred-c"]);
+    }
+
+    #[tokio::test]
+    async fn encrypted_file_credential_store_skeleton_returns_typed_error() {
+        let store = EncryptedFileCredentialStore::new("/tmp/agentos-credentials.enc");
+
+        let result = store.read(&CredentialId::from("cred-1")).await;
+
+        assert!(matches!(
+            result,
+            Err(CredentialError::EncryptionUnavailable(reason)) if reason.contains("skeleton")
+        ));
+    }
+
+    #[test]
+    fn credential_scope_roundtrips_for_agent_and_connector() {
+        let agent_scope = CredentialScope::Agent {
+            agentos_id: AgentOsId::from("agent-1"),
+        };
+        let connector_scope = CredentialScope::Connector {
+            connector_id: "github".to_string(),
+        };
+
+        let agent_json = serde_json::to_string(&agent_scope).unwrap();
+        let connector_json = serde_json::to_string(&connector_scope).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<CredentialScope>(&agent_json).unwrap(),
+            agent_scope
+        );
+        assert_eq!(
+            serde_json::from_str::<CredentialScope>(&connector_json).unwrap(),
+            connector_scope
+        );
     }
 }
