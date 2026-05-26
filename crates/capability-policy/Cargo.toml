@@ -10,6 +10,7 @@ description = "Capability policy engine — evaluates whether actions are allowe
 action-core = { path = "../action-core" }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 

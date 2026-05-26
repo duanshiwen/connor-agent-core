@@ -15,6 +15,8 @@
 
 use action_core::{ActionRequest, SideEffectKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::Path;
 use thiserror::Error;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ pub struct PolicyEvaluation {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// A single policy rule that maps side effects to decisions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyRule {
     /// Side effect kind this rule applies to.
     pub side_effect: SideEffectKind,
@@ -108,6 +110,232 @@ pub enum PolicyRuleDecision {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Policy File
+// ────────────────────────────────────────────────────────────────────────────
+
+pub const CURRENT_POLICY_FILE_VERSION: u32 = 1;
+
+/// A `policy.toml` document for configuring capability policy rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PolicyFileDocument {
+    pub version: Option<u32>,
+    pub default_decision: PolicyRuleDecision,
+    pub side_effect_rules: Vec<PolicyRule>,
+    pub action_kind_rules: Vec<ActionKindPolicyRule>,
+    pub provider_domain_rules: Vec<ProviderDomainPolicyRule>,
+}
+
+impl Default for PolicyFileDocument {
+    fn default() -> Self {
+        Self {
+            version: None,
+            default_decision: PolicyRuleDecision::Deny,
+            side_effect_rules: Vec::new(),
+            action_kind_rules: Vec::new(),
+            provider_domain_rules: Vec::new(),
+        }
+    }
+}
+
+impl PolicyFileDocument {
+    /// Parse a `policy.toml` document from TOML text.
+    pub fn from_toml_str(input: &str) -> Result<Self, PolicyError> {
+        toml::from_str(input).map_err(|source| PolicyError::ParseToml {
+            reason: source.to_string(),
+        })
+    }
+
+    /// Parse a `policy.toml` document from disk.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
+        let path = path.as_ref();
+        let input = std::fs::read_to_string(path).map_err(|source| PolicyError::ReadFile {
+            path: path.display().to_string(),
+            reason: source.to_string(),
+        })?;
+        Self::from_toml_str(&input)
+    }
+
+    /// Validate the parsed policy document and return typed diagnostics.
+    pub fn validate(&self) -> PolicyValidationReport {
+        let mut diagnostics = Vec::new();
+
+        if let Some(version) = self.version {
+            if version > CURRENT_POLICY_FILE_VERSION {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::UnsupportedPolicyVersion,
+                    "version",
+                    format!(
+                        "policy file version {version} is newer than supported version {CURRENT_POLICY_FILE_VERSION}"
+                    ),
+                ));
+            }
+        }
+
+        let mut side_effects = BTreeSet::new();
+        for rule in &self.side_effect_rules {
+            if !side_effects.insert(rule.side_effect.clone()) {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::DuplicateSideEffectRule,
+                    "side_effect_rules",
+                    format!("duplicate side effect rule: {:?}", rule.side_effect),
+                ));
+            }
+        }
+
+        let mut action_kinds = BTreeSet::new();
+        for rule in &self.action_kind_rules {
+            if rule.action_kind.trim().is_empty() {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::EmptyActionKind,
+                    "action_kind_rules.action_kind",
+                    "action_kind must not be empty",
+                ));
+            } else if !action_kinds.insert(rule.action_kind.clone()) {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::DuplicateActionKindRule,
+                    "action_kind_rules.action_kind",
+                    format!("duplicate action kind rule: {}", rule.action_kind),
+                ));
+            }
+        }
+
+        let mut provider_domains = BTreeSet::new();
+        for rule in &self.provider_domain_rules {
+            if rule.provider.trim().is_empty() {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::EmptyProvider,
+                    "provider_domain_rules.provider",
+                    "provider must not be empty",
+                ));
+            }
+            if rule.domain.trim().is_empty() {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::EmptyDomain,
+                    "provider_domain_rules.domain",
+                    "domain must not be empty",
+                ));
+            }
+            if !rule.provider.trim().is_empty()
+                && !rule.domain.trim().is_empty()
+                && !provider_domains.insert((rule.provider.clone(), rule.domain.clone()))
+            {
+                diagnostics.push(PolicyDiagnostic::error(
+                    PolicyDiagnosticCode::DuplicateProviderDomainRule,
+                    "provider_domain_rules",
+                    format!(
+                        "duplicate provider/domain rule: {}/{}",
+                        rule.provider, rule.domain
+                    ),
+                ));
+            }
+        }
+
+        PolicyValidationReport { diagnostics }
+    }
+
+    /// Convert a valid policy file document into a capability policy.
+    pub fn into_capability_policy(self) -> Result<CapabilityPolicy, PolicyError> {
+        let report = self.validate();
+        if !report.is_valid() {
+            return Err(PolicyError::ValidationFailed { report });
+        }
+        Ok(CapabilityPolicy::new(
+            self.side_effect_rules,
+            self.default_decision,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionKindPolicyRule {
+    pub action_kind: String,
+    pub decision: PolicyRuleDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDomainPolicyRule {
+    pub provider: String,
+    pub domain: String,
+    pub decision: PolicyRuleDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyValidationReport {
+    pub diagnostics: Vec<PolicyDiagnostic>,
+}
+
+impl PolicyValidationReport {
+    pub fn is_valid(&self) -> bool {
+        !self
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == PolicyDiagnosticSeverity::Error)
+    }
+
+    pub fn has_error(&self, code: PolicyDiagnosticCode) -> bool {
+        self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PolicyDiagnosticSeverity::Error && diagnostic.code == code
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyDiagnostic {
+    pub severity: PolicyDiagnosticSeverity,
+    pub code: PolicyDiagnosticCode,
+    pub path: String,
+    pub message: String,
+}
+
+impl PolicyDiagnostic {
+    pub fn error(
+        code: PolicyDiagnosticCode,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: PolicyDiagnosticSeverity::Error,
+            code,
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn warning(
+        code: PolicyDiagnosticCode,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: PolicyDiagnosticSeverity::Warning,
+            code,
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDiagnosticCode {
+    UnsupportedPolicyVersion,
+    DuplicateSideEffectRule,
+    DuplicateActionKindRule,
+    DuplicateProviderDomainRule,
+    EmptyActionKind,
+    EmptyProvider,
+    EmptyDomain,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Capability Policy
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -122,6 +350,16 @@ pub struct CapabilityPolicy {
 }
 
 impl CapabilityPolicy {
+    /// Create a capability policy from `policy.toml` text.
+    pub fn from_policy_toml_str(input: &str) -> Result<Self, PolicyError> {
+        PolicyFileDocument::from_toml_str(input)?.into_capability_policy()
+    }
+
+    /// Create a capability policy from a `policy.toml` file.
+    pub fn from_policy_file(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
+        PolicyFileDocument::from_file(path)?.into_capability_policy()
+    }
+
     /// Create a new policy with the given rules.
     pub fn new(rules: Vec<PolicyRule>, default: PolicyRuleDecision) -> Self {
         Self {
@@ -310,6 +548,12 @@ pub enum PolicyError {
     Denied { reason: String },
     #[error("approval required: {reason}")]
     ApprovalRequired { reason: String },
+    #[error("failed to parse policy toml: {reason}")]
+    ParseToml { reason: String },
+    #[error("failed to read policy file {path}: {reason}")]
+    ReadFile { path: String, reason: String },
+    #[error("policy validation failed: {report:?}")]
+    ValidationFailed { report: PolicyValidationReport },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -521,6 +765,178 @@ mod tests {
         let decoded: PolicyEvaluation = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, evaluation);
+    }
+
+    #[test]
+    fn policy_file_loads_side_effect_rules() {
+        let document = PolicyFileDocument::from_toml_str(
+            r#"
+version = 1
+default_decision = "deny"
+
+[[side_effect_rules]]
+side_effect = "read_only"
+decision = "allow"
+
+[[side_effect_rules]]
+side_effect = "network_access"
+decision = "ask"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(document.version, Some(1));
+        assert_eq!(document.default_decision, PolicyRuleDecision::Deny);
+        assert_eq!(document.side_effect_rules.len(), 2);
+        assert!(document.validate().is_valid());
+    }
+
+    #[test]
+    fn policy_file_rejects_duplicate_side_effect_rules() {
+        let document = PolicyFileDocument::from_toml_str(
+            r#"
+default_decision = "deny"
+
+[[side_effect_rules]]
+side_effect = "read_only"
+decision = "allow"
+
+[[side_effect_rules]]
+side_effect = "read_only"
+decision = "deny"
+"#,
+        )
+        .unwrap();
+
+        let report = document.validate();
+
+        assert!(!report.is_valid());
+        assert!(report.has_error(PolicyDiagnosticCode::DuplicateSideEffectRule));
+    }
+
+    #[test]
+    fn policy_file_validates_action_kind_rules() {
+        let document = PolicyFileDocument::from_toml_str(
+            r#"
+default_decision = "deny"
+
+[[action_kind_rules]]
+action_kind = "knowledge.search"
+decision = "allow"
+
+[[action_kind_rules]]
+action_kind = ""
+decision = "deny"
+"#,
+        )
+        .unwrap();
+
+        let report = document.validate();
+
+        assert!(!report.is_valid());
+        assert!(report.has_error(PolicyDiagnosticCode::EmptyActionKind));
+    }
+
+    #[test]
+    fn policy_file_validates_provider_domain_rules() {
+        let document = PolicyFileDocument::from_toml_str(
+            r#"
+default_decision = "ask"
+
+[[provider_domain_rules]]
+provider = "openai"
+domain = "api.openai.com"
+decision = "ask"
+
+[[provider_domain_rules]]
+provider = "openai"
+domain = "api.openai.com"
+decision = "deny"
+
+[[provider_domain_rules]]
+provider = ""
+domain = ""
+decision = "deny"
+"#,
+        )
+        .unwrap();
+
+        let report = document.validate();
+
+        assert!(!report.is_valid());
+        assert!(report.has_error(PolicyDiagnosticCode::DuplicateProviderDomainRule));
+        assert!(report.has_error(PolicyDiagnosticCode::EmptyProvider));
+        assert!(report.has_error(PolicyDiagnosticCode::EmptyDomain));
+    }
+
+    #[test]
+    fn capability_policy_can_load_from_policy_toml() {
+        let policy = CapabilityPolicy::from_policy_toml_str(
+            r#"
+default_decision = "deny"
+
+[[side_effect_rules]]
+side_effect = "read_only"
+decision = "allow"
+
+[[side_effect_rules]]
+side_effect = "runtime_state_mutation"
+decision = "ask"
+"#,
+        )
+        .unwrap();
+
+        assert!(
+            policy
+                .evaluate(&test_request("knowledge.search"), &SideEffectKind::ReadOnly)
+                .is_allowed()
+        );
+        assert!(
+            policy
+                .evaluate(
+                    &test_request("knowledge.save_entry"),
+                    &SideEffectKind::RuntimeStateMutation
+                )
+                .is_ask()
+        );
+        assert!(
+            policy
+                .evaluate(
+                    &test_request("mail.send"),
+                    &SideEffectKind::ExternalSystemMutation
+                )
+                .is_denied()
+        );
+    }
+
+    #[test]
+    fn policy_file_from_file_reads_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentos-policy-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_decision = "deny"
+
+[[side_effect_rules]]
+side_effect = "read_only"
+decision = "allow"
+"#,
+        )
+        .unwrap();
+
+        let policy = CapabilityPolicy::from_policy_file(&path).unwrap();
+
+        assert!(
+            policy
+                .evaluate(&test_request("knowledge.search"), &SideEffectKind::ReadOnly)
+                .is_allowed()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
