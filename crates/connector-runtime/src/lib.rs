@@ -5,8 +5,10 @@
 //! Coordinates identity-core and server-account-core to provide a unified API
 //! for registering servers, binding accounts, and verifying challenges.
 
-use chrono::Utc;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use identity_core::{AgentOsId, DeviceId, FakeCryptoProvider, IdentityStore, PublicIdentity};
+use serde::{Deserialize, Serialize};
 use server_account_core::{
     AccountBindingAuditEvent, AccountBindingAuditOutcome, BindingApproval, ConnectionPolicy,
     MemoryServerAccountStore, MemoryServerRegistry, ServerAccountBinding, ServerAccountError,
@@ -14,6 +16,8 @@ use server_account_core::{
     ServerKind, ServerRegistration, ServerRegistry, ServerTrustStatus,
     evaluate_server_binding_trust,
 };
+use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
@@ -258,6 +262,377 @@ impl ConnectorRuntime {
         Ok(())
     }
 }
+
+// ===========================================================================
+// External Connector Framework
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// External Service Types
+// ---------------------------------------------------------------------------
+
+/// Supported external service types.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalServiceKind {
+    Gmail,
+    GitHub,
+    Linear,
+    Slack,
+    Notion,
+    Calendar,
+    Custom(String),
+}
+
+impl fmt::Display for ExternalServiceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gmail => write!(f, "gmail"),
+            Self::GitHub => write!(f, "github"),
+            Self::Linear => write!(f, "linear"),
+            Self::Slack => write!(f, "slack"),
+            Self::Notion => write!(f, "notion"),
+            Self::Calendar => write!(f, "calendar"),
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External Service Credentials
+// ---------------------------------------------------------------------------
+
+/// OAuth/API credentials for an external service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalServiceCredentials {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
+    pub token_type: String,
+}
+
+impl ExternalServiceCredentials {
+    pub fn new(access_token: impl Into<String>) -> Self {
+        Self {
+            access_token: access_token.into(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: vec![],
+            token_type: "Bearer".to_string(),
+        }
+    }
+
+    pub fn with_refresh_token(mut self, refresh_token: impl Into<String>) -> Self {
+        self.refresh_token = Some(refresh_token.into());
+        self
+    }
+
+    pub fn with_expiry(mut self, expires_at: DateTime<Utc>) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    pub fn with_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.scopes = scopes;
+        self
+    }
+
+    /// Check if the credential is expired.
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            Some(expiry) => Utc::now() > expiry,
+            None => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External Resource Types
+// ---------------------------------------------------------------------------
+
+/// Kind of external resource.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalResourceKind {
+    Email,
+    EmailThread,
+    Issue,
+    PullRequest,
+    Document,
+    Message,
+    CalendarEvent,
+    Contact,
+    Custom(String),
+}
+
+impl fmt::Display for ExternalResourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Email => write!(f, "email"),
+            Self::EmailThread => write!(f, "email_thread"),
+            Self::Issue => write!(f, "issue"),
+            Self::PullRequest => write!(f, "pull_request"),
+            Self::Document => write!(f, "document"),
+            Self::Message => write!(f, "message"),
+            Self::CalendarEvent => write!(f, "calendar_event"),
+            Self::Contact => write!(f, "contact"),
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+/// Reference to an external resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalResourceRef {
+    pub service: ExternalServiceKind,
+    pub resource_kind: ExternalResourceKind,
+    pub resource_id: String,
+    pub url: Option<String>,
+    pub title: Option<String>,
+}
+
+impl ExternalResourceRef {
+    pub fn new(
+        service: ExternalServiceKind,
+        resource_kind: ExternalResourceKind,
+        resource_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            service,
+            resource_kind,
+            resource_id: resource_id.into(),
+            url: None,
+            title: None,
+        }
+    }
+
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External Connector Trait
+// ---------------------------------------------------------------------------
+
+/// Metadata about a synced external resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalResourceMetadata {
+    pub resource_ref: ExternalResourceRef,
+    pub synced_at: DateTime<Utc>,
+    pub etag: Option<String>,
+    pub raw_size_bytes: Option<u64>,
+}
+
+/// Result of listing external resources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalResourceList {
+    pub resources: Vec<ExternalResourceMetadata>,
+    pub next_page_token: Option<String>,
+    pub total_count: Option<u64>,
+}
+
+/// Trait for external service connectors.
+#[async_trait]
+pub trait ExternalConnector: Send + Sync {
+    /// The kind of external service this connector handles.
+    fn service_kind(&self) -> ExternalServiceKind;
+
+    /// Check if the connector is authenticated and ready.
+    fn is_authenticated(&self) -> bool;
+
+    /// Get the current credentials (for inspection, not mutation).
+    fn credentials(&self) -> Option<&ExternalServiceCredentials>;
+
+    /// List resources from the external service.
+    async fn list_resources(
+        &self,
+        resource_kind: &ExternalResourceKind,
+        page_token: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<ExternalResourceList, ExternalConnectorError>;
+
+    /// Get a single resource by ID.
+    async fn get_resource(
+        &self,
+        resource_kind: &ExternalResourceKind,
+        resource_id: &str,
+    ) -> Result<ExternalResourceMetadata, ExternalConnectorError>;
+
+    /// Refresh the OAuth token if supported.
+    async fn refresh_token(&mut self) -> Result<(), ExternalConnectorError> {
+        Err(ExternalConnectorError::TokenRefreshNotSupported)
+    }
+}
+
+/// Identifier for an external connector instance.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExternalConnectorId(pub String);
+
+impl fmt::Display for ExternalConnectorId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for ExternalConnectorId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for ExternalConnectorId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// Registration record for an external connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalConnectorRegistration {
+    pub id: ExternalConnectorId,
+    pub service: ExternalServiceKind,
+    pub display_name: String,
+    pub connected_at: DateTime<Utc>,
+    pub last_synced_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// External Connector Registry
+// ---------------------------------------------------------------------------
+
+/// Trait for storing external connector registrations.
+#[async_trait]
+pub trait ExternalConnectorRegistry: Send + Sync {
+    async fn register(
+        &self,
+        registration: &ExternalConnectorRegistration,
+    ) -> Result<(), ExternalConnectorError>;
+    async fn unregister(&self, id: &ExternalConnectorId) -> Result<(), ExternalConnectorError>;
+    async fn get(
+        &self,
+        id: &ExternalConnectorId,
+    ) -> Result<ExternalConnectorRegistration, ExternalConnectorError>;
+    async fn list(&self) -> Result<Vec<ExternalConnectorRegistration>, ExternalConnectorError>;
+    async fn list_by_service(
+        &self,
+        service: &ExternalServiceKind,
+    ) -> Result<Vec<ExternalConnectorRegistration>, ExternalConnectorError>;
+}
+
+/// In-memory implementation of ExternalConnectorRegistry.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryExternalConnectorRegistry {
+    connectors: Arc<Mutex<HashMap<ExternalConnectorId, ExternalConnectorRegistration>>>,
+}
+
+impl MemoryExternalConnectorRegistry {
+    pub fn new() -> Self {
+        Self {
+            connectors: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ExternalConnectorRegistry for MemoryExternalConnectorRegistry {
+    async fn register(
+        &self,
+        registration: &ExternalConnectorRegistration,
+    ) -> Result<(), ExternalConnectorError> {
+        let mut connectors = self
+            .connectors
+            .lock()
+            .map_err(|e| ExternalConnectorError::RegistryLock(e.to_string()))?;
+        connectors.insert(registration.id.clone(), registration.clone());
+        Ok(())
+    }
+
+    async fn unregister(&self, id: &ExternalConnectorId) -> Result<(), ExternalConnectorError> {
+        let mut connectors = self
+            .connectors
+            .lock()
+            .map_err(|e| ExternalConnectorError::RegistryLock(e.to_string()))?;
+        connectors.remove(id);
+        Ok(())
+    }
+
+    async fn get(
+        &self,
+        id: &ExternalConnectorId,
+    ) -> Result<ExternalConnectorRegistration, ExternalConnectorError> {
+        let connectors = self
+            .connectors
+            .lock()
+            .map_err(|e| ExternalConnectorError::RegistryLock(e.to_string()))?;
+        connectors
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ExternalConnectorError::ConnectorNotFound(id.0.clone()))
+    }
+
+    async fn list(&self) -> Result<Vec<ExternalConnectorRegistration>, ExternalConnectorError> {
+        let connectors = self
+            .connectors
+            .lock()
+            .map_err(|e| ExternalConnectorError::RegistryLock(e.to_string()))?;
+        Ok(connectors.values().cloned().collect())
+    }
+
+    async fn list_by_service(
+        &self,
+        service: &ExternalServiceKind,
+    ) -> Result<Vec<ExternalConnectorRegistration>, ExternalConnectorError> {
+        let connectors = self
+            .connectors
+            .lock()
+            .map_err(|e| ExternalConnectorError::RegistryLock(e.to_string()))?;
+        Ok(connectors
+            .values()
+            .filter(|c| c.service == *service)
+            .cloned()
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External Connector Errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExternalConnectorError {
+    #[error("connector not found: {0}")]
+    ConnectorNotFound(String),
+    #[error("authentication required")]
+    AuthenticationRequired,
+    #[error("token expired")]
+    TokenExpired,
+    #[error("token refresh not supported")]
+    TokenRefreshNotSupported,
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+    #[error("rate limited, retry after {0}s")]
+    RateLimited(u64),
+    #[error("resource not found: {0}")]
+    ResourceNotFound(String),
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("registry lock error: {0}")]
+    RegistryLock(String),
+    #[error("io error: {0}")]
+    Io(String),
+}
+
+// ===========================================================================
+// Original ConnectorRuntime (Server/Peer connections)
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -880,5 +1255,230 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].outcome, AccountBindingAuditOutcome::Rejected);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 146: External Connector Framework
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn external_service_kind_display() {
+        assert_eq!(ExternalServiceKind::Gmail.to_string(), "gmail");
+        assert_eq!(ExternalServiceKind::GitHub.to_string(), "github");
+        assert_eq!(ExternalServiceKind::Linear.to_string(), "linear");
+        assert_eq!(ExternalServiceKind::Slack.to_string(), "slack");
+        assert_eq!(ExternalServiceKind::Notion.to_string(), "notion");
+        assert_eq!(ExternalServiceKind::Calendar.to_string(), "calendar");
+        assert_eq!(
+            ExternalServiceKind::Custom("jira".to_string()).to_string(),
+            "jira"
+        );
+    }
+
+    #[test]
+    fn external_service_kind_serialize_as_snake_case() {
+        let kind = ExternalServiceKind::Gmail;
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, "\"gmail\"");
+
+        // Custom variant serializes as {"custom":"value"} due to serde tagged enum
+        let kind = ExternalServiceKind::Custom("my_service".to_string());
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("my_service"));
+    }
+
+    #[test]
+    fn external_resource_kind_display() {
+        assert_eq!(ExternalResourceKind::Email.to_string(), "email");
+        assert_eq!(
+            ExternalResourceKind::EmailThread.to_string(),
+            "email_thread"
+        );
+        assert_eq!(ExternalResourceKind::Issue.to_string(), "issue");
+        assert_eq!(
+            ExternalResourceKind::PullRequest.to_string(),
+            "pull_request"
+        );
+    }
+
+    #[test]
+    fn external_credentials_roundtrip() {
+        let creds = ExternalServiceCredentials::new("test-token")
+            .with_refresh_token("refresh-token")
+            .with_expiry(Utc::now() + chrono::Duration::hours(1))
+            .with_scopes(vec!["read".to_string(), "write".to_string()]);
+
+        let json = serde_json::to_string_pretty(&creds).unwrap();
+        let decoded: ExternalServiceCredentials = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.access_token, "test-token");
+        assert_eq!(decoded.refresh_token.as_deref(), Some("refresh-token"));
+        assert_eq!(decoded.scopes.len(), 2);
+        assert!(!decoded.is_expired());
+    }
+
+    #[test]
+    fn external_credentials_is_expired() {
+        let creds = ExternalServiceCredentials::new("token")
+            .with_expiry(Utc::now() - chrono::Duration::hours(1));
+        assert!(creds.is_expired());
+
+        let creds = ExternalServiceCredentials::new("token")
+            .with_expiry(Utc::now() + chrono::Duration::hours(1));
+        assert!(!creds.is_expired());
+
+        let creds = ExternalServiceCredentials::new("token");
+        assert!(!creds.is_expired());
+    }
+
+    #[test]
+    fn external_resource_ref_roundtrip() {
+        let resource_ref = ExternalResourceRef::new(
+            ExternalServiceKind::Gmail,
+            ExternalResourceKind::EmailThread,
+            "thread-123",
+        )
+        .with_url("https://mail.google.com/thread/123")
+        .with_title("Important Thread");
+
+        let json = serde_json::to_string_pretty(&resource_ref).unwrap();
+        let decoded: ExternalResourceRef = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.service, ExternalServiceKind::Gmail);
+        assert_eq!(decoded.resource_kind, ExternalResourceKind::EmailThread);
+        assert_eq!(decoded.resource_id, "thread-123");
+        assert_eq!(
+            decoded.url.as_deref(),
+            Some("https://mail.google.com/thread/123")
+        );
+        assert_eq!(decoded.title.as_deref(), Some("Important Thread"));
+    }
+
+    #[test]
+    fn external_connector_id_roundtrip() {
+        let id = ExternalConnectorId::from("gmail-connector-1");
+        assert_eq!(id.0, "gmail-connector-1");
+        assert_eq!(id.to_string(), "gmail-connector-1");
+
+        let id = ExternalConnectorId::from("my-id".to_string());
+        assert_eq!(id.0, "my-id");
+    }
+
+    #[tokio::test]
+    async fn memory_external_connector_registry_register_and_list() {
+        let registry = MemoryExternalConnectorRegistry::new();
+
+        let reg = ExternalConnectorRegistration {
+            id: ExternalConnectorId::from("gmail-1"),
+            service: ExternalServiceKind::Gmail,
+            display_name: "My Gmail".to_string(),
+            connected_at: Utc::now(),
+            last_synced_at: None,
+        };
+
+        registry.register(&reg).await.unwrap();
+
+        let all = registry.list().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id.0, "gmail-1");
+        assert_eq!(all[0].service, ExternalServiceKind::Gmail);
+    }
+
+    #[tokio::test]
+    async fn memory_external_connector_registry_list_by_service() {
+        let registry = MemoryExternalConnectorRegistry::new();
+
+        registry
+            .register(&ExternalConnectorRegistration {
+                id: ExternalConnectorId::from("gmail-1"),
+                service: ExternalServiceKind::Gmail,
+                display_name: "Gmail".to_string(),
+                connected_at: Utc::now(),
+                last_synced_at: None,
+            })
+            .await
+            .unwrap();
+
+        registry
+            .register(&ExternalConnectorRegistration {
+                id: ExternalConnectorId::from("github-1"),
+                service: ExternalServiceKind::GitHub,
+                display_name: "GitHub".to_string(),
+                connected_at: Utc::now(),
+                last_synced_at: None,
+            })
+            .await
+            .unwrap();
+
+        let gmail_connectors = registry
+            .list_by_service(&ExternalServiceKind::Gmail)
+            .await
+            .unwrap();
+        assert_eq!(gmail_connectors.len(), 1);
+        assert_eq!(gmail_connectors[0].id.0, "gmail-1");
+
+        let github_connectors = registry
+            .list_by_service(&ExternalServiceKind::GitHub)
+            .await
+            .unwrap();
+        assert_eq!(github_connectors.len(), 1);
+        assert_eq!(github_connectors[0].id.0, "github-1");
+    }
+
+    #[tokio::test]
+    async fn memory_external_connector_registry_get_and_unregister() {
+        let registry = MemoryExternalConnectorRegistry::new();
+
+        let reg = ExternalConnectorRegistration {
+            id: ExternalConnectorId::from("gmail-1"),
+            service: ExternalServiceKind::Gmail,
+            display_name: "Gmail".to_string(),
+            connected_at: Utc::now(),
+            last_synced_at: None,
+        };
+
+        registry.register(&reg).await.unwrap();
+
+        let retrieved = registry
+            .get(&ExternalConnectorId::from("gmail-1"))
+            .await
+            .unwrap();
+        assert_eq!(retrieved.display_name, "Gmail");
+
+        registry
+            .unregister(&ExternalConnectorId::from("gmail-1"))
+            .await
+            .unwrap();
+
+        let result = registry.get(&ExternalConnectorId::from("gmail-1")).await;
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::ConnectorNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn external_resource_list_roundtrip() {
+        let list = ExternalResourceList {
+            resources: vec![ExternalResourceMetadata {
+                resource_ref: ExternalResourceRef::new(
+                    ExternalServiceKind::GitHub,
+                    ExternalResourceKind::Issue,
+                    "issue-42",
+                ),
+                synced_at: Utc::now(),
+                etag: Some("abc123".to_string()),
+                raw_size_bytes: Some(1024),
+            }],
+            next_page_token: Some("page-2".to_string()),
+            total_count: Some(100),
+        };
+
+        let json = serde_json::to_string_pretty(&list).unwrap();
+        let decoded: ExternalResourceList = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.resources.len(), 1);
+        assert_eq!(decoded.next_page_token.as_deref(), Some("page-2"));
+        assert_eq!(decoded.total_count, Some(100));
     }
 }
