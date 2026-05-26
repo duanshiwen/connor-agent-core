@@ -1832,6 +1832,76 @@ impl BrowserDownloadInput {
     }
 }
 
+/// Captured metadata for one browser DOM snapshot artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserDomSnapshotArtifact {
+    pub artifact_id: ArtifactId,
+    pub source_url: String,
+    pub title: Option<String>,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub captured_at: DateTime<Utc>,
+}
+
+impl BrowserDomSnapshotArtifact {
+    pub fn from_html(
+        artifact_id: ArtifactId,
+        source_url: impl Into<String>,
+        title: impl Into<String>,
+        html: impl AsRef<str>,
+        captured_at: DateTime<Utc>,
+    ) -> Result<Self, BrowserKernelError> {
+        let source_url = source_url.into();
+        let title = title.into();
+        let html = html.as_ref();
+        if html.trim().is_empty() {
+            return Err(BrowserKernelError::InvalidConfig(
+                "dom snapshot html cannot be empty".to_string(),
+            ));
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(html.as_bytes());
+        let sha256 = format!("{:x}", hasher.finalize());
+
+        Ok(Self {
+            artifact_id,
+            source_url,
+            title: if title.trim().is_empty() {
+                None
+            } else {
+                Some(title)
+            },
+            mime_type: "text/html".to_string(),
+            size_bytes: html.len() as u64,
+            sha256,
+            captured_at,
+        })
+    }
+
+    pub fn to_artifact_descriptor(&self, source_action: Option<&str>) -> ArtifactDescriptor {
+        let mut descriptor = ArtifactDescriptor::new(
+            self.artifact_id.clone(),
+            ArtifactKind::WebPage,
+            self.captured_at,
+        );
+        descriptor.title = Some(match self.title.as_deref() {
+            Some(title) => format!("DOM snapshot of {}", title),
+            None => format!("DOM snapshot of {}", self.source_url),
+        });
+        descriptor.source_uri = Some(self.source_url.clone());
+        descriptor.mime_type = Some(self.mime_type.clone());
+        descriptor.metadata = serde_json::json!({
+            "source": "browser_dom_snapshot",
+            "source_action": source_action,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+        });
+        descriptor
+    }
+}
+
 /// Captured metadata for one browser download artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserDownloadArtifact {
@@ -2130,6 +2200,8 @@ struct BrowserOpenUrlInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BrowserExtractContentInput {
     url: String,
+    #[serde(default)]
+    save_dom_snapshot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2466,6 +2538,7 @@ impl CdpBrowserExecutor {
         page.goto(url.clone()).await.map_err(to_execution_failed)?;
 
         let current_url = page_url(&page).await.unwrap_or_else(|_| url.clone());
+        let title = page_title(&page).await.unwrap_or_default();
         let text = page_body_text(&page).await.unwrap_or_default();
         let links = page_string_array(&page, LINK_EXTRACTION_JS)
             .await
@@ -2473,16 +2546,39 @@ impl CdpBrowserExecutor {
         let images = page_string_array(&page, IMAGE_EXTRACTION_JS)
             .await
             .unwrap_or_default();
+        let extracted_at = chrono::Utc::now();
+        let mut dom_snapshot_artifact_id = None;
+
+        if input.save_dom_snapshot {
+            let html = page.content().await.map_err(to_execution_failed)?;
+            let artifact = BrowserDomSnapshotArtifact::from_html(
+                ArtifactId(format!("dom-snapshot-{}", extracted_at.timestamp_millis())),
+                current_url.clone(),
+                title.clone(),
+                html,
+                extracted_at,
+            )
+            .map_err(to_execution_failed)?;
+            let descriptor = artifact.to_artifact_descriptor(Some("browser.extract_content"));
+            if let Some(ref store) = self.artifact_store {
+                store.put(descriptor).await.map_err(|e| {
+                    to_execution_failed(format!("failed to store dom snapshot artifact: {}", e))
+                })?;
+            }
+            dom_snapshot_artifact_id = Some(artifact.artifact_id);
+        }
 
         Ok(action_core::ActionResult {
             status: action_core::ActionStatus::Completed,
             summary: format!("Extracted content from URL: {}", current_url),
             payload: action_core::ActionResultPayload::Json(serde_json::json!({
                 "source_url": { "0": current_url },
+                "title": title,
                 "text": text,
                 "links": links,
                 "images": images,
-                "extracted_at": chrono::Utc::now()
+                "dom_snapshot_artifact_id": dom_snapshot_artifact_id,
+                "extracted_at": extracted_at
             })),
             completed_at: chrono::Utc::now(),
         })
@@ -4627,6 +4723,80 @@ mod tests {
         assert_eq!(decoded, result);
     }
 
+    // ---- DOM snapshot artifact tests ----
+
+    #[test]
+    fn browser_dom_snapshot_artifact_records_hash_size_and_content_type() {
+        let snapshot = BrowserDomSnapshotArtifact::from_html(
+            ArtifactId::from("dom-1"),
+            "https://example.com/app",
+            "Example App",
+            "<html><body>Hello</body></html>",
+            ts(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.artifact_id, ArtifactId::from("dom-1"));
+        assert_eq!(snapshot.source_url, "https://example.com/app");
+        assert_eq!(snapshot.title, Some("Example App".to_string()));
+        assert_eq!(snapshot.mime_type, "text/html");
+        assert_eq!(snapshot.size_bytes, 31);
+        assert_eq!(
+            snapshot.sha256,
+            "03ee66f1452916b4f91a504c1e9babfa201b6d64c26a82b2cf03c3ed49d91585"
+        );
+    }
+
+    #[test]
+    fn browser_dom_snapshot_artifact_descriptor_links_to_source_action() {
+        let snapshot = BrowserDomSnapshotArtifact::from_html(
+            ArtifactId::from("dom-1"),
+            "https://example.com/app",
+            "Example App",
+            "<html><body>Hello</body></html>",
+            ts(),
+        )
+        .unwrap();
+
+        let descriptor = snapshot.to_artifact_descriptor(Some("browser.extract_content"));
+
+        assert_eq!(descriptor.id, ArtifactId::from("dom-1"));
+        assert_eq!(descriptor.kind, ArtifactKind::WebPage);
+        assert_eq!(
+            descriptor.title,
+            Some("DOM snapshot of Example App".to_string())
+        );
+        assert_eq!(
+            descriptor.source_uri,
+            Some("https://example.com/app".to_string())
+        );
+        assert_eq!(descriptor.mime_type, Some("text/html".to_string()));
+        assert_eq!(descriptor.metadata["source"], "browser_dom_snapshot");
+        assert_eq!(
+            descriptor.metadata["source_action"],
+            "browser.extract_content"
+        );
+        assert_eq!(descriptor.metadata["size_bytes"], 31);
+        assert_eq!(
+            descriptor.metadata["sha256"],
+            "03ee66f1452916b4f91a504c1e9babfa201b6d64c26a82b2cf03c3ed49d91585"
+        );
+    }
+
+    #[test]
+    fn browser_dom_snapshot_artifact_rejects_empty_html() {
+        assert!(matches!(
+            BrowserDomSnapshotArtifact::from_html(
+                ArtifactId::from("dom-empty"),
+                "https://example.com",
+                "Example",
+                "   ",
+                ts(),
+            ),
+            Err(BrowserKernelError::InvalidConfig(_))
+        ));
+    }
+
     // ---- Download artifact tests ----
 
     #[test]
@@ -4952,6 +5122,15 @@ mod tests {
             }
             other => panic!("expected ExecutionFailed before dispatch, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn browser_extract_content_input_defaults_dom_snapshot_false() {
+        let input: BrowserExtractContentInput =
+            serde_json::from_value(serde_json::json!({"url": "https://example.com/app"})).unwrap();
+
+        assert_eq!(input.url, "https://example.com/app");
+        assert!(!input.save_dom_snapshot);
     }
 
     #[test]

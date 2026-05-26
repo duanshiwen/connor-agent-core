@@ -1,5 +1,37 @@
 # Roadmap Progress
 
+## 2026-05-26 — M21 PR130: DOM snapshot artifact
+
+Status: implemented.
+
+### Scope
+
+- Added `BrowserDomSnapshotArtifact` for HTML/DOM snapshot evidence metadata.
+- DOM snapshot artifacts record source URL, optional page title, `text/html` MIME type, byte size, SHA-256 hash, and capture timestamp.
+- Added `BrowserDomSnapshotArtifact::to_artifact_descriptor(...)` to link snapshots to `ArtifactDescriptor` with `ArtifactKind::WebPage`.
+- Added `BrowserExtractContentInput::save_dom_snapshot` with a serde default of `false` for backwards-compatible action input.
+- Updated `browser.extract_content` to optionally capture page HTML and persist a DOM snapshot descriptor through the configured `ArtifactStore`.
+- `browser.extract_content` payload now includes `title` and `dom_snapshot_artifact_id` so callers can link extracted content to evidence artifacts.
+
+### Acceptance coverage
+
+- DOM snapshot artifact metadata records content type, byte size, source URL, title, and SHA-256 hash.
+- DOM snapshot artifact descriptor links to the source URL and `browser.extract_content` action.
+- Empty DOM snapshot HTML is rejected with a typed config error.
+- `browser.extract_content` keeps `save_dom_snapshot` disabled by default.
+
+### Verification commands
+
+```bash
+cargo test -p browser-kernel-core browser_dom_snapshot_artifact
+cargo test -p browser-kernel-core browser_extract_content_input
+cargo test -p browser-kernel-core
+```
+
+### Next planned step
+
+M21 PR131: HAR / network trace boundary.
+
 ## 2026-05-26 — M21 PR129: Frame / iframe support
 
 Status: implemented.
