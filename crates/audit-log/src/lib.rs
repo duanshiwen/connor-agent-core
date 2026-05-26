@@ -340,6 +340,298 @@ fn resource_matches(resource: Option<&str>, event: &AuditEvent) -> bool {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Enterprise Audit Sink Boundary
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseAuditBatch {
+    pub batch_id: String,
+    pub events: Vec<AuditEvent>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl EnterpriseAuditBatch {
+    pub fn new(events: Vec<AuditEvent>) -> anyhow::Result<Self> {
+        let first = events
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("enterprise audit batch cannot be empty"))?;
+        Ok(Self {
+            batch_id: enterprise_batch_id(&events),
+            created_at: first.timestamp,
+            events,
+        })
+    }
+
+    pub fn audit_ids(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .map(|event| event.audit_id.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseAuditSinkResult {
+    pub accepted_count: usize,
+    pub status: EnterpriseAuditSinkStatus,
+    pub message: Option<String>,
+}
+
+impl EnterpriseAuditSinkResult {
+    pub fn accepted(accepted_count: usize) -> Self {
+        Self {
+            accepted_count,
+            status: EnterpriseAuditSinkStatus::Accepted,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnterpriseAuditSinkStatus {
+    Accepted,
+    PartiallyAccepted,
+    Rejected,
+    TransientFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EnterpriseAuditError {
+    Permanent { reason: String },
+    Transient { reason: String },
+}
+
+impl EnterpriseAuditError {
+    pub fn permanent(reason: impl Into<String>) -> Self {
+        Self::Permanent {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn transient(reason: impl Into<String>) -> Self {
+        Self::Transient {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Permanent { reason } | Self::Transient { reason } => reason,
+        }
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient { .. })
+    }
+}
+
+impl std::fmt::Display for EnterpriseAuditError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Permanent { reason } => {
+                write!(formatter, "permanent enterprise audit error: {reason}")
+            }
+            Self::Transient { reason } => {
+                write!(formatter, "transient enterprise audit error: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnterpriseAuditError {}
+
+#[async_trait]
+pub trait EnterpriseAuditSink: Send + Sync {
+    async fn send_batch(
+        &self,
+        batch: EnterpriseAuditBatch,
+    ) -> Result<EnterpriseAuditSinkResult, EnterpriseAuditError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseAuditDeliveryFailure {
+    pub batch_id: String,
+    pub audit_ids: Vec<String>,
+    pub reason: String,
+    pub transient: bool,
+    pub failed_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct EnterpriseMirrorAuditLog {
+    local: Arc<dyn AuditLog>,
+    enterprise: Arc<dyn EnterpriseAuditSink>,
+    batch_size: usize,
+    pending: Arc<Mutex<Vec<AuditEvent>>>,
+    delivery_failures: Arc<Mutex<Vec<EnterpriseAuditDeliveryFailure>>>,
+}
+
+impl EnterpriseMirrorAuditLog {
+    pub fn new(
+        local: Arc<dyn AuditLog>,
+        enterprise: Arc<dyn EnterpriseAuditSink>,
+        batch_size: usize,
+    ) -> Self {
+        Self {
+            local,
+            enterprise,
+            batch_size: batch_size.max(1),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            delivery_failures: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn delivery_failures(&self) -> Vec<EnterpriseAuditDeliveryFailure> {
+        self.delivery_failures.lock().unwrap().clone()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap().len()
+    }
+
+    async fn send_enterprise_batch(&self, batch: EnterpriseAuditBatch) {
+        match self.enterprise.send_batch(batch.clone()).await {
+            Ok(result) if result.status == EnterpriseAuditSinkStatus::Accepted => {}
+            Ok(result) => self.record_delivery_failure(
+                &batch,
+                result.message.unwrap_or_else(|| {
+                    format!("enterprise audit sink returned {:?}", result.status)
+                }),
+                result.status == EnterpriseAuditSinkStatus::TransientFailure,
+            ),
+            Err(error) => self.record_delivery_failure(
+                &batch,
+                error.reason().to_string(),
+                error.is_transient(),
+            ),
+        }
+    }
+
+    fn record_delivery_failure(
+        &self,
+        batch: &EnterpriseAuditBatch,
+        reason: String,
+        transient: bool,
+    ) {
+        self.delivery_failures
+            .lock()
+            .unwrap()
+            .push(EnterpriseAuditDeliveryFailure {
+                batch_id: batch.batch_id.clone(),
+                audit_ids: batch.audit_ids(),
+                reason,
+                transient,
+                failed_at: Utc::now(),
+            });
+    }
+}
+
+#[async_trait]
+impl AuditLog for EnterpriseMirrorAuditLog {
+    async fn record(&self, event: AuditEvent) -> anyhow::Result<()> {
+        self.local.record(event.clone()).await?;
+
+        let maybe_batch = {
+            let mut pending = self.pending.lock().unwrap();
+            pending.push(event);
+            if pending.len() >= self.batch_size {
+                let events = pending.drain(..).collect::<Vec<_>>();
+                Some(EnterpriseAuditBatch::new(events)?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(batch) = maybe_batch {
+            self.send_enterprise_batch(batch).await;
+        }
+
+        Ok(())
+    }
+
+    async fn list(&self) -> anyhow::Result<Vec<AuditEvent>> {
+        self.local.list().await
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryEnterpriseAuditSink {
+    batches: Arc<Mutex<Vec<EnterpriseAuditBatch>>>,
+    failure: Arc<Mutex<Option<EnterpriseAuditError>>>,
+    status: Arc<Mutex<Option<EnterpriseAuditSinkStatus>>>,
+}
+
+impl MemoryEnterpriseAuditSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn failing(error: EnterpriseAuditError) -> Self {
+        let sink = Self::new();
+        sink.set_failure(error);
+        sink
+    }
+
+    pub fn with_status(status: EnterpriseAuditSinkStatus) -> Self {
+        let sink = Self::new();
+        sink.set_status(status);
+        sink
+    }
+
+    pub fn set_failure(&self, error: EnterpriseAuditError) {
+        *self.failure.lock().unwrap() = Some(error);
+    }
+
+    pub fn set_status(&self, status: EnterpriseAuditSinkStatus) {
+        *self.status.lock().unwrap() = Some(status);
+    }
+
+    pub fn batches(&self) -> Vec<EnterpriseAuditBatch> {
+        self.batches.lock().unwrap().clone()
+    }
+
+    pub fn count(&self) -> usize {
+        self.batches.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl EnterpriseAuditSink for MemoryEnterpriseAuditSink {
+    async fn send_batch(
+        &self,
+        batch: EnterpriseAuditBatch,
+    ) -> Result<EnterpriseAuditSinkResult, EnterpriseAuditError> {
+        if let Some(error) = self.failure.lock().unwrap().clone() {
+            return Err(error);
+        }
+
+        let accepted_count = batch.events.len();
+        self.batches.lock().unwrap().push(batch);
+        let status = self
+            .status
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(EnterpriseAuditSinkStatus::Accepted);
+        Ok(EnterpriseAuditSinkResult {
+            accepted_count,
+            status,
+            message: None,
+        })
+    }
+}
+
+fn enterprise_batch_id(events: &[AuditEvent]) -> String {
+    let first_audit_id = events
+        .first()
+        .map(|event| event.audit_id.as_str())
+        .unwrap_or("empty");
+    format!("enterprise-batch-{first_audit_id}-{}", events.len())
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Audit Log trait
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -866,6 +1158,128 @@ mod tests {
 
         assert_eq!(result.total_matched, 1);
         assert_eq!(result.events[0].audit_id, "audit-003");
+    }
+
+    #[test]
+    fn enterprise_batch_contains_events_and_metadata() {
+        let first = sample_audit_event("action-001");
+        let second = sample_audit_event("action-002");
+        let batch = EnterpriseAuditBatch::new(vec![first.clone(), second.clone()]).unwrap();
+
+        assert_eq!(batch.batch_id, "enterprise-batch-audit-action-001-2");
+        assert_eq!(batch.created_at, first.timestamp);
+        assert_eq!(batch.audit_ids(), vec![first.audit_id, second.audit_id]);
+    }
+
+    #[tokio::test]
+    async fn memory_enterprise_sink_collects_batches() {
+        let sink = MemoryEnterpriseAuditSink::new();
+        let batch = EnterpriseAuditBatch::new(vec![sample_audit_event("action-001")]).unwrap();
+
+        let result = sink.send_batch(batch.clone()).await.unwrap();
+
+        assert_eq!(result.status, EnterpriseAuditSinkStatus::Accepted);
+        assert_eq!(result.accepted_count, 1);
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.batches()[0], batch);
+    }
+
+    #[tokio::test]
+    async fn enterprise_mirror_records_local_before_enterprise_success() {
+        let local = Arc::new(MemoryAuditSink::new());
+        let enterprise = Arc::new(MemoryEnterpriseAuditSink::new());
+        let mirror = EnterpriseMirrorAuditLog::new(local.clone(), enterprise.clone(), 1);
+
+        mirror
+            .record(sample_audit_event("action-001"))
+            .await
+            .unwrap();
+
+        assert_eq!(local.count(), 1);
+        assert_eq!(enterprise.count(), 1);
+        assert_eq!(enterprise.batches()[0].events[0].action_id, "action-001");
+    }
+
+    #[tokio::test]
+    async fn enterprise_mirror_preserves_local_audit_when_enterprise_fails() {
+        let local = Arc::new(MemoryAuditSink::new());
+        let enterprise = Arc::new(MemoryEnterpriseAuditSink::failing(
+            EnterpriseAuditError::transient("network unavailable"),
+        ));
+        let mirror = EnterpriseMirrorAuditLog::new(local.clone(), enterprise, 1);
+
+        mirror
+            .record(sample_audit_event("action-001"))
+            .await
+            .unwrap();
+
+        assert_eq!(local.count(), 1);
+        assert_eq!(local.list().await.unwrap()[0].action_id, "action-001");
+        assert_eq!(mirror.delivery_failures().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn enterprise_mirror_records_delivery_failure_metadata() {
+        let local = Arc::new(MemoryAuditSink::new());
+        let enterprise = Arc::new(MemoryEnterpriseAuditSink::failing(
+            EnterpriseAuditError::permanent("schema rejected"),
+        ));
+        let mirror = EnterpriseMirrorAuditLog::new(local, enterprise, 1);
+
+        mirror
+            .record(sample_audit_event("action-001"))
+            .await
+            .unwrap();
+
+        let failures = mirror.delivery_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].batch_id, "enterprise-batch-audit-action-001-1");
+        assert_eq!(failures[0].audit_ids, vec!["audit-action-001"]);
+        assert_eq!(failures[0].reason, "schema rejected");
+        assert!(!failures[0].transient);
+    }
+
+    #[tokio::test]
+    async fn enterprise_mirror_list_delegates_to_local() {
+        let local = Arc::new(MemoryAuditSink::new());
+        let enterprise = Arc::new(MemoryEnterpriseAuditSink::new());
+        let mirror = EnterpriseMirrorAuditLog::new(local.clone(), enterprise, 1);
+
+        mirror
+            .record(sample_audit_event("action-001"))
+            .await
+            .unwrap();
+        local
+            .record(sample_audit_event("action-002"))
+            .await
+            .unwrap();
+
+        let events = mirror.list().await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].action_id, "action-001");
+        assert_eq!(events[1].action_id, "action-002");
+    }
+
+    #[tokio::test]
+    async fn enterprise_mirror_batches_events_by_configured_size() {
+        let local = Arc::new(MemoryAuditSink::new());
+        let enterprise = Arc::new(MemoryEnterpriseAuditSink::new());
+        let mirror = EnterpriseMirrorAuditLog::new(local, enterprise.clone(), 2);
+
+        mirror
+            .record(sample_audit_event("action-001"))
+            .await
+            .unwrap();
+        assert_eq!(mirror.pending_count(), 1);
+        assert_eq!(enterprise.count(), 0);
+
+        mirror
+            .record(sample_audit_event("action-002"))
+            .await
+            .unwrap();
+        assert_eq!(mirror.pending_count(), 0);
+        assert_eq!(enterprise.count(), 1);
+        assert_eq!(enterprise.batches()[0].events.len(), 2);
     }
 
     #[test]
