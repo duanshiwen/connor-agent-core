@@ -1,4 +1,6 @@
+use crate::{ModelOutput, ModelUsage};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Token Estimator
@@ -65,8 +67,114 @@ impl AggregatedUsage {
         self.turns += 1;
     }
 
+    pub fn record_usage(&mut self, usage: &ModelUsage) {
+        self.record(usage.input_tokens as u64, usage.output_tokens as u64);
+    }
+
+    pub fn record_output(&mut self, output: &ModelOutput) {
+        if let Some(usage) = output.usage() {
+            self.record_usage(usage);
+        }
+    }
+
     pub fn total(&self) -> u64 {
         self.total_input_tokens + self.total_output_tokens
+    }
+}
+
+/// Cost configuration for a model/provider, in micro-cents per token.
+///
+/// One micro-cent is 1/1,000,000 of a USD cent. This keeps cost accounting
+/// deterministic and integer-only while supporting very small per-token prices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCostConfig {
+    pub input_micro_cents_per_token: u64,
+    pub output_micro_cents_per_token: u64,
+}
+
+impl ModelCostConfig {
+    pub fn new(input_micro_cents_per_token: u64, output_micro_cents_per_token: u64) -> Self {
+        Self {
+            input_micro_cents_per_token,
+            output_micro_cents_per_token,
+        }
+    }
+
+    pub fn cost_micro_cents(&self, usage: &ModelUsage) -> u64 {
+        usage.input_tokens as u64 * self.input_micro_cents_per_token
+            + usage.output_tokens as u64 * self.output_micro_cents_per_token
+    }
+}
+
+/// Versioned per-model cost config registry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCostCatalog {
+    configs: BTreeMap<String, ModelCostConfig>,
+}
+
+impl ModelCostCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, model_id: impl Into<String>, config: ModelCostConfig) {
+        self.configs.insert(model_id.into(), config);
+    }
+
+    pub fn get(&self, model_id: &str) -> Option<&ModelCostConfig> {
+        self.configs.get(model_id)
+    }
+
+    pub fn cost_for_usage(&self, model_id: &str, usage: &ModelUsage) -> Option<u64> {
+        self.get(model_id)
+            .map(|config| config.cost_micro_cents(usage))
+    }
+}
+
+/// One model-call usage/cost ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsageLedgerEntry {
+    pub run_id: String,
+    pub turn: u32,
+    pub provider: String,
+    pub model_id: String,
+    pub usage: ModelUsage,
+    pub cost_micro_cents: Option<u64>,
+}
+
+/// Append-only in-memory usage/cost ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsageLedger {
+    entries: Vec<ModelUsageLedgerEntry>,
+}
+
+impl ModelUsageLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&mut self, entry: ModelUsageLedgerEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn entries(&self) -> &[ModelUsageLedgerEntry] {
+        &self.entries
+    }
+
+    pub fn aggregate_for_run(&self, run_id: &str) -> AggregatedUsage {
+        let mut aggregate = AggregatedUsage::default();
+        for entry in self.entries.iter().filter(|entry| entry.run_id == run_id) {
+            aggregate.record_usage(&entry.usage);
+        }
+        aggregate
+    }
+
+    pub fn total_cost_micro_cents_for_run(&self, run_id: &str) -> u64 {
+        self.entries
+            .iter()
+            .filter(|entry| entry.run_id == run_id)
+            .filter_map(|entry| entry.cost_micro_cents)
+            .sum()
     }
 }
 
@@ -315,6 +423,93 @@ mod tests {
         assert_eq!(usage.total_output_tokens, 150);
         assert_eq!(usage.turns, 2);
         assert_eq!(usage.total(), 450);
+    }
+
+    #[test]
+    fn usage_aggregation_records_model_output_usage() {
+        let mut usage = AggregatedUsage::default();
+        let output = ModelOutput::Text {
+            text: "hello".to_string(),
+            usage: Some(ModelUsage {
+                input_tokens: 12,
+                output_tokens: 5,
+            }),
+        };
+
+        usage.record_output(&output);
+
+        assert_eq!(usage.total_input_tokens, 12);
+        assert_eq!(usage.total_output_tokens, 5);
+        assert_eq!(usage.turns, 1);
+    }
+
+    #[test]
+    fn cost_config_calculates_micro_cents_deterministically() {
+        let config = ModelCostConfig::new(2, 10);
+        let usage = ModelUsage {
+            input_tokens: 100,
+            output_tokens: 25,
+        };
+
+        assert_eq!(config.cost_micro_cents(&usage), 450);
+    }
+
+    #[test]
+    fn cost_catalog_resolves_per_model_cost() {
+        let mut catalog = ModelCostCatalog::new();
+        catalog.insert("gpt-test", ModelCostConfig::new(3, 9));
+        let usage = ModelUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+        };
+
+        assert_eq!(catalog.cost_for_usage("gpt-test", &usage), Some(210));
+        assert_eq!(catalog.cost_for_usage("missing", &usage), None);
+    }
+
+    #[test]
+    fn usage_ledger_aggregates_usage_and_cost_per_run() {
+        let mut ledger = ModelUsageLedger::new();
+        ledger.record(ModelUsageLedgerEntry {
+            run_id: "run-1".to_string(),
+            turn: 1,
+            provider: "openai".to_string(),
+            model_id: "gpt-test".to_string(),
+            usage: ModelUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            },
+            cost_micro_cents: Some(700),
+        });
+        ledger.record(ModelUsageLedgerEntry {
+            run_id: "run-1".to_string(),
+            turn: 2,
+            provider: "openai".to_string(),
+            model_id: "gpt-test".to_string(),
+            usage: ModelUsage {
+                input_tokens: 25,
+                output_tokens: 10,
+            },
+            cost_micro_cents: Some(175),
+        });
+        ledger.record(ModelUsageLedgerEntry {
+            run_id: "run-2".to_string(),
+            turn: 1,
+            provider: "anthropic".to_string(),
+            model_id: "claude-test".to_string(),
+            usage: ModelUsage {
+                input_tokens: 999,
+                output_tokens: 1,
+            },
+            cost_micro_cents: Some(42),
+        });
+
+        let aggregate = ledger.aggregate_for_run("run-1");
+
+        assert_eq!(aggregate.total_input_tokens, 125);
+        assert_eq!(aggregate.total_output_tokens, 60);
+        assert_eq!(aggregate.turns, 2);
+        assert_eq!(ledger.total_cost_micro_cents_for_run("run-1"), 875);
     }
 
     // ── ToolResultGate ──

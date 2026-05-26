@@ -792,6 +792,7 @@ pub enum ToolLoopOutcome {
         response_text: String,
         turns_used: u32,
         tool_calls_made: u32,
+        usage: Option<ModelUsage>,
     },
     MaxTurnsReached {
         last_tool_calls: Vec<ToolCall>,
@@ -940,6 +941,7 @@ impl AgentToolLoop {
     ) -> ToolLoopOutcome {
         let mut turns_used: u32 = 0;
         let mut tool_calls_made: u32 = 0;
+        let mut aggregated_usage = ModelUsage::default();
         let mut current_request = req.initial_request;
         let resume_plan = if let Some(store) = checkpoint_store {
             match store.list(req.run_id).await {
@@ -1018,12 +1020,22 @@ impl AgentToolLoop {
                 };
             }
 
+            if let Some(usage) = output.usage() {
+                aggregated_usage.input_tokens = aggregated_usage
+                    .input_tokens
+                    .saturating_add(usage.input_tokens);
+                aggregated_usage.output_tokens = aggregated_usage
+                    .output_tokens
+                    .saturating_add(usage.output_tokens);
+            }
+
             match output {
                 ModelOutput::Text { text, .. } => {
                     return ToolLoopOutcome::Completed {
                         response_text: text,
                         turns_used: turns_used - 1,
                         tool_calls_made,
+                        usage: Some(aggregated_usage),
                     };
                 }
                 ModelOutput::ToolCalls {
@@ -2698,8 +2710,8 @@ mod tests {
             })
             .await;
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
-                response_text, turns_used: 0, tool_calls_made: 0
-            } if response_text == "Hello!"));
+                response_text, turns_used: 0, tool_calls_made: 0, usage: Some(usage)
+            } if response_text == "Hello!" && usage.total_tokens() == 15));
         });
     }
 
@@ -2714,11 +2726,17 @@ mod tests {
                     arguments: serde_json::json!({"q": "test"}),
                     raw_arguments: r#"{"q":"test"}"#.into(),
                 }],
-                usage: None,
+                usage: Some(ModelUsage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                }),
             },
             ModelOutput::Text {
                 text: "Found it!".to_string(),
-                usage: None,
+                usage: Some(ModelUsage {
+                    input_tokens: 30,
+                    output_tokens: 15,
+                }),
             },
         ]);
         with_tool_runtime!(_k, rt, {
@@ -2739,8 +2757,8 @@ mod tests {
             })
             .await;
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
-                response_text, turns_used: 1, tool_calls_made: 1
-            } if response_text == "Found it!"));
+                response_text, turns_used: 1, tool_calls_made: 1, usage: Some(usage)
+            } if response_text == "Found it!" && usage.input_tokens == 50 && usage.output_tokens == 25));
         });
     }
 
@@ -2793,7 +2811,7 @@ mod tests {
             )
             .await;
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
-                response_text, turns_used: 1, tool_calls_made: 0
+                response_text, turns_used: 1, tool_calls_made: 0, usage: Some(_)
             } if response_text == "Used cached result"));
         });
     }
