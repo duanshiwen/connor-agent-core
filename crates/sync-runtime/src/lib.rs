@@ -436,6 +436,180 @@ fn extract_event_id(event: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ===========================================================================
+// Sync Object Store
+// ===========================================================================
+
+/// Metadata for a sync object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncObjectMetadata {
+    pub object_id: SyncObjectId,
+    pub kind: SyncObjectKind,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub source_device: DeviceId,
+}
+
+/// A sync object with its content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncObject {
+    pub metadata: SyncObjectMetadata,
+    pub content: Vec<u8>,
+}
+
+impl SyncObject {
+    pub fn new(
+        object_id: SyncObjectId,
+        kind: SyncObjectKind,
+        content: Vec<u8>,
+        source_device: DeviceId,
+    ) -> Self {
+        let now = Utc::now();
+        let content_hash = compute_hash(&content);
+        Self {
+            metadata: SyncObjectMetadata {
+                object_id,
+                kind,
+                content_hash,
+                size_bytes: content.len() as u64,
+                created_at: now,
+                updated_at: now,
+                source_device,
+            },
+            content,
+        }
+    }
+
+    /// Verify the content hash matches the metadata.
+    pub fn verify_hash(&self) -> bool {
+        compute_hash(&self.content) == self.metadata.content_hash
+    }
+}
+
+/// Compute a simple hash of content for integrity checking.
+pub fn compute_hash(content: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Error type for sync object store operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncObjectStoreError {
+    #[error("object not found: {0}")]
+    NotFound(String),
+    #[error("hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch { expected: String, actual: String },
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Trait for storing sync objects.
+#[async_trait::async_trait]
+pub trait SyncObjectStore: Send + Sync {
+    async fn put(&self, object: &SyncObject) -> Result<(), SyncObjectStoreError>;
+    async fn get(&self, id: &SyncObjectId) -> Result<SyncObject, SyncObjectStoreError>;
+    async fn get_metadata(
+        &self,
+        id: &SyncObjectId,
+    ) -> Result<SyncObjectMetadata, SyncObjectStoreError>;
+    async fn delete(&self, id: &SyncObjectId) -> Result<(), SyncObjectStoreError>;
+    async fn list(&self) -> Result<Vec<SyncObjectMetadata>, SyncObjectStoreError>;
+    async fn contains(&self, id: &SyncObjectId) -> Result<bool, SyncObjectStoreError>;
+    async fn verify(&self, id: &SyncObjectId) -> Result<bool, SyncObjectStoreError>;
+}
+
+/// In-memory implementation of SyncObjectStore.
+#[derive(Debug, Clone, Default)]
+pub struct MemorySyncObjectStore {
+    objects: std::sync::Arc<std::sync::Mutex<HashMap<SyncObjectId, SyncObject>>>,
+}
+
+impl MemorySyncObjectStore {
+    pub fn new() -> Self {
+        Self {
+            objects: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SyncObjectStore for MemorySyncObjectStore {
+    async fn put(&self, object: &SyncObject) -> Result<(), SyncObjectStoreError> {
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        objects.insert(object.metadata.object_id.clone(), object.clone());
+        Ok(())
+    }
+
+    async fn get(&self, id: &SyncObjectId) -> Result<SyncObject, SyncObjectStoreError> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        objects
+            .get(id)
+            .cloned()
+            .ok_or_else(|| SyncObjectStoreError::NotFound(id.0.clone()))
+    }
+
+    async fn get_metadata(
+        &self,
+        id: &SyncObjectId,
+    ) -> Result<SyncObjectMetadata, SyncObjectStoreError> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        objects
+            .get(id)
+            .map(|o| o.metadata.clone())
+            .ok_or_else(|| SyncObjectStoreError::NotFound(id.0.clone()))
+    }
+
+    async fn delete(&self, id: &SyncObjectId) -> Result<(), SyncObjectStoreError> {
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        objects.remove(id);
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<SyncObjectMetadata>, SyncObjectStoreError> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        Ok(objects.values().map(|o| o.metadata.clone()).collect())
+    }
+
+    async fn contains(&self, id: &SyncObjectId) -> Result<bool, SyncObjectStoreError> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        Ok(objects.contains_key(id))
+    }
+
+    async fn verify(&self, id: &SyncObjectId) -> Result<bool, SyncObjectStoreError> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|e| SyncObjectStoreError::Internal(e.to_string()))?;
+        match objects.get(id) {
+            Some(obj) => Ok(obj.verify_hash()),
+            None => Err(SyncObjectStoreError::NotFound(id.0.clone())),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -917,5 +1091,206 @@ mod tests {
         // Both should now have 3 objects
         assert_eq!(manifest_a.len(), 3);
         assert_eq!(manifest_b.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 151: Sync object store
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_hash_deterministic() {
+        let content = b"hello world";
+        let hash1 = compute_hash(content);
+        let hash2 = compute_hash(content);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn compute_hash_different_content() {
+        let hash1 = compute_hash(b"hello");
+        let hash2 = compute_hash(b"world");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn sync_object_new_and_verify() {
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        assert_eq!(obj.metadata.object_id.0, "obj-1");
+        assert_eq!(obj.metadata.size_bytes, 7);
+        assert!(obj.verify_hash());
+    }
+
+    #[test]
+    fn sync_object_verify_fails_on_tamper() {
+        let mut obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        assert!(obj.verify_hash());
+
+        // Tamper with content
+        obj.content = b"tampered".to_vec();
+        assert!(!obj.verify_hash());
+    }
+
+    #[tokio::test]
+    async fn memory_store_put_and_get() {
+        let store = MemorySyncObjectStore::new();
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        store.put(&obj).await.unwrap();
+        let retrieved = store.get(&SyncObjectId::from("obj-1")).await.unwrap();
+        assert_eq!(retrieved.metadata.object_id.0, "obj-1");
+        assert_eq!(retrieved.content, b"content");
+    }
+
+    #[tokio::test]
+    async fn memory_store_get_not_found() {
+        let store = MemorySyncObjectStore::new();
+        let result = store.get(&SyncObjectId::from("nonexistent")).await;
+        assert!(matches!(result, Err(SyncObjectStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn memory_store_get_metadata() {
+        let store = MemorySyncObjectStore::new();
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        store.put(&obj).await.unwrap();
+        let metadata = store
+            .get_metadata(&SyncObjectId::from("obj-1"))
+            .await
+            .unwrap();
+        assert_eq!(metadata.object_id.0, "obj-1");
+        assert_eq!(metadata.size_bytes, 7);
+    }
+
+    #[tokio::test]
+    async fn memory_store_delete() {
+        let store = MemorySyncObjectStore::new();
+        let obj = SyncObject::new(
+            SyncObjectId::from("obj-1"),
+            SyncObjectKind::PersonalKnowledgeEntry,
+            b"content".to_vec(),
+            DeviceId::from("device-1"),
+        );
+
+        store.put(&obj).await.unwrap();
+        store.delete(&SyncObjectId::from("obj-1")).await.unwrap();
+
+        let result = store.get(&SyncObjectId::from("obj-1")).await;
+        assert!(matches!(result, Err(SyncObjectStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn memory_store_list() {
+        let store = MemorySyncObjectStore::new();
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-1"),
+                SyncObjectKind::PersonalKnowledgeEntry,
+                b"content1".to_vec(),
+                DeviceId::from("device-1"),
+            ))
+            .await
+            .unwrap();
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-2"),
+                SyncObjectKind::AssetMetadata,
+                b"content2".to_vec(),
+                DeviceId::from("device-1"),
+            ))
+            .await
+            .unwrap();
+
+        let list = store.list().await.unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_store_contains() {
+        let store = MemorySyncObjectStore::new();
+
+        assert!(!store.contains(&SyncObjectId::from("obj-1")).await.unwrap());
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-1"),
+                SyncObjectKind::PersonalKnowledgeEntry,
+                b"content".to_vec(),
+                DeviceId::from("device-1"),
+            ))
+            .await
+            .unwrap();
+
+        assert!(store.contains(&SyncObjectId::from("obj-1")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn memory_store_verify() {
+        let store = MemorySyncObjectStore::new();
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-1"),
+                SyncObjectKind::PersonalKnowledgeEntry,
+                b"content".to_vec(),
+                DeviceId::from("device-1"),
+            ))
+            .await
+            .unwrap();
+
+        assert!(store.verify(&SyncObjectId::from("obj-1")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn memory_store_overwrite() {
+        let store = MemorySyncObjectStore::new();
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-1"),
+                SyncObjectKind::PersonalKnowledgeEntry,
+                b"original".to_vec(),
+                DeviceId::from("device-1"),
+            ))
+            .await
+            .unwrap();
+
+        store
+            .put(&SyncObject::new(
+                SyncObjectId::from("obj-1"),
+                SyncObjectKind::PersonalKnowledgeEntry,
+                b"updated".to_vec(),
+                DeviceId::from("device-2"),
+            ))
+            .await
+            .unwrap();
+
+        let obj = store.get(&SyncObjectId::from("obj-1")).await.unwrap();
+        assert_eq!(obj.content, b"updated");
+        assert_eq!(obj.metadata.source_device.0, "device-2");
     }
 }
