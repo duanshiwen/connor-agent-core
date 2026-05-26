@@ -1,5 +1,45 @@
 # Roadmap Progress
 
+## 2026-05-26 — M21 PR133: Browser security policy
+
+Status: implemented.
+
+### Scope
+
+- Added browser security policy boundary types:
+  - `BrowserSecurityPolicy`
+  - `BrowserSecurityDecision`
+  - `BrowserSecurityEvaluation`
+  - `BrowserJsRisk`
+  - `BrowserCredentialExposureWarning`
+- Added domain allow/deny/high-risk matching with subdomain support.
+- Added JavaScript execution risk classification for low/medium/high risk scripts.
+- Added credential exposure warning detection for authorization, cookies, passwords, tokens, API keys, secrets, and bearer terms.
+- Added `CdpBrowserConfig::security_policy` and `with_security_policy(...)` builder support.
+- Kept executor-wide enforcement outside this PR; PR133 defines the policy and evaluation boundary needed before runtime Ask/Deny wiring.
+
+### Acceptance coverage
+
+- Allowed domains are allowed and denied domains are denied, including subdomains.
+- Unknown domains default to Ask.
+- JavaScript risk classification distinguishes mutation/credential scripts from read-only DOM access and simple expressions.
+- Credential exposure warning captures sensitive terms with high severity.
+- `execute_js` on high-risk domains evaluates to Ask by default and can be configured to Deny.
+- Browser config carries a security policy via default config and builder.
+
+### Verification commands
+
+```bash
+cargo test -p browser-kernel-core browser_security_policy
+cargo test -p browser-kernel-core execute_js_on_high_risk_domain
+cargo test -p browser-kernel-core cdp_browser_config_builder_sets_security_policy
+cargo test -p browser-kernel-core
+```
+
+### Next planned step
+
+M22 PR134: Knowledge index abstraction.
+
 ## 2026-05-26 — M21 PR132: Human takeover boundary
 
 Status: implemented.

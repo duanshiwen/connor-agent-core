@@ -1365,6 +1365,7 @@ pub struct CdpBrowserConfig {
     pub navigation_timeout_policy: NavigationTimeoutPolicy,
     pub prompt_policy: BrowserPromptPolicy,
     pub recovery_policy: BrowserRecoveryPolicy,
+    pub security_policy: BrowserSecurityPolicy,
     pub profile: BrowserProfileMode,
     pub max_pages: usize,
 }
@@ -1378,6 +1379,7 @@ impl Default for CdpBrowserConfig {
             navigation_timeout_policy: NavigationTimeoutPolicy::default(),
             prompt_policy: BrowserPromptPolicy::default(),
             recovery_policy: BrowserRecoveryPolicy::default(),
+            security_policy: BrowserSecurityPolicy::default(),
             profile: BrowserProfileMode::default(),
             max_pages: 5,
         }
@@ -1415,9 +1417,266 @@ impl CdpBrowserConfig {
         self
     }
 
+    pub fn with_security_policy(mut self, policy: BrowserSecurityPolicy) -> Self {
+        self.security_policy = policy;
+        self
+    }
+
     pub fn with_max_pages(mut self, max_pages: usize) -> Self {
         self.max_pages = max_pages;
         self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browser security policy
+// ---------------------------------------------------------------------------
+
+/// Security policy decision for browser actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserSecurityDecision {
+    Allow,
+    Ask,
+    Deny,
+}
+
+/// Coarse JS execution risk classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserJsRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl BrowserJsRisk {
+    pub fn classify(script: &str) -> Self {
+        let normalized = script.to_ascii_lowercase();
+        if [
+            ".click(",
+            ".submit(",
+            "fetch(",
+            "xmlhttprequest",
+            "localstorage",
+            "sessionstorage",
+            "document.cookie",
+            "authorization",
+            "password",
+            "token",
+            "apikey",
+            "api_key",
+        ]
+        .iter()
+        .any(|term| normalized.contains(term))
+        {
+            Self::High
+        } else if normalized.contains("document.")
+            || normalized.contains("window.")
+            || normalized.contains("navigator.")
+        {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// Credential exposure warning detected before executing browser JavaScript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserCredentialExposureWarning {
+    pub url: String,
+    pub matched_terms: Vec<String>,
+    pub severity: BrowserJsRisk,
+}
+
+impl BrowserCredentialExposureWarning {
+    pub fn detect(url: impl Into<String>, script: &str) -> Option<Self> {
+        let normalized = script.to_ascii_lowercase();
+        let mut matched_terms = Vec::new();
+        for term in [
+            "authorization",
+            "cookie",
+            "password",
+            "token",
+            "api_key",
+            "apikey",
+            "secret",
+            "bearer",
+        ] {
+            if normalized.contains(term) {
+                matched_terms.push(term.to_string());
+            }
+        }
+        if matched_terms.is_empty() {
+            None
+        } else {
+            Some(Self {
+                url: url.into(),
+                matched_terms,
+                severity: BrowserJsRisk::High,
+            })
+        }
+    }
+}
+
+/// Security evaluation result for a browser action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSecurityEvaluation {
+    pub decision: BrowserSecurityDecision,
+    pub url: String,
+    #[serde(default)]
+    pub matched_domain: Option<String>,
+    pub js_risk: BrowserJsRisk,
+    #[serde(default)]
+    pub credential_warning: Option<BrowserCredentialExposureWarning>,
+}
+
+/// Browser security policy for domain allow/deny and JavaScript execution risk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSecurityPolicy {
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub denied_domains: Vec<String>,
+    #[serde(default)]
+    pub high_risk_domains: Vec<String>,
+    pub default_decision: BrowserSecurityDecision,
+    pub high_risk_domain_decision: BrowserSecurityDecision,
+}
+
+impl Default for BrowserSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_domains: Vec::new(),
+            denied_domains: Vec::new(),
+            high_risk_domains: Vec::new(),
+            default_decision: BrowserSecurityDecision::Ask,
+            high_risk_domain_decision: BrowserSecurityDecision::Ask,
+        }
+    }
+}
+
+impl BrowserSecurityPolicy {
+    pub fn with_allowed_domain(mut self, domain: impl Into<String>) -> Self {
+        self.allowed_domains.push(normalize_domain(domain));
+        self
+    }
+
+    pub fn with_denied_domain(mut self, domain: impl Into<String>) -> Self {
+        self.denied_domains.push(normalize_domain(domain));
+        self
+    }
+
+    pub fn with_high_risk_domain(mut self, domain: impl Into<String>) -> Self {
+        self.high_risk_domains.push(normalize_domain(domain));
+        self
+    }
+
+    pub fn evaluate_url(
+        &self,
+        url: impl AsRef<str>,
+    ) -> Result<BrowserSecurityEvaluation, BrowserKernelError> {
+        let url = url.as_ref().trim().to_string();
+        if url.is_empty() {
+            return Err(BrowserKernelError::EmptyUrl);
+        }
+        let domain = extract_url_host(&url)?;
+        if let Some(matched) = matching_domain(&domain, &self.denied_domains) {
+            return Ok(BrowserSecurityEvaluation {
+                decision: BrowserSecurityDecision::Deny,
+                url,
+                matched_domain: Some(matched),
+                js_risk: BrowserJsRisk::Low,
+                credential_warning: None,
+            });
+        }
+        if let Some(matched) = matching_domain(&domain, &self.allowed_domains) {
+            return Ok(BrowserSecurityEvaluation {
+                decision: BrowserSecurityDecision::Allow,
+                url,
+                matched_domain: Some(matched),
+                js_risk: BrowserJsRisk::Low,
+                credential_warning: None,
+            });
+        }
+        Ok(BrowserSecurityEvaluation {
+            decision: self.default_decision.clone(),
+            url,
+            matched_domain: None,
+            js_risk: BrowserJsRisk::Low,
+            credential_warning: None,
+        })
+    }
+
+    pub fn evaluate_execute_js(
+        &self,
+        url: impl AsRef<str>,
+        script: &str,
+    ) -> Result<BrowserSecurityEvaluation, BrowserKernelError> {
+        let mut evaluation = self.evaluate_url(url.as_ref())?;
+        let domain = extract_url_host(url.as_ref())?;
+        let js_risk = BrowserJsRisk::classify(script);
+        let credential_warning = BrowserCredentialExposureWarning::detect(url.as_ref(), script);
+        let high_risk_domain = matching_domain(&domain, &self.high_risk_domains).is_some();
+
+        if high_risk_domain && evaluation.decision == BrowserSecurityDecision::Allow {
+            evaluation.decision = self.high_risk_domain_decision.clone();
+        }
+        if high_risk_domain && evaluation.decision == BrowserSecurityDecision::Ask {
+            evaluation.decision = self.high_risk_domain_decision.clone();
+        }
+        if js_risk == BrowserJsRisk::High && evaluation.decision == BrowserSecurityDecision::Allow {
+            evaluation.decision = BrowserSecurityDecision::Ask;
+        }
+        if credential_warning.is_some() && evaluation.decision == BrowserSecurityDecision::Allow {
+            evaluation.decision = BrowserSecurityDecision::Ask;
+        }
+
+        evaluation.js_risk = js_risk;
+        evaluation.credential_warning = credential_warning;
+        Ok(evaluation)
+    }
+}
+
+fn normalize_domain(domain: impl Into<String>) -> String {
+    domain
+        .into()
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn matching_domain(host: &str, domains: &[String]) -> Option<String> {
+    let host = normalize_domain(host.to_string());
+    domains
+        .iter()
+        .find(|domain| host == **domain || host.ends_with(&format!(".{}", domain)))
+        .cloned()
+}
+
+fn extract_url_host(url: &str) -> Result<String, BrowserKernelError> {
+    let trimmed = url.trim();
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_port = after_scheme.split('/').next().unwrap_or_default();
+    let host = host_port
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(host_port)
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if host.is_empty() {
+        Err(BrowserKernelError::InvalidConfig(format!(
+            "browser security policy could not extract host from url: {}",
+            url
+        )))
+    } else {
+        Ok(normalize_domain(host))
     }
 }
 
@@ -4809,6 +5068,104 @@ mod tests {
         }
     }
 
+    // ---- Browser security policy tests ----
+
+    #[test]
+    fn browser_security_policy_allows_allowed_domains_and_denies_blocked_domains() {
+        let policy = BrowserSecurityPolicy::default()
+            .with_allowed_domain("example.com")
+            .with_denied_domain("blocked.example");
+
+        assert_eq!(
+            policy
+                .evaluate_url("https://example.com/app")
+                .unwrap()
+                .decision,
+            BrowserSecurityDecision::Allow
+        );
+        assert_eq!(
+            policy
+                .evaluate_url("https://sub.example.com/app")
+                .unwrap()
+                .decision,
+            BrowserSecurityDecision::Allow
+        );
+        assert_eq!(
+            policy
+                .evaluate_url("https://blocked.example/app")
+                .unwrap()
+                .decision,
+            BrowserSecurityDecision::Deny
+        );
+        assert_eq!(
+            policy
+                .evaluate_url("https://other.example/app")
+                .unwrap()
+                .decision,
+            BrowserSecurityDecision::Ask
+        );
+    }
+
+    #[test]
+    fn browser_security_policy_classifies_execute_js_risk() {
+        assert_eq!(
+            BrowserJsRisk::classify("document.querySelector('button').click()"),
+            BrowserJsRisk::High
+        );
+        assert_eq!(
+            BrowserJsRisk::classify("localStorage.getItem('token')"),
+            BrowserJsRisk::High
+        );
+        assert_eq!(
+            BrowserJsRisk::classify("document.body.innerText"),
+            BrowserJsRisk::Medium
+        );
+        assert_eq!(BrowserJsRisk::classify("1 + 1"), BrowserJsRisk::Low);
+    }
+
+    #[test]
+    fn browser_security_policy_warns_on_credential_exposure() {
+        let warning = BrowserCredentialExposureWarning::detect(
+            "https://example.com",
+            "fetch('/api', {headers: {Authorization: 'Bearer secret'}})",
+        );
+
+        assert!(warning.is_some());
+        let warning = warning.unwrap();
+        assert_eq!(warning.url, "https://example.com");
+        assert!(warning.matched_terms.contains(&"authorization".to_string()));
+        assert_eq!(warning.severity, BrowserJsRisk::High);
+    }
+
+    #[test]
+    fn execute_js_on_high_risk_domain_requires_ask_or_deny() {
+        let ask_policy = BrowserSecurityPolicy::default().with_high_risk_domain("bank.example");
+        let ask_result = ask_policy
+            .evaluate_execute_js("https://bank.example/login", "document.body.innerText")
+            .unwrap();
+
+        assert_eq!(ask_result.decision, BrowserSecurityDecision::Ask);
+        assert_eq!(ask_result.js_risk, BrowserJsRisk::Medium);
+
+        let deny_policy = BrowserSecurityPolicy {
+            high_risk_domain_decision: BrowserSecurityDecision::Deny,
+            ..BrowserSecurityPolicy::default().with_high_risk_domain("bank.example")
+        };
+        let deny_result = deny_policy
+            .evaluate_execute_js("https://bank.example/login", "document.body.innerText")
+            .unwrap();
+
+        assert_eq!(deny_result.decision, BrowserSecurityDecision::Deny);
+    }
+
+    #[test]
+    fn cdp_browser_config_builder_sets_security_policy() {
+        let policy = BrowserSecurityPolicy::default().with_denied_domain("blocked.example");
+        let config = CdpBrowserConfig::default().with_security_policy(policy.clone());
+
+        assert_eq!(config.security_policy, policy);
+    }
+
     // ---- Config tests ----
 
     #[test]
@@ -4824,6 +5181,7 @@ mod tests {
         assert_eq!(config.timeouts.idle_shutdown_ms, 300_000);
         assert_eq!(config.prompt_policy, BrowserPromptPolicy::default());
         assert_eq!(config.recovery_policy, BrowserRecoveryPolicy::default());
+        assert_eq!(config.security_policy, BrowserSecurityPolicy::default());
         assert_eq!(
             config.profile,
             BrowserProfileMode::Named("default".to_string())
