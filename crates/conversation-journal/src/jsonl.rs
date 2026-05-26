@@ -231,28 +231,28 @@ impl JsonlConversationJournal {
             }
 
             let actual_checksum = sha256_hex(&bytes);
-            if let Some(expected_checksum) = &segment.checksum_sha256 {
-                if expected_checksum != &actual_checksum {
-                    report
-                        .issues
-                        .push(JournalIntegrityIssue::SegmentChecksumMismatch {
-                            file_name: segment.file_name.clone(),
-                            expected: expected_checksum.clone(),
-                            actual: actual_checksum.clone(),
-                        });
-                }
+            if let Some(expected_checksum) = &segment.checksum_sha256
+                && expected_checksum != &actual_checksum
+            {
+                report
+                    .issues
+                    .push(JournalIntegrityIssue::SegmentChecksumMismatch {
+                        file_name: segment.file_name.clone(),
+                        expected: expected_checksum.clone(),
+                        actual: actual_checksum.clone(),
+                    });
             }
 
-            if let Some(expected_previous) = &segment.previous_segment_checksum_sha256 {
-                if Some(expected_previous) != previous_actual_checksum.as_ref() {
-                    report
-                        .issues
-                        .push(JournalIntegrityIssue::HashChainMismatch {
-                            file_name: segment.file_name.clone(),
-                            expected_previous: expected_previous.clone(),
-                            actual_previous: previous_actual_checksum.clone(),
-                        });
-                }
+            if let Some(expected_previous) = &segment.previous_segment_checksum_sha256
+                && Some(expected_previous) != previous_actual_checksum.as_ref()
+            {
+                report
+                    .issues
+                    .push(JournalIntegrityIssue::HashChainMismatch {
+                        file_name: segment.file_name.clone(),
+                        expected_previous: expected_previous.clone(),
+                        actual_previous: previous_actual_checksum.clone(),
+                    });
             }
 
             let (event_count, parse_issues) = verify_jsonl_event_lines(&segment.file_name, &bytes);

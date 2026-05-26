@@ -30,23 +30,13 @@ impl BuiltinProfile {
 }
 
 /// A full `agentos.toml` document, including optional profiles and version metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AgentOsConfigDocument {
     pub version: Option<u32>,
     #[serde(flatten)]
     pub config: AgentOsConfig,
     pub profiles: BTreeMap<String, AgentOsProfile>,
-}
-
-impl Default for AgentOsConfigDocument {
-    fn default() -> Self {
-        Self {
-            version: None,
-            config: AgentOsConfig::default(),
-            profiles: BTreeMap::new(),
-        }
-    }
 }
 
 impl AgentOsConfigDocument {
@@ -126,13 +116,13 @@ impl AgentOsConfigDocument {
     ///
     /// PR97 only provides a no-op migration skeleton for version 1.
     pub fn migrate_to_current(mut self) -> Result<(Self, ConfigMigrationReport), ConfigError> {
-        if let Some(version) = self.version {
-            if version > CURRENT_CONFIG_VERSION {
-                return Err(ConfigError::UnsupportedConfigVersion {
-                    version,
-                    current: CURRENT_CONFIG_VERSION,
-                });
-            }
+        if let Some(version) = self.version
+            && version > CURRENT_CONFIG_VERSION
+        {
+            return Err(ConfigError::UnsupportedConfigVersion {
+                version,
+                current: CURRENT_CONFIG_VERSION,
+            });
         }
 
         let from_version = self.version;
@@ -149,7 +139,7 @@ impl AgentOsConfigDocument {
 }
 
 /// Top-level AgentOS configuration parsed from `agentos.toml`.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AgentOsConfig {
     pub kernel: KernelConfig,
@@ -159,20 +149,6 @@ pub struct AgentOsConfig {
     pub identity: IdentityConfig,
     pub browser: BrowserConfig,
     pub connectors: BTreeMap<String, ConnectorConfig>,
-}
-
-impl Default for AgentOsConfig {
-    fn default() -> Self {
-        Self {
-            kernel: KernelConfig::default(),
-            storage: StorageConfig::default(),
-            model: ModelConfig::default(),
-            policy: PolicyConfig::default(),
-            identity: IdentityConfig::default(),
-            browser: BrowserConfig::default(),
-            connectors: BTreeMap::new(),
-        }
-    }
 }
 
 impl fmt::Debug for AgentOsConfig {
@@ -232,10 +208,10 @@ impl AgentOsConfig {
         if let Some(value) = env.var("OPENAI_MODEL") {
             openai.model = value;
         }
-        if let Some(value) = env.var("OPENAI_TIMEOUT_SECS") {
-            if let Ok(timeout_secs) = value.parse::<u64>() {
-                openai.timeout_secs = Some(timeout_secs);
-            }
+        if let Some(value) = env.var("OPENAI_TIMEOUT_SECS")
+            && let Ok(timeout_secs) = value.parse::<u64>()
+        {
+            openai.timeout_secs = Some(timeout_secs);
         }
 
         self

@@ -212,16 +212,16 @@ impl PolicyFileDocument {
     pub fn validate(&self) -> PolicyValidationReport {
         let mut diagnostics = Vec::new();
 
-        if let Some(version) = self.version {
-            if version > CURRENT_POLICY_FILE_VERSION {
-                diagnostics.push(PolicyDiagnostic::error(
-                    PolicyDiagnosticCode::UnsupportedPolicyVersion,
-                    "version",
-                    format!(
-                        "policy file version {version} is newer than supported version {CURRENT_POLICY_FILE_VERSION}"
-                    ),
-                ));
-            }
+        if let Some(version) = self.version
+            && version > CURRENT_POLICY_FILE_VERSION
+        {
+            diagnostics.push(PolicyDiagnostic::error(
+                PolicyDiagnosticCode::UnsupportedPolicyVersion,
+                "version",
+                format!(
+                    "policy file version {version} is newer than supported version {CURRENT_POLICY_FILE_VERSION}"
+                ),
+            ));
         }
 
         let mut side_effects = BTreeSet::new();

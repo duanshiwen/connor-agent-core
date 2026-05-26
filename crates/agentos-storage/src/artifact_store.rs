@@ -225,10 +225,10 @@ impl FsArtifactStore {
                 source,
             })?;
             let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    ids.push(ArtifactId::from(name));
-                }
+            if path.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                ids.push(ArtifactId::from(name));
             }
         }
         ids.sort_by(|a, b| a.0.cmp(&b.0));

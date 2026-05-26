@@ -53,6 +53,7 @@ pub struct MigrationReport {
 }
 
 /// A single storage migration between two adjacent storage versions.
+#[allow(clippy::wrong_self_convention)]
 pub trait StorageMigration: Send + Sync {
     fn name(&self) -> &str;
     fn from_version(&self) -> u32;

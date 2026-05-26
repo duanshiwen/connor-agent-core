@@ -445,17 +445,9 @@ impl ModelAdapter for FakeModelAdapter {
 }
 
 /// Deterministic fake streaming adapter for tests and early runtime work.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FakeStreamingModelAdapter {
     inner: FakeModelAdapter,
-}
-
-impl Default for FakeStreamingModelAdapter {
-    fn default() -> Self {
-        Self {
-            inner: FakeModelAdapter::default(),
-        }
-    }
 }
 
 impl FakeStreamingModelAdapter {

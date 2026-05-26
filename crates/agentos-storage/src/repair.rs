@@ -335,10 +335,11 @@ fn discover_conversation_ids_at(path: &Path) -> StorageResult<Vec<ConversationId
             source,
         })?;
         let entry_path = entry.path();
-        if entry_path.is_dir() && entry_path.join("manifest.json").is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                ids.push(ConversationId::from(name));
-            }
+        if entry_path.is_dir()
+            && entry_path.join("manifest.json").is_file()
+            && let Some(name) = entry.file_name().to_str()
+        {
+            ids.push(ConversationId::from(name));
         }
     }
     ids.sort_by(|a, b| a.0.cmp(&b.0));

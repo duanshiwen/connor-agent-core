@@ -190,7 +190,7 @@ impl AuditIntegrityReport {
 // Audit Query
 // ────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AuditQuery {
     pub action_id: Option<String>,
     pub action_kind: Option<String>,
@@ -205,26 +205,6 @@ pub struct AuditQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub pagination: AuditPagination,
-}
-
-impl Default for AuditQuery {
-    fn default() -> Self {
-        Self {
-            action_id: None,
-            action_kind: None,
-            requested_by: None,
-            approved_by: None,
-            user: None,
-            conversation_id: None,
-            message_id: None,
-            resource: None,
-            policy_decision: None,
-            result_status: None,
-            from: None,
-            to: None,
-            pagination: AuditPagination::default(),
-        }
-    }
 }
 
 impl AuditQuery {

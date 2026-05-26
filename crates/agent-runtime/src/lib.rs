@@ -971,18 +971,17 @@ impl AgentToolLoop {
                 };
             }
 
-            if let Some(store) = checkpoint_store {
-                if let Err(e) = store
+            if let Some(store) = checkpoint_store
+                && let Err(e) = store
                     .append(ToolLoopCheckpoint::before_model_call(
                         req.run_id, turns_used,
                     ))
                     .await
-                {
-                    return ToolLoopOutcome::Failed {
-                        error: format!("checkpoint write failed: {e}"),
-                        turns_used: turns_used - 1,
-                    };
-                }
+            {
+                return ToolLoopOutcome::Failed {
+                    error: format!("checkpoint write failed: {e}"),
+                    turns_used: turns_used - 1,
+                };
             }
 
             let model_call = req.adapter.complete_with_tools(
@@ -1008,16 +1007,15 @@ impl AgentToolLoop {
                 }
             };
 
-            if let Some(store) = checkpoint_store {
-                if let Err(e) = store
+            if let Some(store) = checkpoint_store
+                && let Err(e) = store
                     .append(ToolLoopCheckpoint::after_model_call(req.run_id, turns_used))
                     .await
-                {
-                    return ToolLoopOutcome::Failed {
-                        error: format!("checkpoint write failed: {e}"),
-                        turns_used: turns_used - 1,
-                    };
-                }
+            {
+                return ToolLoopOutcome::Failed {
+                    error: format!("checkpoint write failed: {e}"),
+                    turns_used: turns_used - 1,
+                };
             }
 
             match output {
@@ -1043,11 +1041,11 @@ impl AgentToolLoop {
                                 turns_used,
                             };
                         }
-                        if resume_plan.should_skip_tool_call(&tc.id) {
-                            if let Some(result) = resume_plan.completed_tool_result(&tc.id) {
-                                tool_results.push((tc.id.clone(), result.to_string()));
-                                continue;
-                            }
+                        if resume_plan.should_skip_tool_call(&tc.id)
+                            && let Some(result) = resume_plan.completed_tool_result(&tc.id)
+                        {
+                            tool_results.push((tc.id.clone(), result.to_string()));
+                            continue;
                         }
 
                         let action_request = match req.mapper.map_to_action_request(
@@ -1108,8 +1106,8 @@ impl AgentToolLoop {
                             } => format!("failed ({action_id}): {error_message}"),
                         };
 
-                        if let Some(store) = checkpoint_store {
-                            if let Err(e) = store
+                        if let Some(store) = checkpoint_store
+                            && let Err(e) = store
                                 .append(ToolLoopCheckpoint::tool_result(
                                     req.run_id,
                                     turns_used,
@@ -1121,12 +1119,11 @@ impl AgentToolLoop {
                                     },
                                 ))
                                 .await
-                            {
-                                return ToolLoopOutcome::Failed {
-                                    error: format!("checkpoint write failed: {e}"),
-                                    turns_used: turns_used - 1,
-                                };
-                            }
+                        {
+                            return ToolLoopOutcome::Failed {
+                                error: format!("checkpoint write failed: {e}"),
+                                turns_used: turns_used - 1,
+                            };
                         }
                         tool_results.push((tc.id.clone(), result_text));
                     }

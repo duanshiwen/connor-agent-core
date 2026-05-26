@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ModelAdapter, ModelAdapterError, ModelOutput, ModelRequest, ModelRole, ModelUsage, ToolCall,
+    ModelAdapter, ModelAdapterError, ModelOutput, ModelRequest, ModelRole, ModelStreamEvent,
+    ModelStreamFinishReason, ModelToolCallDelta, ModelUsage, StreamingModelAdapter, ToolCall,
     ToolCallingModelAdapter, ToolChoice, ToolDefinition,
 };
 
@@ -65,6 +66,8 @@ struct ChatRequest {
     tools: Option<Vec<ChatTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ChatToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,6 +145,39 @@ struct ChatChoice {
 struct ChatUsage {
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamChunk {
+    model: Option<String>,
+    #[serde(default)]
+    choices: Vec<ChatStreamChoice>,
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamChoice {
+    delta: ChatStreamDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<ChatStreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    function: Option<ChatStreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +286,7 @@ impl OpenAiCompatibleAdapter {
             max_tokens,
             tools: None,
             tool_choice: None,
+            stream: None,
         }
     }
 
@@ -302,6 +339,7 @@ impl OpenAiCompatibleAdapter {
             max_tokens,
             tools: Some(chat_tools),
             tool_choice: Some(chat_tool_choice),
+            stream: None,
         }
     }
 
@@ -341,6 +379,102 @@ impl OpenAiCompatibleAdapter {
             usage,
         })
     }
+}
+
+fn stream_finish_reason(reason: &str) -> ModelStreamFinishReason {
+    match reason {
+        "stop" => ModelStreamFinishReason::Stop,
+        "length" => ModelStreamFinishReason::Length,
+        "tool_calls" => ModelStreamFinishReason::ToolCalls,
+        _ => ModelStreamFinishReason::Error,
+    }
+}
+
+fn parse_openai_sse_events(
+    raw: &str,
+    fallback_model: &str,
+) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+    let mut events = Vec::new();
+    let mut started = false;
+
+    for frame in raw.split("\n\n") {
+        let mut data_lines = Vec::new();
+        for line in frame.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+            if let Some(data) = line.strip_prefix("data:") {
+                data_lines.push(data.trim_start());
+            }
+        }
+
+        if data_lines.is_empty() {
+            continue;
+        }
+
+        let data = data_lines.join("\n");
+        if data.trim() == "[DONE]" {
+            break;
+        }
+
+        let chunk: ChatStreamChunk = serde_json::from_str(&data)
+            .map_err(|e| ModelAdapterError::ExecutorFailed(format!("malformed SSE JSON: {e}")))?;
+
+        if !started {
+            events.push(ModelStreamEvent::Started {
+                model_id: chunk
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| fallback_model.to_string())
+                    .into(),
+            });
+            started = true;
+        }
+
+        if let Some(usage) = chunk.usage {
+            events.push(ModelStreamEvent::Usage {
+                usage: ModelUsage {
+                    input_tokens: usage.prompt_tokens.unwrap_or(0),
+                    output_tokens: usage.completion_tokens.unwrap_or(0),
+                },
+            });
+        }
+
+        for choice in chunk.choices {
+            if let Some(content) = choice.delta.content
+                && !content.is_empty()
+            {
+                events.push(ModelStreamEvent::TextDelta { delta: content });
+            }
+
+            if let Some(tool_calls) = choice.delta.tool_calls {
+                for tool_call in tool_calls {
+                    let function = tool_call.function;
+                    events.push(ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                        index: tool_call.index,
+                        id_delta: tool_call.id,
+                        name_delta: function.as_ref().and_then(|f| f.name.clone()),
+                        arguments_delta: function.and_then(|f| f.arguments),
+                    }));
+                }
+            }
+
+            if let Some(reason) = choice.finish_reason {
+                events.push(ModelStreamEvent::Finished {
+                    reason: stream_finish_reason(&reason),
+                });
+            }
+        }
+    }
+
+    if !started {
+        events.push(ModelStreamEvent::Started {
+            model_id: fallback_model.into(),
+        });
+    }
+
+    Ok(events)
 }
 
 /// Shared logic for sending a request and parsing the response.
@@ -417,6 +551,45 @@ async fn send_and_parse(
     })
 }
 
+async fn send_stream_and_parse(
+    client: &reqwest::Client,
+    config: &OpenAiProviderConfig,
+    body: &ChatRequest,
+) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+    let base = config.endpoint.trim_end_matches('/');
+    let url = format!("{base}/chat/completions");
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| ModelAdapterError::ExecutorFailed(format!("HTTP request failed: {e}")))?;
+
+    let status = response.status();
+
+    let body_text = response
+        .text()
+        .await
+        .map_err(|e| ModelAdapterError::ExecutorFailed(format!("failed to read stream: {e}")))?;
+
+    if !status.is_success() {
+        let error_message = serde_json::from_str::<ErrorResponse>(&body_text)
+            .ok()
+            .and_then(|e| e.error)
+            .and_then(|e| e.message)
+            .unwrap_or(body_text);
+
+        return Err(ModelAdapterError::ExecutorFailed(format!(
+            "API returned {status}: {error_message}"
+        )));
+    }
+
+    parse_openai_sse_events(&body_text, &config.model)
+}
+
 #[async_trait]
 impl ModelAdapter for OpenAiCompatibleAdapter {
     async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
@@ -426,6 +599,22 @@ impl ModelAdapter for OpenAiCompatibleAdapter {
 
         let body = self.convert_request(&request);
         send_and_parse(&self.client, &self.config, &body).await
+    }
+}
+
+#[async_trait]
+impl StreamingModelAdapter for OpenAiCompatibleAdapter {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Vec<ModelStreamEvent>, ModelAdapterError> {
+        if request.messages.is_empty() {
+            return Err(ModelAdapterError::EmptyRequest);
+        }
+
+        let mut body = self.convert_request(&request);
+        body.stream = Some(true);
+        send_stream_and_parse(&self.client, &self.config, &body).await
     }
 }
 
@@ -497,7 +686,107 @@ impl OpenAiProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModelMessage, ModelRequest};
+    use crate::{
+        ModelMessage, ModelRequest, ModelStreamAccumulator, ModelStreamEvent,
+        ModelStreamFinishReason, ModelToolCallDelta, StreamingModelAdapter,
+    };
+
+    #[test]
+    fn openai_stream_parser_emits_started_text_usage_finished() {
+        let raw = r#"data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+
+        let events = parse_openai_sse_events(raw, "fallback-model").unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                ModelStreamEvent::Started {
+                    model_id: "gpt-test".into()
+                },
+                ModelStreamEvent::TextDelta {
+                    delta: "Hel".to_string()
+                },
+                ModelStreamEvent::TextDelta {
+                    delta: "lo".to_string()
+                },
+                ModelStreamEvent::Usage {
+                    usage: ModelUsage {
+                        input_tokens: 4,
+                        output_tokens: 2,
+                    }
+                },
+                ModelStreamEvent::Finished {
+                    reason: ModelStreamFinishReason::Stop
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_stream_parser_emits_tool_call_deltas() {
+        let raw = r#"data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"knowledge.search","arguments":"{\"query\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"agent os\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#;
+
+        let events = parse_openai_sse_events(raw, "fallback-model").unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                ModelStreamEvent::Started {
+                    model_id: "gpt-test".into()
+                },
+                ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                    index: 0,
+                    id_delta: Some("call_1".to_string()),
+                    name_delta: Some("knowledge.search".to_string()),
+                    arguments_delta: Some(r#"{"query""#.to_string()),
+                }),
+                ModelStreamEvent::ToolCallDelta(ModelToolCallDelta {
+                    index: 0,
+                    id_delta: None,
+                    name_delta: None,
+                    arguments_delta: Some(r#":"agent os"}"#.to_string()),
+                }),
+                ModelStreamEvent::Finished {
+                    reason: ModelStreamFinishReason::ToolCalls
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_stream_parser_rejects_malformed_json() {
+        let raw = "data: {not json}\n\ndata: [DONE]\n";
+
+        let err = parse_openai_sse_events(raw, "fallback-model").unwrap_err();
+
+        match err {
+            ModelAdapterError::ExecutorFailed(message) => {
+                assert!(
+                    message.contains("malformed SSE JSON"),
+                    "unexpected: {message}"
+                );
+            }
+            other => panic!("expected ExecutorFailed, got: {other:?}"),
+        }
+    }
 
     #[test]
     fn openai_provider_config_serializes() {
@@ -1003,5 +1292,47 @@ mod tests {
         let request = ModelRequest::new("m", vec![]);
         let err = adapter.complete(request).await.unwrap_err();
         assert_eq!(err, ModelAdapterError::EmptyRequest);
+    }
+
+    #[tokio::test]
+    async fn openai_streaming_adapter_posts_stream_true_and_parses_sse() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let sse_body = r#"data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
+
+data: {"id":"chatcmpl-1","model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"stream": true})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = OpenAiProviderConfig::new(mock_server.uri() + "/v1", "key", "gpt-test");
+        let adapter = OpenAiCompatibleAdapter::new(config);
+        let request = ModelRequest::new("gpt-test", vec![ModelMessage::user("Say hello")]);
+
+        let events = adapter.stream(request).await.unwrap();
+        let accumulator = ModelStreamAccumulator::from_events(&events);
+
+        assert_eq!(accumulator.text, "Hello");
+        assert_eq!(accumulator.usage.unwrap().total_tokens(), 6);
+        assert_eq!(accumulator.finished, Some(ModelStreamFinishReason::Stop));
     }
 }
