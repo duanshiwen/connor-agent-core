@@ -10,10 +10,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tokio::fs::{self, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Unique identifier for an asset.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AssetId(pub String);
 
 impl fmt::Display for AssetId {
@@ -417,6 +422,135 @@ pub enum AssetRegistryError {
     DuplicateAssetId(AssetId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AssetStoreError {
+    #[error("asset store lock poisoned")]
+    LockPoisoned,
+    #[error("asset store io error: {0}")]
+    Io(String),
+    #[error("asset store serialization error: {0}")]
+    Serde(String),
+}
+
+impl From<std::io::Error> for AssetStoreError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
+    }
+}
+
+impl From<serde_json::Error> for AssetStoreError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Serde(value.to_string())
+    }
+}
+
+#[async_trait]
+pub trait AssetStore: Send + Sync {
+    async fn upsert(&self, metadata: AssetMetadata) -> Result<(), AssetStoreError>;
+    async fn get(&self, id: &AssetId) -> Result<Option<AssetMetadata>, AssetStoreError>;
+    async fn list(&self) -> Result<Vec<AssetMetadata>, AssetStoreError>;
+    async fn len(&self) -> Result<usize, AssetStoreError>;
+    async fn is_empty(&self) -> Result<bool, AssetStoreError>;
+}
+
+/// JSONL-backed asset metadata store with reloadable in-memory index.
+#[derive(Debug, Clone)]
+pub struct FsAssetStore {
+    path: PathBuf,
+    assets: Arc<Mutex<BTreeMap<AssetId, AssetMetadata>>>,
+}
+
+impl FsAssetStore {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, AssetStoreError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let assets = Arc::new(Mutex::new(BTreeMap::new()));
+        if fs::try_exists(&path).await? {
+            let file = OpenOptions::new().read(true).open(&path).await?;
+            let mut lines = BufReader::new(file).lines();
+            while let Some(line) = lines.next_line().await? {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let metadata: AssetMetadata = serde_json::from_str(&line)?;
+                assets
+                    .lock()
+                    .map_err(|_| AssetStoreError::LockPoisoned)?
+                    .insert(metadata.id.clone(), metadata);
+            }
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await?;
+        }
+        Ok(Self { path, assets })
+    }
+
+    async fn append_metadata(&self, metadata: &AssetMetadata) -> Result<(), AssetStoreError> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
+        let line = serde_json::to_string(metadata)?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        file.flush().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AssetStore for FsAssetStore {
+    async fn upsert(&self, metadata: AssetMetadata) -> Result<(), AssetStoreError> {
+        self.append_metadata(&metadata).await?;
+        self.assets
+            .lock()
+            .map_err(|_| AssetStoreError::LockPoisoned)?
+            .insert(metadata.id.clone(), metadata);
+        Ok(())
+    }
+
+    async fn get(&self, id: &AssetId) -> Result<Option<AssetMetadata>, AssetStoreError> {
+        Ok(self
+            .assets
+            .lock()
+            .map_err(|_| AssetStoreError::LockPoisoned)?
+            .get(id)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<AssetMetadata>, AssetStoreError> {
+        Ok(self
+            .assets
+            .lock()
+            .map_err(|_| AssetStoreError::LockPoisoned)?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn len(&self) -> Result<usize, AssetStoreError> {
+        Ok(self
+            .assets
+            .lock()
+            .map_err(|_| AssetStoreError::LockPoisoned)?
+            .len())
+    }
+
+    async fn is_empty(&self) -> Result<bool, AssetStoreError> {
+        Ok(self
+            .assets
+            .lock()
+            .map_err(|_| AssetStoreError::LockPoisoned)?
+            .is_empty())
+    }
+}
+
 /// In-memory asset registry for tests and early runtime flows.
 #[derive(Debug, Clone, Default)]
 pub struct AssetRegistry {
@@ -486,6 +620,82 @@ mod tests {
             "2026-05-24T12:00:00Z".parse().unwrap(),
         )
         .with_title("Example Video")
+    }
+
+    #[tokio::test]
+    async fn fs_asset_store_persists_and_reloads_asset_metadata_after_restart() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("assets.jsonl");
+        let first = image_asset();
+        let second = video_reference_asset();
+
+        {
+            let store = FsAssetStore::open(&path).await.unwrap();
+            store.upsert(first.clone()).await.unwrap();
+            store.upsert(second.clone()).await.unwrap();
+            assert_eq!(store.len().await.unwrap(), 2);
+        }
+
+        let restarted = FsAssetStore::open(&path).await.unwrap();
+        assert_eq!(restarted.len().await.unwrap(), 2);
+        assert_eq!(restarted.get(&first.id).await.unwrap(), Some(first));
+        assert_eq!(restarted.get(&second.id).await.unwrap(), Some(second));
+    }
+
+    #[tokio::test]
+    async fn fs_asset_store_lists_assets_in_stable_id_order() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("assets.jsonl");
+        let store = FsAssetStore::open(&path).await.unwrap();
+        let mut a = image_asset();
+        a.id = AssetId::from("asset-b");
+        let mut b = video_reference_asset();
+        b.id = AssetId::from("asset-a");
+
+        store.upsert(a).await.unwrap();
+        store.upsert(b).await.unwrap();
+
+        let ids = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|asset| asset.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![AssetId::from("asset-a"), AssetId::from("asset-b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_asset_store_upsert_replaces_index_value_across_restart() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("assets.jsonl");
+        let store = FsAssetStore::open(&path).await.unwrap();
+        let original = image_asset();
+        let updated = original.clone().with_title("Updated Photo");
+
+        store.upsert(original.clone()).await.unwrap();
+        store.upsert(updated.clone()).await.unwrap();
+        assert_eq!(
+            store.get(&original.id).await.unwrap(),
+            Some(updated.clone())
+        );
+
+        let restarted = FsAssetStore::open(&path).await.unwrap();
+        assert_eq!(restarted.len().await.unwrap(), 1);
+        assert_eq!(restarted.get(&original.id).await.unwrap(), Some(updated));
+    }
+
+    #[tokio::test]
+    async fn fs_asset_store_creates_parent_directories_and_empty_index() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("nested/assets/assets.jsonl");
+
+        let store = FsAssetStore::open(&path).await.unwrap();
+        assert!(path.exists());
+        assert!(store.list().await.unwrap().is_empty());
     }
 
     #[test]
