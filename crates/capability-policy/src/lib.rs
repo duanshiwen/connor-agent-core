@@ -14,6 +14,11 @@
 //! ```
 
 use action_core::{ActionRequest, SideEffectKind};
+use chrono::{DateTime, Utc};
+use enterprise_permission_core::{
+    EnterpriseRole, EnterpriseUserId, PermissionAction, PermissionDecision, PermissionStore,
+    ResourceId, ResourceType,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -61,6 +66,13 @@ pub enum PolicyMatchedRule {
     Rule { side_effect: SideEffectKind },
     /// No rule matched; the policy default was used.
     Default,
+    /// Enterprise permission context overrode or confirmed the base decision.
+    EnterprisePermission {
+        resource_type: ResourceType,
+        resource_id: ResourceId,
+        action: PermissionAction,
+        decision: PermissionDecision,
+    },
 }
 
 /// Structured explanation for a policy evaluation.
@@ -85,6 +97,46 @@ pub struct PolicyExplanation {
 pub struct PolicyEvaluation {
     pub decision: PolicyDecision,
     pub explanation: PolicyExplanation,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Policy Context
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Optional runtime context for context-aware policy evaluation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEvaluationContext {
+    pub actor: Option<PolicyActorContext>,
+    pub session: Option<PolicySessionContext>,
+    pub server: Option<PolicyServerContext>,
+    pub resource: Option<PolicyResourceContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyActorContext {
+    pub actor_id: String,
+    pub enterprise_user_id: Option<EnterpriseUserId>,
+    pub enterprise_role: Option<EnterpriseRole>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicySessionContext {
+    pub conversation_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyServerContext {
+    pub server_id: Option<String>,
+    pub provider: Option<String>,
+    pub domain: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyResourceContext {
+    pub resource_type: ResourceType,
+    pub resource_id: ResourceId,
+    pub permission_action: PermissionAction,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -492,6 +544,106 @@ impl CapabilityPolicy {
 
         self.evaluate_with_explanation(request, &side_effect)
     }
+
+    /// Evaluate an action with runtime context such as actor, session, server, and resource.
+    pub fn evaluate_with_context(
+        &self,
+        request: &ActionRequest,
+        side_effect: &SideEffectKind,
+        context: &PolicyEvaluationContext,
+        permission_store: Option<&PermissionStore>,
+        now: DateTime<Utc>,
+    ) -> PolicyEvaluation {
+        let base = self.evaluate_with_explanation(request, side_effect);
+        self.apply_context(base, context, permission_store, now)
+    }
+
+    /// Evaluate using an action registry and runtime context.
+    pub fn evaluate_with_registry_and_context(
+        &self,
+        request: &ActionRequest,
+        registry: &action_core::ActionRegistry,
+        context: &PolicyEvaluationContext,
+        permission_store: Option<&PermissionStore>,
+        now: DateTime<Utc>,
+    ) -> PolicyEvaluation {
+        let side_effect = registry
+            .side_effect(&request.action_kind)
+            .cloned()
+            .unwrap_or(SideEffectKind::NetworkAccess); // Default to cautious.
+
+        self.evaluate_with_context(request, &side_effect, context, permission_store, now)
+    }
+
+    fn apply_context(
+        &self,
+        base: PolicyEvaluation,
+        context: &PolicyEvaluationContext,
+        permission_store: Option<&PermissionStore>,
+        now: DateTime<Utc>,
+    ) -> PolicyEvaluation {
+        if base.decision.is_denied() {
+            return base;
+        }
+
+        let Some(resource) = context.resource.as_ref() else {
+            return base;
+        };
+
+        let permission_decision = match (
+            context
+                .actor
+                .as_ref()
+                .and_then(|actor| actor.enterprise_user_id.as_ref()),
+            permission_store,
+        ) {
+            (Some(user_id), Some(store)) => {
+                let role = context
+                    .actor
+                    .as_ref()
+                    .and_then(|actor| actor.enterprise_role)
+                    .unwrap_or(EnterpriseRole::User);
+                store.check_with_role(
+                    user_id,
+                    role,
+                    &resource.resource_type,
+                    &resource.resource_id,
+                    &resource.permission_action,
+                    now,
+                )
+            }
+            _ => PermissionDecision::Deny,
+        };
+
+        match permission_decision {
+            PermissionDecision::Allow => base,
+            PermissionDecision::Deny => enterprise_permission_denied(base, resource),
+        }
+    }
+}
+
+fn enterprise_permission_denied(
+    mut base: PolicyEvaluation,
+    resource: &PolicyResourceContext,
+) -> PolicyEvaluation {
+    let reason = format!(
+        "Action denied by enterprise permission: resource={}:{} action={}",
+        resource.resource_type, resource.resource_id, resource.permission_action
+    );
+    base.decision = PolicyDecision::Deny {
+        reason: reason.clone(),
+    };
+    base.explanation.decision = PolicyRuleDecision::Deny;
+    base.explanation.matched_rule = PolicyMatchedRule::EnterprisePermission {
+        resource_type: resource.resource_type.clone(),
+        resource_id: resource.resource_id.clone(),
+        action: resource.permission_action,
+        decision: PermissionDecision::Deny,
+    };
+    base.explanation.risk_summary =
+        "High risk: enterprise resource access denied by permission policy.".to_string();
+    base.explanation.user_facing_reason = reason;
+    base
 }
 
 fn user_facing_reason(decision: &PolicyRuleDecision, side_effect: &SideEffectKind) -> String {
@@ -937,6 +1089,203 @@ decision = "allow"
                 .is_allowed()
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn enterprise_ts() -> chrono::DateTime<chrono::Utc> {
+        "2026-05-26T08:00:00Z".parse().unwrap()
+    }
+
+    fn enterprise_resource_context() -> PolicyResourceContext {
+        PolicyResourceContext {
+            resource_type: enterprise_permission_core::ResourceType::KnowledgeBase,
+            resource_id: enterprise_permission_core::ResourceId::from("kb-main"),
+            permission_action: enterprise_permission_core::PermissionAction::Read,
+        }
+    }
+
+    fn enterprise_actor_context(
+        role: enterprise_permission_core::EnterpriseRole,
+    ) -> PolicyActorContext {
+        PolicyActorContext {
+            actor_id: "actor-001".to_string(),
+            enterprise_user_id: Some(enterprise_permission_core::EnterpriseUserId::from(
+                "user-001",
+            )),
+            enterprise_role: Some(role),
+        }
+    }
+
+    fn permission_store_with_read_grant() -> enterprise_permission_core::PermissionStore {
+        let mut store = enterprise_permission_core::PermissionStore::new();
+        store.add_grant(enterprise_permission_core::PermissionGrant {
+            grant_id: "grant-001".to_string(),
+            user_id: enterprise_permission_core::EnterpriseUserId::from("user-001"),
+            role: enterprise_permission_core::EnterpriseRole::User,
+            resource_type: enterprise_permission_core::ResourceType::KnowledgeBase,
+            resource_id: enterprise_permission_core::ResourceId::from("kb-main"),
+            actions: vec![enterprise_permission_core::PermissionAction::Read],
+            granted_at: enterprise_ts(),
+            expires_at: None,
+            revoked: false,
+        });
+        store
+    }
+
+    #[test]
+    fn context_policy_allows_enterprise_resource_with_grant() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = permission_store_with_read_grant();
+        let context = PolicyEvaluationContext {
+            actor: Some(enterprise_actor_context(
+                enterprise_permission_core::EnterpriseRole::User,
+            )),
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+
+        let evaluation = policy.evaluate_with_context(
+            &test_request("knowledge.search"),
+            &SideEffectKind::ReadOnly,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_allowed());
+    }
+
+    #[test]
+    fn context_policy_denies_enterprise_resource_without_grant() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = enterprise_permission_core::PermissionStore::new();
+        let context = PolicyEvaluationContext {
+            actor: Some(enterprise_actor_context(
+                enterprise_permission_core::EnterpriseRole::User,
+            )),
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+
+        let evaluation = policy.evaluate_with_context(
+            &test_request("knowledge.search"),
+            &SideEffectKind::ReadOnly,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_denied());
+        assert!(matches!(
+            evaluation.explanation.matched_rule,
+            PolicyMatchedRule::EnterprisePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn context_policy_denies_enterprise_resource_without_actor() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = permission_store_with_read_grant();
+        let context = PolicyEvaluationContext {
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+
+        let evaluation = policy.evaluate_with_context(
+            &test_request("knowledge.search"),
+            &SideEffectKind::ReadOnly,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_denied());
+    }
+
+    #[test]
+    fn context_policy_preserves_base_deny() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = permission_store_with_read_grant();
+        let context = PolicyEvaluationContext {
+            actor: Some(enterprise_actor_context(
+                enterprise_permission_core::EnterpriseRole::User,
+            )),
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+
+        let evaluation = policy.evaluate_with_context(
+            &test_request("mail.send"),
+            &SideEffectKind::ExternalSystemMutation,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_denied());
+        assert_eq!(
+            evaluation.explanation.matched_rule,
+            PolicyMatchedRule::Rule {
+                side_effect: SideEffectKind::ExternalSystemMutation
+            }
+        );
+    }
+
+    #[test]
+    fn registry_context_policy_uses_registry_side_effect() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = permission_store_with_read_grant();
+        let context = PolicyEvaluationContext {
+            actor: Some(enterprise_actor_context(
+                enterprise_permission_core::EnterpriseRole::User,
+            )),
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+        let mut registry = action_core::ActionRegistry::new();
+        registry
+            .register(action_core::ActionSchema {
+                kind: ActionKind::from("knowledge.search"),
+                display_name: "Search".to_string(),
+                description: "Search KB".to_string(),
+                side_effect: SideEffectKind::ReadOnly,
+                input_schema: None,
+                output_schema: None,
+            })
+            .unwrap();
+
+        let evaluation = policy.evaluate_with_registry_and_context(
+            &test_request("knowledge.search"),
+            &registry,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_allowed());
+        assert_eq!(evaluation.explanation.side_effect, SideEffectKind::ReadOnly);
+    }
+
+    #[test]
+    fn context_policy_super_admin_bypasses_resource_grant() {
+        let policy = CapabilityPolicy::default_safe();
+        let store = enterprise_permission_core::PermissionStore::new();
+        let context = PolicyEvaluationContext {
+            actor: Some(enterprise_actor_context(
+                enterprise_permission_core::EnterpriseRole::SuperAdmin,
+            )),
+            resource: Some(enterprise_resource_context()),
+            ..PolicyEvaluationContext::default()
+        };
+
+        let evaluation = policy.evaluate_with_context(
+            &test_request("knowledge.search"),
+            &SideEffectKind::ReadOnly,
+            &context,
+            Some(&store),
+            enterprise_ts(),
+        );
+
+        assert!(evaluation.decision.is_allowed());
     }
 
     #[test]

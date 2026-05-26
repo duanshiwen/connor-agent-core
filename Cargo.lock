@@ -336,6 +336,7 @@ dependencies = [
  "action-core",
  "anyhow",
  "chrono",
+ "enterprise-permission-core",
  "serde",
  "serde_json",
  "thiserror",
