@@ -2040,6 +2040,7 @@ dependencies = [
  "notification-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

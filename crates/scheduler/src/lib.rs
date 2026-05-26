@@ -112,6 +112,120 @@ impl FakeClock {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistent Filesystem Scheduler Store (JSONL)
+// ---------------------------------------------------------------------------
+
+/// Persistent scheduler store using JSONL file format.
+///
+/// Each line in the file is a JSON object representing a ScheduledJob.
+/// Jobs are loaded on startup and appended on save.
+pub struct FsJsonlSchedulerStore {
+    path: std::path::PathBuf,
+    inner: Mutex<HashMap<String, ScheduledJob>>,
+}
+
+impl FsJsonlSchedulerStore {
+    /// Create a new FsJsonlSchedulerStore.
+    /// Loads existing jobs from the file if it exists.
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Result<Self, SchedulerError> {
+        let path = path.into();
+        let inner = if path.exists() {
+            Self::load_from_file(&path)?
+        } else {
+            HashMap::new()
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
+    }
+
+    fn load_from_file(
+        path: &std::path::Path,
+    ) -> Result<HashMap<String, ScheduledJob>, SchedulerError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SchedulerError::Internal(format!("failed to read store file: {}", e)))?;
+        let mut jobs = HashMap::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let job: ScheduledJob = serde_json::from_str(line)
+                .map_err(|e| SchedulerError::Internal(format!("failed to parse job: {}", e)))?;
+            jobs.insert(job.id.0.clone(), job);
+        }
+        Ok(jobs)
+    }
+
+    fn persist_all(&self) -> Result<(), SchedulerError> {
+        let store = self.inner.lock().unwrap();
+        let mut content = String::new();
+        for job in store.values() {
+            let line = serde_json::to_string(job)
+                .map_err(|e| SchedulerError::Internal(format!("failed to serialize job: {}", e)))?;
+            content.push_str(&line);
+            content.push('\n');
+        }
+        std::fs::write(&self.path, content)
+            .map_err(|e| SchedulerError::Internal(format!("failed to write store file: {}", e)))?;
+        Ok(())
+    }
+
+    /// Save or update a job and persist to disk.
+    pub fn save(&self, job: &ScheduledJob) -> Result<(), SchedulerError> {
+        let mut store = self.inner.lock().unwrap();
+        store.insert(job.id.0.clone(), job.clone());
+        drop(store);
+        self.persist_all()
+    }
+
+    /// Get a job by ID.
+    pub fn get(&self, id: &ScheduledJobId) -> Result<ScheduledJob, SchedulerError> {
+        let store = self.inner.lock().unwrap();
+        store
+            .get(&id.0)
+            .cloned()
+            .ok_or_else(|| SchedulerError::NotFound(id.0.clone()))
+    }
+
+    /// List all jobs.
+    pub fn list(&self) -> Vec<ScheduledJob> {
+        let store = self.inner.lock().unwrap();
+        store.values().cloned().collect()
+    }
+
+    /// Update a job's status and persist to disk.
+    pub fn update_status(
+        &self,
+        id: &ScheduledJobId,
+        status: ScheduledJobStatus,
+    ) -> Result<(), SchedulerError> {
+        let mut store = self.inner.lock().unwrap();
+        if let Some(job) = store.get_mut(&id.0) {
+            job.status = status;
+            drop(store);
+            self.persist_all()
+        } else {
+            Err(SchedulerError::NotFound(id.0.clone()))
+        }
+    }
+
+    /// Delete a job and persist to disk.
+    pub fn delete(&self, id: &ScheduledJobId) -> Result<(), SchedulerError> {
+        let mut store = self.inner.lock().unwrap();
+        store.remove(&id.0);
+        drop(store);
+        self.persist_all()
+    }
+
+    /// Get the file path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 impl Clock for FakeClock {
     fn now(&self) -> DateTime<Utc> {
         *self.now.lock().unwrap()
@@ -658,5 +772,169 @@ mod tests {
         let notifications = bridge.process_due().await;
         assert_eq!(notifications.len(), 1);
         assert_eq!(sink.count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 149: Persistent scheduler store
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fs_jsonl_store_save_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+
+        let job = ScheduledJob {
+            id: ScheduledJobId::from("job-1"),
+            reminder_id: "reminder-1".to_string(),
+            due_at: ts() + chrono::Duration::hours(1),
+            status: ScheduledJobStatus::Pending,
+            created_at: ts(),
+        };
+
+        store.save(&job).unwrap();
+        let retrieved = store.get(&ScheduledJobId::from("job-1")).unwrap();
+        assert_eq!(retrieved.id.0, "job-1");
+        assert_eq!(retrieved.reminder_id, "reminder-1");
+    }
+
+    #[test]
+    fn fs_jsonl_store_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+
+        // Save a job
+        {
+            let store = FsJsonlSchedulerStore::new(&path).unwrap();
+            let job = ScheduledJob {
+                id: ScheduledJobId::from("job-1"),
+                reminder_id: "reminder-1".to_string(),
+                due_at: ts() + chrono::Duration::hours(1),
+                status: ScheduledJobStatus::Pending,
+                created_at: ts(),
+            };
+            store.save(&job).unwrap();
+        }
+
+        // Load from disk
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+        let job = store.get(&ScheduledJobId::from("job-1")).unwrap();
+        assert_eq!(job.id.0, "job-1");
+    }
+
+    #[test]
+    fn fs_jsonl_store_update_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+
+        let job = ScheduledJob {
+            id: ScheduledJobId::from("job-1"),
+            reminder_id: "reminder-1".to_string(),
+            due_at: ts() + chrono::Duration::hours(1),
+            status: ScheduledJobStatus::Pending,
+            created_at: ts(),
+        };
+
+        store.save(&job).unwrap();
+        store
+            .update_status(&ScheduledJobId::from("job-1"), ScheduledJobStatus::Fired)
+            .unwrap();
+
+        let job = store.get(&ScheduledJobId::from("job-1")).unwrap();
+        assert_eq!(job.status, ScheduledJobStatus::Fired);
+    }
+
+    #[test]
+    fn fs_jsonl_store_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+
+        let job = ScheduledJob {
+            id: ScheduledJobId::from("job-1"),
+            reminder_id: "reminder-1".to_string(),
+            due_at: ts() + chrono::Duration::hours(1),
+            status: ScheduledJobStatus::Pending,
+            created_at: ts(),
+        };
+
+        store.save(&job).unwrap();
+        store.delete(&ScheduledJobId::from("job-1")).unwrap();
+
+        let result = store.get(&ScheduledJobId::from("job-1"));
+        assert!(matches!(result, Err(SchedulerError::NotFound(_))));
+    }
+
+    #[test]
+    fn fs_jsonl_store_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+
+        store
+            .save(&ScheduledJob {
+                id: ScheduledJobId::from("job-1"),
+                reminder_id: "reminder-1".to_string(),
+                due_at: ts() + chrono::Duration::hours(1),
+                status: ScheduledJobStatus::Pending,
+                created_at: ts(),
+            })
+            .unwrap();
+
+        store
+            .save(&ScheduledJob {
+                id: ScheduledJobId::from("job-2"),
+                reminder_id: "reminder-2".to_string(),
+                due_at: ts() + chrono::Duration::hours(2),
+                status: ScheduledJobStatus::Pending,
+                created_at: ts(),
+            })
+            .unwrap();
+
+        let jobs = store.list();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[test]
+    fn fs_jsonl_store_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+
+        let job = ScheduledJob {
+            id: ScheduledJobId::from("job-1"),
+            reminder_id: "reminder-1".to_string(),
+            due_at: ts() + chrono::Duration::hours(1),
+            status: ScheduledJobStatus::Pending,
+            created_at: ts(),
+        };
+
+        store.save(&job).unwrap();
+
+        let mut updated = job.clone();
+        updated.status = ScheduledJobStatus::Fired;
+        store.save(&updated).unwrap();
+
+        let retrieved = store.get(&ScheduledJobId::from("job-1")).unwrap();
+        assert_eq!(retrieved.status, ScheduledJobStatus::Fired);
+    }
+
+    #[test]
+    fn fs_jsonl_store_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn fs_jsonl_store_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = FsJsonlSchedulerStore::new(&path).unwrap();
+        assert_eq!(store.path(), path.as_path());
     }
 }
