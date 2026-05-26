@@ -1087,7 +1087,9 @@ impl SyncFilter {
         );
 
         for (id, record) in &manifest.objects {
-            if let Some(marker) = ownership_map.get(id) && self.should_include(marker) {
+            if let Some(marker) = ownership_map.get(id)
+                && self.should_include(marker)
+            {
                 filtered.upsert(record.clone());
             }
         }
