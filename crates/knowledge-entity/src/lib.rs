@@ -965,6 +965,240 @@ pub enum KnowledgeValidationError {
     BlankContent,
 }
 
+/// Unique identifier for a question ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QuestionLedgerEntryId(pub String);
+
+impl fmt::Display for QuestionLedgerEntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for QuestionLedgerEntryId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for QuestionLedgerEntryId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Lightweight answer link for a question ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswerRef {
+    pub answer_id: String,
+    pub answer_cache_ref: Option<String>,
+    pub knowledge_entry_id: Option<KnowledgeEntryId>,
+}
+
+/// Append-friendly question record linked back to a conversation/message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionLedgerEntry {
+    pub id: QuestionLedgerEntryId,
+    pub question: String,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub answer_ref: Option<QuestionAnswerRef>,
+    pub related_knowledge_entry_ids: Vec<KnowledgeEntryId>,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to create a question ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionLedgerCreateRequest {
+    pub question: String,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub related_knowledge_entry_ids: Vec<KnowledgeEntryId>,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl QuestionLedgerCreateRequest {
+    pub fn new(question: impl Into<String>, created_at: DateTime<Utc>) -> Self {
+        Self {
+            question: question.into(),
+            conversation_id: None,
+            message_id: None,
+            related_knowledge_entry_ids: vec![],
+            tags: vec![],
+            created_at,
+        }
+    }
+
+    pub fn from_conversation_message(
+        conversation_id: impl Into<String>,
+        message_id: impl Into<String>,
+        question: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self::new(question, created_at)
+            .with_conversation_id(conversation_id)
+            .with_message_id(message_id)
+    }
+
+    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
+    }
+
+    pub fn with_related_knowledge_entry_ids(mut self, ids: Vec<KnowledgeEntryId>) -> Self {
+        self.related_knowledge_entry_ids = ids;
+        self
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum QuestionLedgerError {
+    #[error("question ledger lock poisoned")]
+    LockPoisoned,
+    #[error("question cannot be blank")]
+    BlankQuestion,
+    #[error("question ledger entry not found: {0}")]
+    NotFound(String),
+}
+
+#[async_trait]
+pub trait QuestionLedger: Send + Sync {
+    async fn create_question(
+        &self,
+        request: QuestionLedgerCreateRequest,
+    ) -> Result<QuestionLedgerEntry, QuestionLedgerError>;
+
+    async fn get_question(
+        &self,
+        id: &QuestionLedgerEntryId,
+    ) -> Result<Option<QuestionLedgerEntry>, QuestionLedgerError>;
+
+    async fn list_by_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<QuestionLedgerEntry>, QuestionLedgerError>;
+
+    async fn link_answer(
+        &self,
+        id: &QuestionLedgerEntryId,
+        answer_ref: QuestionAnswerRef,
+        updated_at: DateTime<Utc>,
+    ) -> Result<QuestionLedgerEntry, QuestionLedgerError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryQuestionLedger {
+    entries: Arc<Mutex<HashMap<QuestionLedgerEntryId, QuestionLedgerEntry>>>,
+}
+
+impl MemoryQuestionLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn next_id(
+        entries: &HashMap<QuestionLedgerEntryId, QuestionLedgerEntry>,
+    ) -> QuestionLedgerEntryId {
+        QuestionLedgerEntryId::from(format!("question-{}", entries.len() + 1))
+    }
+}
+
+#[async_trait]
+impl QuestionLedger for MemoryQuestionLedger {
+    async fn create_question(
+        &self,
+        request: QuestionLedgerCreateRequest,
+    ) -> Result<QuestionLedgerEntry, QuestionLedgerError> {
+        if request.question.trim().is_empty() {
+            return Err(QuestionLedgerError::BlankQuestion);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| QuestionLedgerError::LockPoisoned)?;
+        let entry = QuestionLedgerEntry {
+            id: Self::next_id(&entries),
+            question: request.question,
+            conversation_id: request.conversation_id,
+            message_id: request.message_id,
+            answer_ref: None,
+            related_knowledge_entry_ids: request.related_knowledge_entry_ids,
+            tags: request.tags,
+            created_at: request.created_at,
+            updated_at: request.created_at,
+        };
+        entries.insert(entry.id.clone(), entry.clone());
+        Ok(entry)
+    }
+
+    async fn get_question(
+        &self,
+        id: &QuestionLedgerEntryId,
+    ) -> Result<Option<QuestionLedgerEntry>, QuestionLedgerError> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| QuestionLedgerError::LockPoisoned)?;
+        Ok(entries.get(id).cloned())
+    }
+
+    async fn list_by_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<QuestionLedgerEntry>, QuestionLedgerError> {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| QuestionLedgerError::LockPoisoned)?;
+        let mut results = entries
+            .values()
+            .filter(|entry| entry.conversation_id.as_deref() == Some(conversation_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(results)
+    }
+
+    async fn link_answer(
+        &self,
+        id: &QuestionLedgerEntryId,
+        answer_ref: QuestionAnswerRef,
+        updated_at: DateTime<Utc>,
+    ) -> Result<QuestionLedgerEntry, QuestionLedgerError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| QuestionLedgerError::LockPoisoned)?;
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| QuestionLedgerError::NotFound(id.0.clone()))?;
+        if let Some(knowledge_entry_id) = answer_ref.knowledge_entry_id.clone()
+            && !entry
+                .related_knowledge_entry_ids
+                .iter()
+                .any(|existing| existing == &knowledge_entry_id)
+        {
+            entry.related_knowledge_entry_ids.push(knowledge_entry_id);
+        }
+        entry.answer_ref = Some(answer_ref);
+        entry.updated_at = updated_at;
+        Ok(entry.clone())
+    }
+}
+
 /// Input for `knowledge.search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeSearchActionInput {
@@ -1858,6 +2092,132 @@ mod tests {
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
         assert!(query.frontmatter_filters.is_empty());
+    }
+
+    #[test]
+    fn question_ledger_entry_roundtrips_with_conversation_and_answer_refs() {
+        let entry = QuestionLedgerEntry {
+            id: QuestionLedgerEntryId::from("question-1"),
+            question: "How should AgentOS store durable memory?".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            message_id: Some("message-1".to_string()),
+            answer_ref: Some(QuestionAnswerRef {
+                answer_id: "answer-1".to_string(),
+                answer_cache_ref: Some("answer-cache/2026/05/question-1/v1".to_string()),
+                knowledge_entry_id: Some(KnowledgeEntryId::from("knowledge-entry-1")),
+            }),
+            related_knowledge_entry_ids: vec![KnowledgeEntryId::from("knowledge-entry-2")],
+            tags: vec!["memory".to_string()],
+            created_at: ts(),
+            updated_at: ts(),
+        };
+
+        let json = serde_json::to_string_pretty(&entry).unwrap();
+        let decoded: QuestionLedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, entry);
+    }
+
+    #[test]
+    fn question_ledger_create_request_from_conversation_message_is_stable() {
+        let request = QuestionLedgerCreateRequest::from_conversation_message(
+            "conversation-1",
+            "message-1",
+            "What should we do next?",
+            ts(),
+        )
+        .with_tags(vec!["planning".to_string()])
+        .with_related_knowledge_entry_ids(vec![KnowledgeEntryId::from("knowledge-entry-1")]);
+
+        assert_eq!(request.question, "What should we do next?");
+        assert_eq!(request.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(request.message_id.as_deref(), Some("message-1"));
+        assert_eq!(request.tags, vec!["planning".to_string()]);
+        assert_eq!(
+            request.related_knowledge_entry_ids,
+            vec![KnowledgeEntryId::from("knowledge-entry-1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_question_ledger_creates_entries_from_conversation_messages() {
+        let ledger = MemoryQuestionLedger::new();
+        let entry = ledger
+            .create_question(QuestionLedgerCreateRequest::from_conversation_message(
+                "conversation-1",
+                "message-1",
+                "What should we do next?",
+                ts(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(entry.id, QuestionLedgerEntryId::from("question-1"));
+        assert_eq!(entry.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(entry.message_id.as_deref(), Some("message-1"));
+
+        let by_conversation = ledger.list_by_conversation("conversation-1").await.unwrap();
+        assert_eq!(by_conversation, vec![entry]);
+    }
+
+    #[tokio::test]
+    async fn memory_question_ledger_links_answer_and_knowledge_refs() {
+        let ledger = MemoryQuestionLedger::new();
+        let entry = ledger
+            .create_question(QuestionLedgerCreateRequest::from_conversation_message(
+                "conversation-1",
+                "message-1",
+                "What is the answer?",
+                ts(),
+            ))
+            .await
+            .unwrap();
+
+        let linked = ledger
+            .link_answer(
+                &entry.id,
+                QuestionAnswerRef {
+                    answer_id: "answer-1".to_string(),
+                    answer_cache_ref: Some("answer-cache/2026/05/question-1/v1".to_string()),
+                    knowledge_entry_id: Some(KnowledgeEntryId::from("knowledge-entry-1")),
+                },
+                ts(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(linked.answer_ref.as_ref().unwrap().answer_id, "answer-1");
+        assert_eq!(
+            linked.answer_ref.as_ref().unwrap().knowledge_entry_id,
+            Some(KnowledgeEntryId::from("knowledge-entry-1"))
+        );
+        assert_eq!(linked.updated_at, ts());
+    }
+
+    #[tokio::test]
+    async fn memory_question_ledger_rejects_blank_questions_and_missing_ids() {
+        let ledger = MemoryQuestionLedger::new();
+        assert_eq!(
+            ledger
+                .create_question(QuestionLedgerCreateRequest::new("   ", ts()))
+                .await
+                .unwrap_err(),
+            QuestionLedgerError::BlankQuestion
+        );
+        assert_eq!(
+            ledger
+                .link_answer(
+                    &QuestionLedgerEntryId::from("missing"),
+                    QuestionAnswerRef {
+                        answer_id: "answer-1".to_string(),
+                        answer_cache_ref: None,
+                        knowledge_entry_id: None,
+                    },
+                    ts(),
+                )
+                .await
+                .unwrap_err(),
+            QuestionLedgerError::NotFound("missing".to_string())
+        );
     }
 
     #[test]
