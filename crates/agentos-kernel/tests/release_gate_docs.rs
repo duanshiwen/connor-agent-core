@@ -54,6 +54,12 @@ fn release_gate_script_documents_and_runs_required_checks() {
             && script.contains("Rollback Rehearsal Evidence"),
         "release gate must include PR204 release artifact and rollback rehearsal evidence checks"
     );
+    assert!(
+        script.contains("Commercial-Pilot Fixture Freeze Acceptance")
+            && script.contains("Long-Lived Fixture Support Policy")
+            && script.contains("Migration Release Note Template"),
+        "release gate must include PR205 commercial storage/journal fixture freeze checks"
+    );
 
     #[cfg(unix)]
     {
@@ -118,5 +124,42 @@ fn release_artifact_rollback_rehearsal_records_pr204_evidence() {
     assert!(
         plan.contains("PR204: Beta/Pilot Release Artifact and Rollback Rehearsal ✅ Completed"),
         "commercial pilot readiness plan must mark PR204 complete"
+    );
+}
+
+#[test]
+fn storage_journal_fixture_freeze_records_pr205_commercial_acceptance() {
+    let root = workspace_root();
+    let acceptance =
+        fs::read_to_string(root.join("docs/storage-journal-fixture-freeze-acceptance.md"))
+            .expect("storage/journal fixture freeze acceptance evidence should exist");
+    let policy = fs::read_to_string(root.join("docs/storage-journal-fixture-freeze-policy.md"))
+        .expect("storage/journal fixture freeze policy should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## Commercial-Pilot Fixture Freeze Acceptance",
+        "## Long-Lived Fixture Support Policy",
+        "## Migration Release Note Template",
+        "## Rollback and Backup Expectations",
+        "commercial-pilot compatibility baseline",
+        "migration + fixture + rollback evidence",
+        "pilot owner accepts current fixtures",
+    ] {
+        assert!(
+            acceptance.contains(required),
+            "PR205 commercial fixture acceptance must contain {required}"
+        );
+    }
+
+    assert!(
+        policy.contains("Commercial-pilot fixtures cannot be removed without pilot approval")
+            && policy.contains("storage-journal-fixture-freeze-acceptance.md"),
+        "fixture freeze policy must preserve commercial-pilot removal and acceptance references"
+    );
+    assert!(
+        plan.contains("PR205: Storage/Journal Commercial Fixture Freeze Acceptance ✅ Completed"),
+        "commercial pilot readiness plan must mark PR205 complete"
     );
 }

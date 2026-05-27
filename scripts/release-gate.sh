@@ -45,6 +45,9 @@ grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-jour
 test -f docs/storage-journal-fixture-freeze-acceptance.md
 grep -q "## Acceptance Scope" docs/storage-journal-fixture-freeze-acceptance.md
 grep -q "## Evidence Commands" docs/storage-journal-fixture-freeze-acceptance.md
+grep -q "## Commercial-Pilot Fixture Freeze Acceptance" docs/storage-journal-fixture-freeze-acceptance.md
+grep -q "## Long-Lived Fixture Support Policy" docs/storage-journal-fixture-freeze-acceptance.md
+grep -q "## Migration Release Note Template" docs/storage-journal-fixture-freeze-acceptance.md
 
 echo "==> feature matrix check"
 test -f docs/feature-matrix.md

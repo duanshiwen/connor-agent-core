@@ -270,7 +270,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-kernel --test release_gate_docs release_artifact_rollback_rehearsal_records_pr204_evidence` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR205: Storage/Journal Commercial Fixture Freeze Acceptance
+### PR205: Storage/Journal Commercial Fixture Freeze Acceptance ✅ Completed
 
 **Goal:** Promote PR198 controlled-beta fixture acceptance into a commercial-pilot compatibility contract.
 
@@ -286,17 +286,18 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Commercial fixture freeze acceptance section or new doc.
-- Explicit long-lived fixture support policy.
-- Required release note format for storage/journal changes.
-- Rollback/backup expectation for every migration.
-- Release gate check for commercial freeze acceptance if pilot mode is targeted.
+- ✅ Commercial fixture freeze acceptance recorded in [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md) under `## Commercial-Pilot Fixture Freeze Acceptance`.
+- ✅ Explicit long-lived fixture support policy recorded under `## Long-Lived Fixture Support Policy`.
+- ✅ Required release note format for storage/journal changes recorded under `## Migration Release Note Template`.
+- ✅ Rollback/backup expectation for every migration recorded under `## Rollback and Backup Expectations`.
+- ✅ Release gate checks commercial freeze acceptance, long-lived support policy, and migration release note template.
 
 **Acceptance:**
 
-- Pilot owner accepts current fixtures as compatibility baseline.
-- Future storage/journal changes require migration + fixture + rollback evidence.
-- Release gate passes.
+- ✅ Pilot owner accepts current fixtures as the commercial-pilot compatibility baseline for the first supported pilot line.
+- ✅ Future storage/journal changes require migration + fixture + rollback evidence.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs storage_journal_fixture_freeze_records_pr205_commercial_acceptance` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR206: OAuth Provider Endpoint, Revocation, and Offboarding Evidence
 

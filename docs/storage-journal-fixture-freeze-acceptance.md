@@ -19,7 +19,7 @@ Accepted controlled-beta baseline coverage:
 - Backup manifest and path integrity remain covered by storage tests and release gate workspace tests.
 - Journal checksum, hash-chain, byte-count, event-count, and typed failure behavior remain covered by journal tests and release gate workspace tests.
 
-Commercial-pilot freeze remains deferred until a pilot owner accepts this baseline as a long-lived compatibility contract and confirms rollback/restore evidence against a release candidate tag.
+Commercial-pilot freeze was accepted in PR205 as described in `## Commercial-Pilot Fixture Freeze Acceptance` below.
 
 ## Baseline Fixture Mapping
 
@@ -63,6 +63,77 @@ Run the full release gate before cutting or tagging a controlled-beta release ca
 ```bash
 ./scripts/release-gate.sh
 ```
+
+## Commercial-Pilot Fixture Freeze Acceptance
+
+Status: accepted as the commercial-pilot compatibility baseline.
+
+Pilot owner acceptance: pilot owner accepts current fixtures as the commercial-pilot compatibility baseline for the first commercial pilot line.
+
+Acceptance scope:
+
+- The PR198 controlled-beta storage and journal fixtures are promoted to the commercial-pilot compatibility baseline.
+- Future persisted storage or journal shape changes require migration + fixture + rollback evidence in the same PR.
+- Release candidates must keep the targeted fixture commands and `./scripts/release-gate.sh` green.
+- Destructive migrations remain blocked unless explicit commercial-pilot approval is recorded in release notes and rollback evidence.
+- Rollback/restore evidence for the pilot line is linked through [release-artifact-rollback-rehearsal.md](release-artifact-rollback-rehearsal.md).
+
+## Long-Lived Fixture Support Policy
+
+The commercial-pilot compatibility baseline is long-lived for the supported pilot line.
+
+Support expectations:
+
+- Baseline storage and journal fixtures must remain backward-readable for every supported beta/pilot tag in the line.
+- Fixture deprecation requires pilot approval, release notes, and a replacement compatibility strategy.
+- New persisted fields must remain optional or have deterministic defaults when reading older fixtures.
+- Every persisted shape change must name the previous baseline, name the new baseline, and include compatibility tests.
+- Release-gated docs must keep this acceptance evidence, the freeze policy, and the feature matrix linked.
+
+## Migration Release Note Template
+
+Every persisted storage or journal change must include release note text using this template:
+
+```text
+Persisted format changed: yes/no
+Baseline affected: storage/journal/audit/artifact
+Old version:
+New version:
+Migration command/path:
+Backup required: yes/no
+Rollback supported: yes/no
+Fixture added/updated:
+Compatibility test command:
+Rollback evidence:
+Known limitations:
+Pilot approval required: yes/no
+```
+
+## Rollback and Backup Expectations
+
+For every migration in the commercial-pilot line:
+
+- A backup manifest or equivalent restore point must be recorded before rewriting the persisted layout.
+- Restore/replay/verify commands must be documented with the migration release note.
+- Rollback must be rehearsed against a non-production storage root before a pilot candidate is accepted.
+- If rollback is not supported, the release note must say so and name the pilot approval record.
+- Incident evidence must avoid retaining plaintext secrets and must follow credential and observability redaction policies.
+
+## PR205 Acceptance Result
+
+Status: accepted for commercial pilot.
+
+Acceptance rationale:
+
+- The current fixture mapping is promoted from controlled-beta evidence to long-lived pilot compatibility contract.
+- Future storage/journal changes require migration + fixture + rollback evidence.
+- Release note, backup, rollback, and destructive migration expectations are explicit and release-gated.
+- PR204 already rehearsed release artifact and rollback evidence against a non-production storage root.
+
+Known limitations:
+
+- Current fixture tests are generated in test code rather than stored as archived binary fixture folders.
+- Real tagged pilot artifact rollback remains part of final release operations, but the compatibility contract and tabletop evidence are now accepted for pilot readiness.
 
 ## PR198 Acceptance Result
 

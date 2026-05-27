@@ -6,17 +6,17 @@ Security checklist sections: Storage formats, release/rollback
 
 ## Freeze Posture
 
-Current storage and conversation journal formats are accepted as **controlled-beta baseline fixtures**, but they are not yet commercial-pilot frozen.
+Current storage and conversation journal formats are accepted as **commercial-pilot baseline fixtures** for the first supported pilot line.
 
-Commercial pilot freeze requires explicit approval after the beta fixture lifecycle is exercised at least once.
+PR205 records explicit commercial-pilot approval after the beta fixture lifecycle and rollback tabletop were exercised.
 
-Current controlled-beta acceptance evidence is recorded in [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md).
+Current controlled-beta and commercial-pilot acceptance evidence is recorded in [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md).
 
 ## Baseline Fixture Contract
 
-A persisted format fixture becomes a baseline when it represents a released beta tag and is referenced by compatibility tests.
+A persisted format fixture becomes a baseline when it represents a released beta/pilot tag or an explicitly accepted pilot baseline and is referenced by compatibility tests.
 
-Baseline fixtures must remain backward-readable for the supported beta line.
+Baseline fixtures must remain backward-readable for the supported beta/pilot line.
 
 ## When to Add a Fixture
 
