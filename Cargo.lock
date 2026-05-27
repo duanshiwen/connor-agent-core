@@ -677,6 +677,7 @@ name = "device-pairing-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "identity-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -1276,8 +1277,10 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "rand_core 0.6.4",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
