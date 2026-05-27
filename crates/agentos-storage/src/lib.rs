@@ -94,6 +94,12 @@ pub enum StorageError {
     #[error("backup file missing: {path}")]
     BackupFileMissing { path: String },
 
+    #[error("backup contains unexpected file: {path}")]
+    BackupUnexpectedFile { path: String },
+
+    #[error("backup manifest contains invalid file path: {path}")]
+    BackupInvalidFilePath { path: String },
+
     #[error("backup integrity mismatch at {path}: expected {expected}, actual {actual}")]
     BackupIntegrityMismatch {
         path: String,

@@ -144,6 +144,77 @@ fn restore_rejects_non_empty_target_root() {
 }
 
 #[test]
+fn verify_backup_rejects_unexpected_file_not_in_manifest() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_path = backup_dir.path().join("backup");
+    let source = AgentOsStorage::init(source_dir.path()).unwrap();
+    StorageBackup::export(&source, &backup_path).unwrap();
+    std::fs::write(backup_path.join("data").join("unexpected.txt"), b"surprise").unwrap();
+
+    let error = StorageBackup::verify_backup(&backup_path).unwrap_err();
+
+    assert!(matches!(
+        error,
+        StorageError::BackupUnexpectedFile { path } if path == "unexpected.txt"
+    ));
+}
+
+#[test]
+fn verify_backup_rejects_manifest_path_traversal() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_path = backup_dir.path().join("backup");
+    let source = AgentOsStorage::init(source_dir.path()).unwrap();
+    StorageBackup::export(&source, &backup_path).unwrap();
+    let mut manifest = read_backup_manifest(&backup_path);
+    manifest.files.push(agentos_storage::BackupFileEntry {
+        path: "../outside.txt".to_string(),
+        byte_len: 1,
+        sha256: sha256(b"x"),
+    });
+    std::fs::write(
+        backup_path.join("backup-manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let error = StorageBackup::verify_backup(&backup_path).unwrap_err();
+
+    assert!(matches!(
+        error,
+        StorageError::BackupInvalidFilePath { path } if path == "../outside.txt"
+    ));
+}
+
+#[test]
+fn verify_backup_rejects_duplicate_manifest_path() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_path = backup_dir.path().join("backup");
+    let source = AgentOsStorage::init(source_dir.path()).unwrap();
+    StorageBackup::export(&source, &backup_path).unwrap();
+    let mut manifest = read_backup_manifest(&backup_path);
+    let duplicate = manifest.files[0].clone();
+    manifest.files.push(duplicate.clone());
+    std::fs::write(
+        backup_path.join("backup-manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let error = StorageBackup::verify_backup(&backup_path).unwrap_err();
+
+    assert!(matches!(
+        error,
+        StorageError::BackupIntegrityMismatch { path, expected, actual }
+            if path == duplicate.path
+                && expected == "unique manifest path"
+                && actual == "duplicate manifest path"
+    ));
+}
+
+#[test]
 fn verify_backup_rejects_missing_file() {
     let source_dir = tempfile::tempdir().unwrap();
     let backup_dir = tempfile::tempdir().unwrap();
