@@ -256,7 +256,8 @@ The release gate performs the minimum M24 checklist in order:
 2. Feature matrix check: verifies [docs/feature-matrix.md](docs/feature-matrix.md) exists and covers the stable public API boundary crates.
 3. Formatting: `cargo fmt --all --check`.
 4. Linting: `cargo clippy --workspace -- -D warnings`.
-5. Tests: `cargo test --workspace`.
+5. Security checklist docs: verifies [docs/security-review-checklist.md](docs/security-review-checklist.md) exists and states that high-risk PRs must reference it.
+6. Tests: `cargo test --workspace`.
 
 ## 最小示例
 

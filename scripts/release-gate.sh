@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 echo "==> docs check: release checklist"
 grep -q "## Release Checklist" README.md
 grep -q "./scripts/release-gate.sh" README.md
+test -f docs/security-review-checklist.md
+grep -q "High-risk PRs must reference this checklist" docs/security-review-checklist.md
 
 echo "==> feature matrix check"
 test -f docs/feature-matrix.md
