@@ -40,6 +40,7 @@ grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-re
 test -f docs/connector-browser-commercial-review-evidence.md
 grep -q "## Gmail Read-Only Connector Review Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## PR206 OAuth Provider Lifecycle Evidence" docs/connector-browser-commercial-review-evidence.md
+grep -q "## PR207 Gmail Retry Timeout Rate-Limit Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## Browser Kernel Current Capability Review Evidence" docs/connector-browser-commercial-review-evidence.md
 test -f docs/storage-journal-fixture-freeze-policy.md
 grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-journal-fixture-freeze-policy.md

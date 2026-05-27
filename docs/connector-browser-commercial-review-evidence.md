@@ -80,15 +80,38 @@ PR206 disposition:
 - Token refresh and revocation behavior are covered by deterministic provider-shaped fakes.
 - Offboarded connector accounts cannot refresh after credentials are revoked from the store.
 - OAuth lifecycle audit evidence is metadata-only and omits access/refresh token material.
-- Real provider retry, timeout, and rate-limit behavior remain tracked under PR207.
+- Gmail connector host audit and end-to-end connector-runtime offboarding remain tracked under PR208.
+
+## PR207 Gmail Retry Timeout Rate-Limit Evidence
+
+PR207 closes the Gmail read-only provider retry, timeout, and rate-limit policy gap with a deterministic policy boundary. It does not call the live Gmail API; host products still own actual HTTP client wiring, but retry decisions are now explicit and release-gated.
+
+Additional evidence commands:
+
+```bash
+cargo test -p connector-runtime gmail_provider_retry_policy
+```
+
+Evidence mapping:
+
+| Risk question | Evidence | Result |
+| --- | --- | --- |
+| Are timeout and transient provider errors classified as retryable? | `gmail_provider_retry_policy_retries_timeout_and_transient_errors` | Rehearsed |
+| Does rate-limit handling honor provider `Retry-After` seconds? | `gmail_provider_retry_policy_uses_retry_after_for_rate_limits` | Rehearsed |
+| Do authentication and invalid-request failures fail closed without retry? | `gmail_provider_retry_policy_fails_closed_for_auth_and_invalid_request` | Rehearsed |
+| Does retry stop at a deterministic max-attempt boundary? | `gmail_provider_retry_policy_exhausts_at_max_attempts` | Rehearsed |
+
+PR207 disposition:
+
+- Gmail read-only retry/backoff policy is deterministic and capped.
+- Timeout, transient provider failure, and rate-limit classes are explicit.
+- Rate-limit `Retry-After` is preserved as metadata and preferred over exponential backoff.
+- Authentication/credential failures and invalid requests are not retried, preserving fail-closed behavior.
 - Gmail connector host audit and end-to-end connector-runtime offboarding remain tracked under PR208.
 
 Open blockers before commercial pilot:
 
-- host/provider production retry policy;
-- host/provider timeout policy;
 - host audit event implementation for connector start/result;
-- provider-specific rate limit treatment;
 - end-to-end offboarding across host account state and connector runtime.
 
 ## Browser Kernel Current Capability Review Evidence

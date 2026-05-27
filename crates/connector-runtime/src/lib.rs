@@ -775,6 +775,166 @@ impl Default for GmailConnectorConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GmailProviderRetryConfig {
+    pub max_attempts: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub timeout_ms: u64,
+}
+
+impl Default for GmailProviderRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay_ms: 250,
+            max_delay_ms: 5_000,
+            timeout_ms: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GmailProviderErrorClass {
+    RateLimited,
+    Timeout,
+    TransientProvider,
+    Authentication,
+    InvalidRequest,
+    NotFound,
+    Unknown,
+}
+
+impl GmailProviderErrorClass {
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited | Self::Timeout | Self::TransientProvider
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GmailProviderRetryDecision {
+    Retry {
+        error_class: GmailProviderErrorClass,
+        delay_ms: u64,
+        retry_after_ms: Option<u64>,
+    },
+    DoNotRetry {
+        error_class: GmailProviderErrorClass,
+        reason: String,
+    },
+    Exhausted {
+        error_class: GmailProviderErrorClass,
+        attempts: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GmailProviderRetryPolicy {
+    config: GmailProviderRetryConfig,
+}
+
+impl GmailProviderRetryPolicy {
+    pub fn new(config: GmailProviderRetryConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> &GmailProviderRetryConfig {
+        &self.config
+    }
+
+    pub fn classify_error(&self, error: &ExternalConnectorError) -> GmailProviderErrorClass {
+        classify_gmail_provider_error(error)
+    }
+
+    pub fn decide(
+        &self,
+        error: &ExternalConnectorError,
+        attempt: u32,
+    ) -> GmailProviderRetryDecision {
+        let error_class = self.classify_error(error);
+        if !error_class.is_retryable() {
+            return GmailProviderRetryDecision::DoNotRetry {
+                error_class,
+                reason: non_retryable_gmail_reason(error_class).to_string(),
+            };
+        }
+        if attempt >= self.config.max_attempts {
+            return GmailProviderRetryDecision::Exhausted {
+                error_class,
+                attempts: attempt,
+            };
+        }
+        let retry_after_ms = match error {
+            ExternalConnectorError::RateLimited(seconds) => Some(seconds.saturating_mul(1_000)),
+            _ => None,
+        };
+        let delay_ms = retry_after_ms.unwrap_or_else(|| {
+            let multiplier = 1_u64
+                .checked_shl(attempt.saturating_sub(1))
+                .unwrap_or(u64::MAX);
+            self.config
+                .base_delay_ms
+                .saturating_mul(multiplier)
+                .min(self.config.max_delay_ms)
+        });
+        GmailProviderRetryDecision::Retry {
+            error_class,
+            delay_ms,
+            retry_after_ms,
+        }
+    }
+}
+
+impl Default for GmailProviderRetryPolicy {
+    fn default() -> Self {
+        Self::new(GmailProviderRetryConfig::default())
+    }
+}
+
+pub fn classify_gmail_provider_error(error: &ExternalConnectorError) -> GmailProviderErrorClass {
+    match error {
+        ExternalConnectorError::RateLimited(_) => GmailProviderErrorClass::RateLimited,
+        ExternalConnectorError::AuthenticationRequired
+        | ExternalConnectorError::TokenExpired
+        | ExternalConnectorError::OAuthRefresh(_) => GmailProviderErrorClass::Authentication,
+        ExternalConnectorError::InvalidRequest(_) => GmailProviderErrorClass::InvalidRequest,
+        ExternalConnectorError::ResourceNotFound(_) => GmailProviderErrorClass::NotFound,
+        ExternalConnectorError::ServiceUnavailable(message) => {
+            let normalized = message.to_ascii_lowercase();
+            if normalized.contains("timeout") || normalized.contains("timed out") {
+                GmailProviderErrorClass::Timeout
+            } else if normalized.contains("503")
+                || normalized.contains("500")
+                || normalized.contains("backend")
+                || normalized.contains("unavailable")
+                || normalized.contains("transient")
+            {
+                GmailProviderErrorClass::TransientProvider
+            } else {
+                GmailProviderErrorClass::Unknown
+            }
+        }
+        _ => GmailProviderErrorClass::Unknown,
+    }
+}
+
+fn non_retryable_gmail_reason(error_class: GmailProviderErrorClass) -> &'static str {
+    match error_class {
+        GmailProviderErrorClass::Authentication => {
+            "authentication/credential failure is not retryable"
+        }
+        GmailProviderErrorClass::InvalidRequest => "invalid request is not retryable",
+        GmailProviderErrorClass::NotFound => "resource not found is not retryable",
+        GmailProviderErrorClass::Unknown => "unknown Gmail provider error is not retryable",
+        GmailProviderErrorClass::RateLimited
+        | GmailProviderErrorClass::Timeout
+        | GmailProviderErrorClass::TransientProvider => "retryable Gmail provider error",
+    }
+}
+
 /// Read-only Gmail connector.
 #[allow(dead_code)]
 pub struct GmailConnector {
@@ -2091,6 +2251,102 @@ mod tests {
         assert_eq!(
             boundary.scopes[0],
             "https://www.googleapis.com/auth/gmail.readonly"
+        );
+    }
+
+    #[test]
+    fn gmail_provider_retry_policy_retries_timeout_and_transient_errors() {
+        let policy = GmailProviderRetryPolicy::new(GmailProviderRetryConfig {
+            max_attempts: 3,
+            base_delay_ms: 100,
+            max_delay_ms: 1_000,
+            timeout_ms: 5_000,
+        });
+
+        let timeout = ExternalConnectorError::ServiceUnavailable("request timeout exceeded".into());
+        let transient =
+            ExternalConnectorError::ServiceUnavailable("gmail 503 backend error".into());
+
+        assert_eq!(
+            policy.classify_error(&timeout),
+            GmailProviderErrorClass::Timeout
+        );
+        assert_eq!(
+            policy.decide(&timeout, 1),
+            GmailProviderRetryDecision::Retry {
+                error_class: GmailProviderErrorClass::Timeout,
+                delay_ms: 100,
+                retry_after_ms: None,
+            }
+        );
+        assert_eq!(
+            policy.decide(&transient, 2),
+            GmailProviderRetryDecision::Retry {
+                error_class: GmailProviderErrorClass::TransientProvider,
+                delay_ms: 200,
+                retry_after_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn gmail_provider_retry_policy_uses_retry_after_for_rate_limits() {
+        let policy = GmailProviderRetryPolicy::default();
+        let rate_limited = ExternalConnectorError::RateLimited(17);
+
+        assert_eq!(
+            policy.classify_error(&rate_limited),
+            GmailProviderErrorClass::RateLimited
+        );
+        assert_eq!(
+            policy.decide(&rate_limited, 1),
+            GmailProviderRetryDecision::Retry {
+                error_class: GmailProviderErrorClass::RateLimited,
+                delay_ms: 17_000,
+                retry_after_ms: Some(17_000),
+            }
+        );
+    }
+
+    #[test]
+    fn gmail_provider_retry_policy_fails_closed_for_auth_and_invalid_request() {
+        let policy = GmailProviderRetryPolicy::default();
+
+        assert_eq!(
+            policy.decide(&ExternalConnectorError::AuthenticationRequired, 1),
+            GmailProviderRetryDecision::DoNotRetry {
+                error_class: GmailProviderErrorClass::Authentication,
+                reason: "authentication/credential failure is not retryable".to_string(),
+            }
+        );
+        assert_eq!(
+            policy.decide(
+                &ExternalConnectorError::InvalidRequest("bad query".into()),
+                1
+            ),
+            GmailProviderRetryDecision::DoNotRetry {
+                error_class: GmailProviderErrorClass::InvalidRequest,
+                reason: "invalid request is not retryable".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn gmail_provider_retry_policy_exhausts_at_max_attempts() {
+        let policy = GmailProviderRetryPolicy::new(GmailProviderRetryConfig {
+            max_attempts: 2,
+            base_delay_ms: 100,
+            max_delay_ms: 1_000,
+            timeout_ms: 5_000,
+        });
+        let timeout = ExternalConnectorError::ServiceUnavailable("timeout".into());
+
+        assert_eq!(
+            policy.decide(&timeout, 2),
+            GmailProviderRetryDecision::Exhausted {
+                error_class: GmailProviderErrorClass::Timeout,
+                attempts: 2,
+            }
         );
     }
 }

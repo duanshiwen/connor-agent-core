@@ -326,7 +326,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p identity-core oauth_lifecycle_audit_event_is_metadata_only` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR207: Gmail Read-Only Retry, Timeout, and Rate-Limit Hardening
+### PR207: Gmail Read-Only Retry, Timeout, and Rate-Limit Hardening ✅ Completed
 
 **Goal:** Make Gmail read-only suitable as the first conditional commercial connector.
 
@@ -340,18 +340,19 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Provider retry/backoff policy for Gmail reads.
-- Timeout classification and error mapping.
-- Rate-limit treatment and retry-after handling.
-- Tests for transient provider errors, timeout, rate limit, and fail-closed behavior.
-- Update [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md).
+- ✅ Provider retry/backoff policy for Gmail reads: `GmailProviderRetryPolicy` and `GmailProviderRetryConfig`.
+- ✅ Timeout classification and error mapping: `GmailProviderErrorClass::Timeout` for timeout-like provider errors.
+- ✅ Rate-limit treatment and retry-after handling: `ExternalConnectorError::RateLimited(seconds)` produces retry delay from provider `Retry-After` seconds.
+- ✅ Tests for transient provider errors, timeout, rate limit, exhausted retries, and fail-closed auth/invalid-request behavior.
+- ✅ Updated [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md) under `## PR207 Gmail Retry Timeout Rate-Limit Evidence`.
 
 **Acceptance:**
 
-- Gmail read-only remains read-only under default safe policy.
-- Provider failures do not bypass permission or credential boundaries.
-- Rate-limit and timeout behavior are explicit and auditable.
-- Release gate passes.
+- ✅ Gmail read-only remains read-only under default safe policy; PR207 only adds provider retry decision boundaries.
+- ✅ Provider failures do not bypass permission or credential boundaries; authentication/credential and invalid request failures are not retried.
+- ✅ Rate-limit and timeout behavior are explicit and auditable through deterministic retry decisions.
+- ✅ `cargo test -p connector-runtime gmail_provider_retry_policy` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR208: Gmail Host Audit and End-to-End Offboarding Evidence
 

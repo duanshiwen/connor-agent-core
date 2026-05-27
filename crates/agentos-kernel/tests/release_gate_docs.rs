@@ -64,6 +64,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
         script.contains("PR206 OAuth Provider Lifecycle Evidence"),
         "release gate must include PR206 OAuth provider lifecycle evidence checks"
     );
+    assert!(
+        script.contains("PR207 Gmail Retry Timeout Rate-Limit Evidence"),
+        "release gate must include PR207 Gmail retry/timeout/rate-limit evidence checks"
+    );
 
     #[cfg(unix)]
     {
@@ -197,5 +201,36 @@ fn oauth_provider_lifecycle_records_pr206_evidence() {
             "PR206: OAuth Provider Endpoint, Revocation, and Offboarding Evidence ✅ Completed"
         ),
         "commercial pilot readiness plan must mark PR206 complete"
+    );
+}
+
+#[test]
+fn gmail_retry_timeout_rate_limit_records_pr207_evidence() {
+    let root = workspace_root();
+    let evidence =
+        fs::read_to_string(root.join("docs/connector-browser-commercial-review-evidence.md"))
+            .expect("connector/browser commercial review evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## PR207 Gmail Retry Timeout Rate-Limit Evidence",
+        "gmail_provider_retry_policy_retries_timeout_and_transient_errors",
+        "gmail_provider_retry_policy_uses_retry_after_for_rate_limits",
+        "gmail_provider_retry_policy_fails_closed_for_auth_and_invalid_request",
+        "gmail_provider_retry_policy_exhausts_at_max_attempts",
+        "Authentication/credential failures and invalid requests are not retried",
+    ] {
+        assert!(
+            evidence.contains(required),
+            "PR207 Gmail retry evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains(
+            "PR207: Gmail Read-Only Retry, Timeout, and Rate-Limit Hardening ✅ Completed"
+        ),
+        "commercial pilot readiness plan must mark PR207 complete"
     );
 }
