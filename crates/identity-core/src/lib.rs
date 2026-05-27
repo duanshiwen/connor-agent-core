@@ -505,11 +505,48 @@ impl From<&str> for CredentialId {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CredentialScope {
     Global,
-    Agent { agentos_id: AgentOsId },
-    Device { device_id: DeviceId },
-    Server { server_id: String },
-    Connector { connector_id: String },
-    Custom { namespace: String, id: String },
+    Agent {
+        agentos_id: AgentOsId,
+    },
+    Device {
+        device_id: DeviceId,
+    },
+    Server {
+        server_id: String,
+    },
+    Connector {
+        connector_id: String,
+    },
+    ConnectorAccount {
+        connector_id: String,
+        account_id: String,
+    },
+    Custom {
+        namespace: String,
+        id: String,
+    },
+}
+
+impl CredentialScope {
+    pub fn connector_id(&self) -> Option<&str> {
+        match self {
+            Self::Connector { connector_id } | Self::ConnectorAccount { connector_id, .. } => {
+                Some(connector_id)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        match self {
+            Self::ConnectorAccount { account_id, .. } => Some(account_id),
+            _ => None,
+        }
+    }
+
+    pub fn is_for_device(&self, device_id: &DeviceId) -> bool {
+        matches!(self, Self::Device { device_id: scoped } if scoped == device_id)
+    }
 }
 
 /// Non-secret metadata for a credential.
@@ -591,8 +628,26 @@ pub enum CredentialError {
     EncryptionUnavailable(String),
     #[error("credential io error: {0}")]
     Io(String),
+    #[error("credential scope mismatch: {0}")]
+    ScopeMismatch(String),
     #[error("credential internal error: {0}")]
     Internal(String),
+}
+
+/// Rotation result for a credential secret update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRotationResult {
+    pub id: CredentialId,
+    pub rotated_at: DateTime<Utc>,
+    pub previous_updated_at: DateTime<Utc>,
+}
+
+/// Result of revoking all credentials scoped to a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCredentialRevocationResult {
+    pub device_id: DeviceId,
+    pub revoked_credential_ids: Vec<CredentialId>,
+    pub revoked_at: DateTime<Utc>,
 }
 
 /// Trait for storing, retrieving, deleting, and listing credential metadata.
@@ -621,6 +676,61 @@ impl Default for MemoryCredentialStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub async fn list_credentials_by_scope(
+    store: &dyn CredentialStore,
+    scope: &CredentialScope,
+) -> Result<Vec<CredentialMetadata>, CredentialError> {
+    Ok(store
+        .list_metadata()
+        .await?
+        .into_iter()
+        .filter(|metadata| metadata.scope == *scope)
+        .collect())
+}
+
+pub async fn rotate_credential_secret(
+    store: &dyn CredentialStore,
+    id: &CredentialId,
+    new_secret: SecretValue,
+    now: DateTime<Utc>,
+) -> Result<CredentialRotationResult, CredentialError> {
+    let mut record = store.read(id).await?;
+    let previous_updated_at = record.metadata.updated_at;
+    record.secret = new_secret;
+    record.metadata.updated_at = now;
+    store.write(record).await?;
+    Ok(CredentialRotationResult {
+        id: id.clone(),
+        rotated_at: now,
+        previous_updated_at,
+    })
+}
+
+pub async fn revoke_device_credentials(
+    store: &dyn CredentialStore,
+    device_id: &DeviceId,
+    now: DateTime<Utc>,
+) -> Result<DeviceCredentialRevocationResult, CredentialError> {
+    let mut revoked_credential_ids: Vec<_> = store
+        .list_metadata()
+        .await?
+        .into_iter()
+        .filter(|metadata| metadata.scope.is_for_device(device_id))
+        .map(|metadata| metadata.id)
+        .collect();
+    revoked_credential_ids.sort();
+
+    for id in &revoked_credential_ids {
+        store.delete(id).await?;
+    }
+
+    Ok(DeviceCredentialRevocationResult {
+        device_id: device_id.clone(),
+        revoked_credential_ids,
+        revoked_at: now,
+    })
 }
 
 #[async_trait]
@@ -766,8 +876,16 @@ impl OAuthCredentialRef {
     }
 
     pub fn credential_scope(&self) -> CredentialScope {
-        CredentialScope::Connector {
-            connector_id: self.connector_id.clone(),
+        match self.account_id.as_deref() {
+            Some(account_id) if !account_id.trim().is_empty() => {
+                CredentialScope::ConnectorAccount {
+                    connector_id: self.connector_id.clone(),
+                    account_id: account_id.to_string(),
+                }
+            }
+            _ => CredentialScope::Connector {
+                connector_id: self.connector_id.clone(),
+            },
         }
     }
 
@@ -2059,16 +2177,181 @@ mod tests {
     }
 
     #[test]
-    fn oauth_credential_ref_maps_to_connector_scope() {
+    fn oauth_credential_ref_maps_to_connector_account_scope() {
         let credential_ref = sample_oauth_ref();
 
         assert_eq!(
             credential_ref.credential_scope(),
-            CredentialScope::Connector {
-                connector_id: "github".to_string()
+            CredentialScope::ConnectorAccount {
+                connector_id: "github".to_string(),
+                account_id: "user-1".to_string(),
             }
         );
+        assert_eq!(
+            credential_ref.credential_scope().connector_id(),
+            Some("github")
+        );
+        assert_eq!(
+            credential_ref.credential_scope().account_id(),
+            Some("user-1")
+        );
         assert_eq!(credential_ref.metadata_label(), "OAuth github user-1");
+    }
+
+    #[test]
+    fn oauth_credential_ref_without_account_maps_to_connector_scope() {
+        let credential_ref = OAuthCredentialRef::new(
+            CredentialId::from("oauth-github"),
+            "github",
+            None,
+            vec!["repo".to_string()],
+        );
+
+        assert_eq!(
+            credential_ref.credential_scope(),
+            CredentialScope::Connector {
+                connector_id: "github".to_string(),
+            }
+        );
+        assert_eq!(credential_ref.credential_scope().account_id(), None);
+    }
+
+    #[tokio::test]
+    async fn list_credentials_by_scope_filters_exact_scope() {
+        let store = MemoryCredentialStore::new();
+        let now = ts();
+        let github_user_1 = sample_oauth_ref();
+        let github_user_2 = OAuthCredentialRef::new(
+            CredentialId::from("oauth-github-user-2"),
+            "github",
+            Some("user-2".to_string()),
+            vec!["repo".to_string()],
+        );
+        store
+            .write(
+                sample_oauth_token(now)
+                    .to_credential_record(&github_user_1, github_user_1.metadata_label(), now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .write(
+                sample_oauth_token(now)
+                    .to_credential_record(&github_user_2, github_user_2.metadata_label(), now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let scoped = list_credentials_by_scope(&store, &github_user_1.credential_scope())
+            .await
+            .unwrap();
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, github_user_1.credential_id);
+    }
+
+    #[tokio::test]
+    async fn rotate_credential_secret_updates_secret_and_timestamp() {
+        let store = MemoryCredentialStore::new();
+        let credential_id = CredentialId::from("device-secret");
+        let created_at = ts();
+        let rotated_at = created_at + chrono::Duration::minutes(5);
+        store
+            .write(CredentialRecord::new(
+                credential_id.clone(),
+                CredentialScope::Device {
+                    device_id: DeviceId::from("device-1"),
+                },
+                "Device secret",
+                SecretValue::new("old-secret"),
+                created_at,
+            ))
+            .await
+            .unwrap();
+
+        let result = rotate_credential_secret(
+            &store,
+            &credential_id,
+            SecretValue::new("new-secret"),
+            rotated_at,
+        )
+        .await
+        .unwrap();
+        let fetched = store.read(&credential_id).await.unwrap();
+
+        assert_eq!(result.id, credential_id);
+        assert_eq!(result.previous_updated_at, created_at);
+        assert_eq!(result.rotated_at, rotated_at);
+        assert_eq!(fetched.secret.expose_secret(), "new-secret");
+        assert_eq!(fetched.metadata.created_at, created_at);
+        assert_eq!(fetched.metadata.updated_at, rotated_at);
+    }
+
+    #[tokio::test]
+    async fn revoke_device_credentials_deletes_only_device_scoped_credentials() {
+        let store = MemoryCredentialStore::new();
+        let now = ts();
+        let device_id = DeviceId::from("device-1");
+        store
+            .write(CredentialRecord::new(
+                CredentialId::from("device-a"),
+                CredentialScope::Device {
+                    device_id: device_id.clone(),
+                },
+                "Device A",
+                SecretValue::new("secret-a"),
+                now,
+            ))
+            .await
+            .unwrap();
+        store
+            .write(CredentialRecord::new(
+                CredentialId::from("device-b"),
+                CredentialScope::Device {
+                    device_id: device_id.clone(),
+                },
+                "Device B",
+                SecretValue::new("secret-b"),
+                now,
+            ))
+            .await
+            .unwrap();
+        store
+            .write(CredentialRecord::new(
+                CredentialId::from("other-device"),
+                CredentialScope::Device {
+                    device_id: DeviceId::from("device-2"),
+                },
+                "Other Device",
+                SecretValue::new("secret-c"),
+                now,
+            ))
+            .await
+            .unwrap();
+
+        let result = revoke_device_credentials(&store, &device_id, now)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.revoked_credential_ids,
+            vec![
+                CredentialId::from("device-a"),
+                CredentialId::from("device-b")
+            ]
+        );
+        assert!(matches!(
+            store.read(&CredentialId::from("device-a")).await,
+            Err(CredentialError::NotFound(id)) if id == "device-a"
+        ));
+        assert!(
+            store
+                .read(&CredentialId::from("other-device"))
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
