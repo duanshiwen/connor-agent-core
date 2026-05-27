@@ -7,7 +7,12 @@ use agentos_kernel::KernelErrorCategory;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub const CURRENT_OBSERVABILITY_SCHEMA_VERSION: u32 = 1;
 
@@ -17,6 +22,7 @@ pub enum ObservabilityEventKind {
     Model,
     Action,
     Browser,
+    Connector,
     Sync,
     ToolLoop,
     Scheduler,
@@ -224,4 +230,79 @@ impl InMemoryObservabilitySink {
     pub fn metrics(&self) -> &[MetricSample] {
         &self.metrics
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ObservabilityExportError {
+    #[error("observability export IO failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("observability export serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservabilityExportMetadata {
+    pub export_mode: String,
+    pub trace_path: String,
+    pub metric_path: String,
+    pub retention_days: u32,
+    pub redaction: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonlObservabilityFileSink {
+    trace_path: PathBuf,
+    metric_path: PathBuf,
+    redaction_policy: RedactionPolicy,
+    retention_days: u32,
+}
+
+impl JsonlObservabilityFileSink {
+    pub fn open(
+        export_root: impl AsRef<Path>,
+        redaction_policy: RedactionPolicy,
+    ) -> Result<Self, ObservabilityExportError> {
+        Self::open_with_retention(export_root, redaction_policy, 14)
+    }
+
+    pub fn open_with_retention(
+        export_root: impl AsRef<Path>,
+        redaction_policy: RedactionPolicy,
+        retention_days: u32,
+    ) -> Result<Self, ObservabilityExportError> {
+        let export_root = export_root.as_ref();
+        fs::create_dir_all(export_root)?;
+        Ok(Self {
+            trace_path: export_root.join("traces.jsonl"),
+            metric_path: export_root.join("metrics.jsonl"),
+            redaction_policy,
+            retention_days,
+        })
+    }
+
+    pub fn record_trace(&mut self, event: &TraceEvent) -> Result<(), ObservabilityExportError> {
+        let redacted = self.redaction_policy.redact_trace_event(event);
+        append_jsonl(&self.trace_path, &redacted)
+    }
+
+    pub fn record_metric(&mut self, sample: &MetricSample) -> Result<(), ObservabilityExportError> {
+        append_jsonl(&self.metric_path, sample)
+    }
+
+    pub fn export_metadata(&self) -> ObservabilityExportMetadata {
+        ObservabilityExportMetadata {
+            export_mode: "file".to_string(),
+            trace_path: self.trace_path.to_string_lossy().into_owned(),
+            metric_path: self.metric_path.to_string_lossy().into_owned(),
+            retention_days: self.retention_days,
+            redaction: "trace attributes redacted before write".to_string(),
+        }
+    }
+}
+
+fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), ObservabilityExportError> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    Ok(())
 }

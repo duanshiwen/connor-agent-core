@@ -6,11 +6,11 @@ Security checklist sections: Credential, Connector, Browser Risk, Enterprise Per
 
 ## Scope
 
-The kernel provides structured trace/metric boundaries and in-memory test sinks. A host product may choose one of the following export modes:
+The kernel provides structured trace/metric boundaries, in-memory test sinks, and a production-like JSONL file sink for host-owned local export. A host product may choose one of the following export modes:
 
 - `disabled`: no production export; local diagnostics only.
 - `in-memory`: process-local troubleshooting and tests.
-- `file`: local redacted trace/metric files owned by the host.
+- `file`: local redacted trace/metric files owned by the host. PR203 adds `JsonlObservabilityFileSink`, which writes redacted `traces.jsonl` and `metrics.jsonl` files plus export metadata for diagnostics linkage.
 - `otlp` or vendor exporter: allowed only when the host documents retention, redaction, and access control.
 
 The kernel must not bind directly to a commercial telemetry vendor.
@@ -75,6 +75,24 @@ Default controlled-beta retention:
 
 - Export permission decision category and stable resource type when allowed.
 - Do not export denied resource metadata unless the audit export permission model allows it.
+
+## Production-Like File Export Sink
+
+PR203 provides `JsonlObservabilityFileSink` as the first production-like local export sink. Host products own the export root, filesystem permissions, cleanup job, and operator access policy.
+
+Required behavior:
+
+- Trace events are redacted before being appended to `traces.jsonl`.
+- Metric samples are appended to `metrics.jsonl` without secret-bearing labels.
+- Export metadata includes `export_mode = file`, trace path, metric path, retention days, and redaction status.
+- Default file retention metadata is 14 days unless the host explicitly configures a different value.
+- Diagnostics/debug bundles may link to the export metadata or recent trace summary, but must not inline plaintext secrets or raw connector/browser content.
+
+Evidence command:
+
+```bash
+cargo test -p agentos-observability jsonl_file_sink_exports_redacted_traces_and_metrics
+```
 
 ## Debug Bundle Attachments
 

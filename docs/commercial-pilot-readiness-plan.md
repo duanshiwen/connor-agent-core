@@ -212,7 +212,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-kernel --test release_gate_docs release_gate_script_documents_and_runs_required_checks` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR203: Production-Like Observability Export Sink
+### PR203: Production-Like Observability Export Sink ✅ Completed
 
 **Goal:** Move beyond in-memory observability so backend/macOS dogfood and pilot incidents can be diagnosed.
 
@@ -226,16 +226,18 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- File/JSONL observability sink or host-provided sink adapter.
-- Redaction tests for trace and metric payloads.
-- Diagnostics bundle linkage to recent trace summaries or trace export location.
-- Update [production-observability-policy.md](production-observability-policy.md).
+- ✅ File/JSONL observability sink: `JsonlObservabilityFileSink` writes redacted `traces.jsonl` and `metrics.jsonl` under a host-owned export root.
+- ✅ Redaction tests for trace payloads and export tests proving plaintext token values are not written.
+- ✅ Diagnostics/export metadata linkage shape via `ObservabilityExportMetadata` with export mode, trace path, metric path, retention days, and redaction status.
+- ✅ Updated [production-observability-policy.md](production-observability-policy.md) with `## Production-Like File Export Sink` and evidence command.
+- ✅ Release gate checks that production observability policy documents the file export sink.
 
 **Acceptance:**
 
-- Production-like trace export can be enabled without leaking secrets.
-- Retention and access assumptions are documented.
-- Release gate passes.
+- ✅ Production-like trace export can be enabled without leaking secrets.
+- ✅ Retention and access assumptions are documented; default file sink retention metadata is 14 days.
+- ✅ `cargo test -p agentos-observability jsonl_file_sink_exports_redacted_traces_and_metrics` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR204: Beta/Pilot Release Artifact and Rollback Rehearsal
 

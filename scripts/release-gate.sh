@@ -28,6 +28,7 @@ grep -q "## Rehearsal Scope" docs/credential-operations-rehearsal.md
 grep -q "## Host-Level Pilot Rehearsal Evidence" docs/credential-operations-rehearsal.md
 test -f docs/production-observability-policy.md
 grep -q "## Redaction Requirements" docs/production-observability-policy.md
+grep -q "## Production-Like File Export Sink" docs/production-observability-policy.md
 test -f docs/release-operations-runbook.md
 grep -q "## Rollback Decision Tree" docs/release-operations-runbook.md
 test -f docs/connector-browser-risk-review-templates.md

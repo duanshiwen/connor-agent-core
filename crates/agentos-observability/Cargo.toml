@@ -12,3 +12,6 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 agentos-kernel = { path = "../agentos-kernel" }
+
+[dev-dependencies]
+tempfile.workspace = true

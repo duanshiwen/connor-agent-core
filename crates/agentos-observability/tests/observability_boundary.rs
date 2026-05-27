@@ -1,7 +1,7 @@
 use agentos_kernel::KernelErrorCategory;
 use agentos_observability::{
-    InMemoryObservabilitySink, MetricKind, MetricSample, ObservabilityEventKind,
-    ObservabilityRedactor, RedactionPolicy, TraceEvent,
+    InMemoryObservabilitySink, JsonlObservabilityFileSink, MetricKind, MetricSample,
+    ObservabilityEventKind, ObservabilityRedactor, RedactionPolicy, TraceEvent,
 };
 use chrono::{TimeZone, Utc};
 use serde_json::json;
@@ -99,4 +99,39 @@ fn memory_sink_records_model_action_browser_and_sync_events() {
     assert_eq!(sink.traces()[1].kind, ObservabilityEventKind::Action);
     assert_eq!(sink.traces()[2].kind, ObservabilityEventKind::Browser);
     assert_eq!(sink.traces()[3].kind, ObservabilityEventKind::Sync);
+}
+
+#[test]
+fn jsonl_file_sink_exports_redacted_traces_and_metrics() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sink = JsonlObservabilityFileSink::open(temp_dir.path(), RedactionPolicy::default())
+        .expect("file sink should open under host-owned export root");
+
+    let trace = TraceEvent::new(
+        "evt-file-1",
+        ObservabilityEventKind::Connector,
+        "connector-runtime",
+        "run-file-1",
+        Utc.with_ymd_and_hms(2026, 5, 27, 13, 0, 0).unwrap(),
+    )
+    .with_operation("gmail.read")
+    .with_attribute("access_token", "secret-token")
+    .with_attribute("message_count", 3);
+    sink.record_trace(&trace).unwrap();
+    sink.record_metric(&MetricSample::counter("connector.read.completed", 1.0))
+        .unwrap();
+
+    let metadata = sink.export_metadata();
+    assert_eq!(metadata.export_mode, "file");
+    assert_eq!(metadata.retention_days, 14);
+    assert!(metadata.trace_path.ends_with("traces.jsonl"));
+    assert!(metadata.metric_path.ends_with("metrics.jsonl"));
+
+    let trace_jsonl = std::fs::read_to_string(temp_dir.path().join("traces.jsonl")).unwrap();
+    assert!(trace_jsonl.contains("evt-file-1"));
+    assert!(trace_jsonl.contains("[REDACTED]"));
+    assert!(!trace_jsonl.contains("secret-token"));
+
+    let metric_jsonl = std::fs::read_to_string(temp_dir.path().join("metrics.jsonl")).unwrap();
+    assert!(metric_jsonl.contains("connector.read.completed"));
 }

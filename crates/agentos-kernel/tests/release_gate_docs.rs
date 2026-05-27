@@ -44,6 +44,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
             && script.contains("Host-Level Pilot Rehearsal Evidence"),
         "release gate must include PR202 host-level credential rehearsal checks"
     );
+    assert!(
+        script.contains("Production-Like File Export Sink"),
+        "release gate must include PR203 production observability file sink checks"
+    );
 
     #[cfg(unix)]
     {
