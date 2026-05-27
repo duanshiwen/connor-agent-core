@@ -22,8 +22,10 @@ grep -q "## Proposed PR Plan" docs/commercial-pilot-readiness-plan.md
 grep -q "PR200: Beta/Commercial Host API Freeze Acceptance" docs/commercial-pilot-readiness-plan.md
 test -f docs/credential-operations-runbook.md
 grep -q "## Offboarding Sequence" docs/credential-operations-runbook.md
+grep -q "## Host-Level Pilot Backend Decision" docs/credential-operations-runbook.md
 test -f docs/credential-operations-rehearsal.md
 grep -q "## Rehearsal Scope" docs/credential-operations-rehearsal.md
+grep -q "## Host-Level Pilot Rehearsal Evidence" docs/credential-operations-rehearsal.md
 test -f docs/production-observability-policy.md
 grep -q "## Redaction Requirements" docs/production-observability-policy.md
 test -f docs/release-operations-runbook.md

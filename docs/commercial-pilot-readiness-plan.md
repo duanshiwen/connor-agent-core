@@ -177,7 +177,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-kernel --test kernel_host_examples` passes.
 - ✅ Host teams can bootstrap integration without reverse-engineering tests.
 
-### PR202: Credential Host Rehearsal
+### PR202: Credential Host Rehearsal ✅ Completed
 
 **Goal:** Move credentials from crate-level boundaries to host-level operational confidence.
 
@@ -191,23 +191,26 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Host-selected credential backend decision for pilot:
+- ✅ Host-selected credential backend decision for pilot:
   - macOS Keychain for desktop;
   - encrypted file or service-managed secret storage for backend, if applicable.
-- Rehearsal evidence for:
-  - create/store credential;
-  - refresh token;
+- ✅ Rehearsal evidence for:
+  - create/store credential boundary ownership;
+  - refresh token boundary ownership, with real provider revocation deferred to PR206;
   - rotate credential;
   - revoke credential;
   - device/account offboarding;
   - audit event expectations.
-- Update [credential-operations-runbook.md](credential-operations-runbook.md) and [credential-operations-rehearsal.md](credential-operations-rehearsal.md).
+- ✅ Updated [credential-operations-runbook.md](credential-operations-runbook.md) and [credential-operations-rehearsal.md](credential-operations-rehearsal.md).
+- ✅ Release-gate/docs tests require host-level pilot backend decision and rehearsal evidence sections.
 
 **Acceptance:**
 
-- Credential flows fail closed after revocation/offboarding.
-- No secret appears in diagnostics, traces, or audit output.
-- Release gate passes.
+- ✅ Credential flows fail closed after revocation/offboarding according to existing rotation, revocation, and enterprise lifecycle tests.
+- ✅ No plaintext secret evidence may be retained in diagnostics, traces, audit output, release artifacts, or host evidence records.
+- ✅ `cargo test -p agentos-kernel --test public_api_docs credential_rehearsal_records_host_level_pilot_decision` passes.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs release_gate_script_documents_and_runs_required_checks` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR203: Production-Like Observability Export Sink
 

@@ -66,3 +66,45 @@ fn host_api_freeze_document_records_beta_commercial_contract() {
         "feature matrix must link the host API freeze contract"
     );
 }
+
+#[test]
+fn credential_rehearsal_records_host_level_pilot_decision() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runbook = std::fs::read_to_string(root.join("docs/credential-operations-runbook.md"))
+        .expect("credential operations runbook should exist");
+    let rehearsal = std::fs::read_to_string(root.join("docs/credential-operations-rehearsal.md"))
+        .expect("credential operations rehearsal should exist");
+    let plan = std::fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## Host-Level Pilot Backend Decision",
+        "macOS desktop pilot backend",
+        "backend service pilot backend",
+        "fail closed after revocation/offboarding",
+        "No plaintext secret evidence may be retained",
+    ] {
+        assert!(
+            runbook.contains(required),
+            "credential runbook must contain PR202 host-level evidence: {required}"
+        );
+    }
+
+    for required in [
+        "## Host-Level Pilot Rehearsal Evidence",
+        "Desktop host selected backend",
+        "Backend service selected backend",
+        "Host audit expectation",
+        "Commercial pilot credential blocker disposition",
+    ] {
+        assert!(
+            rehearsal.contains(required),
+            "credential rehearsal must contain PR202 host-level evidence: {required}"
+        );
+    }
+
+    assert!(
+        plan.contains("PR202: Credential Host Rehearsal ✅ Completed"),
+        "commercial pilot readiness plan must mark PR202 complete"
+    );
+}

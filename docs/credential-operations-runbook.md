@@ -16,6 +16,20 @@ Security checklist sections: Credential
 
 The kernel provides boundaries; the host product owns final backend selection and operational controls.
 
+## Host-Level Pilot Backend Decision
+
+PR202 records the commercial-pilot host credential backend decision for the first backend/macOS integration rehearsal:
+
+| Host shape | Pilot backend decision | Required host controls | Pilot status |
+| --- | --- | --- | --- |
+| macOS desktop pilot backend | macOS Keychain provider through the `identity-core` credential provider boundary | Host-owned service/account naming, access-group review, OS prompt UX, metadata-only diagnostics | Selected for pilot rehearsal |
+| backend service pilot backend | Encrypted file credential store or service-managed secret storage behind the `CredentialStore` boundary | Host-owned key management, filesystem permissions or secret-manager IAM, rotation/offboarding operator log | Selected as backend-compatible rehearsal path |
+| tests/examples | Memory/fake providers only | Deterministic fake values, no production identity mode | Allowed only outside production/pilot runtime |
+
+Host credential flows must fail closed after revocation/offboarding. No connector, device, or account read may continue once the host lifecycle layer denies access or the scoped credential is revoked.
+
+No plaintext secret evidence may be retained in runbooks, release artifacts, diagnostics bundles, observability exports, audit exports, incident records, or screenshots. Host evidence should retain only backend type, credential id, scope, actor, timestamp, provider response class, and redacted verification result.
+
 ## Secret Handling Rules
 
 - Never log secrets, OAuth tokens, passwords, cookies, or API keys in plaintext.

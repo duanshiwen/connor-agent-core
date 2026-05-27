@@ -39,6 +39,11 @@ fn release_gate_script_documents_and_runs_required_checks() {
         script.contains("Release Checklist"),
         "release gate must include a docs check for release checklist docs"
     );
+    assert!(
+        script.contains("Host-Level Pilot Backend Decision")
+            && script.contains("Host-Level Pilot Rehearsal Evidence"),
+        "release gate must include PR202 host-level credential rehearsal checks"
+    );
 
     #[cfg(unix)]
     {
