@@ -41,8 +41,8 @@ See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-po
 
 | Gap | Beta disposition | Commercial pilot disposition | Owner | Exit criteria |
 | --- | --- | --- | --- | --- |
-| External connector threat reviews and irreversible side-effect tests | Accepted risk for read-only/demo connectors; write connectors blocked | Must be closed for each enabled connector | Connector owner | Per-connector review completed and referenced from high-risk PR |
-| Browser automation product-level permission UX | Accepted only behind explicit host opt-in; broad end-user exposure blocked | Must be closed for each enabled browser capability | Host product owner | Browser exposure review completed; permission UX documented |
+| External connector threat reviews and irreversible side-effect tests | Gmail read-only code-level review evidence recorded; write connectors blocked | Must be closed for each enabled connector/host integration | Connector owner | Gmail read-only remains conditional; unreviewed connectors blocked by default |
+| Browser automation product-level permission UX | Browser Kernel code-level review evidence recorded; broad end-user exposure blocked | Must be closed for each enabled browser capability | Host product owner | Browser review evidence exists; product permission UX and irreversible side-effect tests remain required |
 | Credential storage integration and rotation guidance | Documented and code-level rehearsal recorded | Must be operationally rehearsed by pilot host | Host/security owner | Credential runbook and rehearsal evidence exist; host-level backend rehearsal remains |
 | Production telemetry export/retention policy | Must be documented before beta release candidate | Must be enforced by pilot host | Host/security owner | Observability policy exists and names allowed sinks/redaction/retention |
 | Storage and journal compatibility fixtures | Accepted with beta fixture policy | Must be frozen or explicitly deferred | Kernel owner | Fixture lifecycle policy exists and release gate remains green |
@@ -61,7 +61,7 @@ See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-po
 
 Commercial pilot remains blocked until:
 
-- Connector/browser reviews are complete for every enabled commercial capability.
+- Connector/browser reviews are complete for every enabled commercial capability; first code-level evidence is recorded in [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md).
 - Credential runbook is rehearsed by the pilot host using the selected production backend; code-level rehearsal evidence exists in [credential-operations-rehearsal.md](credential-operations-rehearsal.md).
 - Production observability export and retention policy is enforced by the pilot host.
 - Release rollback and incident escalation runbooks are exercised.

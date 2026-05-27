@@ -19,6 +19,7 @@ Controlled beta is governed by:
 - [production-observability-policy.md](production-observability-policy.md)
 - [release-operations-runbook.md](release-operations-runbook.md)
 - [connector-browser-risk-review-templates.md](connector-browser-risk-review-templates.md)
+- [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md)
 - [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-policy.md)
 
 ## Release expectation

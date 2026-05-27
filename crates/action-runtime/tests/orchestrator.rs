@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
 use browser_entity::{
     BrowserExtractContentActionInput, BrowserOpenUrlActionInput, FakeBrowserExecutor,
-    WebExtractedContent, WebPageSnapshot, browser_extract_content_action_kind,
-    browser_open_url_action_kind, browser_summarize_page_action_kind,
-    register_browser_action_schemas,
+    WebExtractedContent, register_browser_action_schemas,
 };
 use capability_policy::CapabilityPolicy;
 use chrono::{DateTime, Utc};

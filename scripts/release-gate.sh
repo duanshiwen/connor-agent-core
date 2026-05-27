@@ -23,6 +23,9 @@ test -f docs/release-operations-runbook.md
 grep -q "## Rollback Decision Tree" docs/release-operations-runbook.md
 test -f docs/connector-browser-risk-review-templates.md
 grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-review-templates.md
+test -f docs/connector-browser-commercial-review-evidence.md
+grep -q "## Gmail Read-Only Connector Review Evidence" docs/connector-browser-commercial-review-evidence.md
+grep -q "## Browser Kernel Current Capability Review Evidence" docs/connector-browser-commercial-review-evidence.md
 test -f docs/storage-journal-fixture-freeze-policy.md
 grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-journal-fixture-freeze-policy.md
 
@@ -35,6 +38,7 @@ grep -q "enterprise-permission-core" docs/feature-matrix.md
 grep -q "m24-beta-hardening-decision" docs/feature-matrix.md
 grep -q "storage-journal-fixture-freeze-policy" docs/feature-matrix.md
 grep -q "credential-operations-rehearsal" docs/feature-matrix.md
+grep -q "connector-browser-commercial-review-evidence" docs/feature-matrix.md
 
 echo "==> cargo fmt --all --check"
 cargo fmt --all --check

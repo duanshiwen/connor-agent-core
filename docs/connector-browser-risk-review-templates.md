@@ -2,6 +2,8 @@
 
 High-risk connector/browser PRs must reference this document and [security-review-checklist.md](security-review-checklist.md).
 
+First release-gate-checkable review evidence: [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md)
+
 Security checklist sections: Connector, Browser Risk, Credential, Enterprise Permission
 
 ## Per-Connector Threat Review Template
