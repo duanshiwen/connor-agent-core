@@ -7,6 +7,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use enterprise_permission_core::{
+    EnterpriseUserId, PermissionAction, PermissionDecision, PermissionStore, ResourceId,
+    ResourceType,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -290,6 +294,164 @@ pub trait AuditLogQueryExt: AuditLog {
 }
 
 impl<T: AuditLog + ?Sized> AuditLogQueryExt for T {}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Audit Export
+// ────────────────────────────────────────────────────────────────────────────
+
+pub const CURRENT_AUDIT_EXPORT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditExportFormat {
+    Jsonl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditExportRequest {
+    pub query: AuditQuery,
+    pub format: AuditExportFormat,
+    pub requested_by: Option<String>,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditExportManifest {
+    pub schema_version: u32,
+    pub format: AuditExportFormat,
+    pub generated_at: DateTime<Utc>,
+    pub generated_by: Option<String>,
+    pub event_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditExport {
+    pub manifest: AuditExportManifest,
+    pub body: String,
+}
+
+#[async_trait]
+pub trait AuditLogExportExt: AuditLogQueryExt {
+    async fn export(&self, request: AuditExportRequest) -> anyhow::Result<AuditExport> {
+        self.export_filtered(request, None).await
+    }
+
+    async fn export_with_permissions(
+        &self,
+        request: AuditExportRequest,
+        permissions: &PermissionStore,
+    ) -> anyhow::Result<AuditExport> {
+        self.export_filtered(request, Some(permissions)).await
+    }
+
+    async fn export_filtered(
+        &self,
+        request: AuditExportRequest,
+        permissions: Option<&PermissionStore>,
+    ) -> anyhow::Result<AuditExport> {
+        let result = self.query(request.query.clone()).await?;
+        let events = result
+            .events
+            .into_iter()
+            .filter(|event| export_permission_allows(&request, permissions, event))
+            .map(redact_audit_event)
+            .collect::<Vec<_>>();
+
+        let body = match request.format {
+            AuditExportFormat::Jsonl => render_audit_export_jsonl(&events)?,
+        };
+
+        Ok(AuditExport {
+            manifest: AuditExportManifest {
+                schema_version: CURRENT_AUDIT_EXPORT_SCHEMA_VERSION,
+                format: request.format,
+                generated_at: request.generated_at,
+                generated_by: request.requested_by,
+                event_count: events.len(),
+            },
+            body,
+        })
+    }
+}
+
+impl<T: AuditLogQueryExt + ?Sized> AuditLogExportExt for T {}
+
+fn export_permission_allows(
+    request: &AuditExportRequest,
+    permissions: Option<&PermissionStore>,
+    event: &AuditEvent,
+) -> bool {
+    let Some(permissions) = permissions else {
+        return true;
+    };
+    let Some(requested_by) = request.requested_by.as_deref() else {
+        return false;
+    };
+
+    extract_knowledge_resource_ids(event)
+        .into_iter()
+        .any(|resource_id| {
+            permissions.check(
+                &EnterpriseUserId::from(requested_by),
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from(resource_id.as_str()),
+                &PermissionAction::Admin,
+                request.generated_at,
+            ) == PermissionDecision::Allow
+        })
+}
+
+fn extract_knowledge_resource_ids(event: &AuditEvent) -> Vec<String> {
+    [
+        event.input_summary.as_str(),
+        event.result_summary.as_deref().unwrap_or(""),
+    ]
+    .into_iter()
+    .flat_map(|text| {
+        text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+            .filter(|token| token.starts_with("kb-"))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    })
+    .collect()
+}
+
+fn render_audit_export_jsonl(events: &[AuditEvent]) -> anyhow::Result<String> {
+    let mut body = String::new();
+    for event in events {
+        body.push_str(&serde_json::to_string(event)?);
+        body.push('\n');
+    }
+    Ok(body)
+}
+
+fn redact_audit_event(mut event: AuditEvent) -> AuditEvent {
+    event.input_summary = redact_secret_like_text(&event.input_summary);
+    event.result_summary = event
+        .result_summary
+        .map(|summary| redact_secret_like_text(&summary));
+    event
+}
+
+fn redact_secret_like_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            if lower.starts_with("token=")
+                || lower.starts_with("password=")
+                || lower.starts_with("secret=")
+                || lower.starts_with("api_key=")
+                || lower.starts_with("credential=")
+            {
+                let key = token.split_once('=').map(|(key, _)| key).unwrap_or(token);
+                format!("{key}=[REDACTED]")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn option_matches(expected: Option<&str>, actual: &str) -> bool {
     expected.map(|expected| expected == actual).unwrap_or(true)
@@ -855,7 +1017,7 @@ mod tests {
             action_kind: "knowledge.search".to_string(),
             requested_by: "u1".to_string(),
             approved_by: None,
-            input_summary: "query: test".to_string(),
+            input_summary: "query: test resource=kb-public".to_string(),
             side_effect: "read_only".to_string(),
             policy_decision: "allow".to_string(),
             result_status: "completed".to_string(),
@@ -878,6 +1040,9 @@ mod tests {
         event.requested_by = requested_by.to_string();
         event.approved_by = approved_by.map(ToString::to_string);
         event.timestamp = timestamp.parse().unwrap();
+        if audit_id == "audit-003" {
+            event.input_summary = "query: test resource=kb-secret".to_string();
+        }
         event
     }
 
@@ -1138,6 +1303,115 @@ mod tests {
 
         assert_eq!(result.total_matched, 1);
         assert_eq!(result.events[0].audit_id, "audit-003");
+    }
+
+    #[tokio::test]
+    async fn audit_export_filters_by_actor_resource_and_time_range() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+
+        let request = AuditExportRequest {
+            query: AuditQuery {
+                requested_by: Some("user-1".to_string()),
+                resource: Some("kb-public".to_string()),
+                from: Some(audit_ts() + chrono::Duration::minutes(2)),
+                to: Some(audit_ts() + chrono::Duration::minutes(2)),
+                ..AuditQuery::default()
+            },
+            format: AuditExportFormat::Jsonl,
+            requested_by: Some("exporter-1".to_string()),
+            generated_at: audit_ts() + chrono::Duration::hours(1),
+        };
+
+        let export = sink.export(request).await.unwrap();
+
+        assert_eq!(
+            export.manifest.schema_version,
+            CURRENT_AUDIT_EXPORT_SCHEMA_VERSION
+        );
+        assert_eq!(export.manifest.format, AuditExportFormat::Jsonl);
+        assert_eq!(export.manifest.event_count, 1);
+        assert_eq!(export.manifest.generated_by.as_deref(), Some("exporter-1"));
+        assert!(export.body.contains("audit-002"));
+        assert!(!export.body.contains("audit-001"));
+        assert!(!export.body.contains("audit-003"));
+    }
+
+    #[tokio::test]
+    async fn audit_export_jsonl_redacts_secret_like_fields() {
+        let sink = MemoryAuditSink::new();
+        sink.record(AuditEvent {
+            audit_id: "audit-secret".to_string(),
+            action_id: "action-secret".to_string(),
+            action_kind: "credential.store".to_string(),
+            requested_by: "user-1".to_string(),
+            approved_by: None,
+            input_summary: "token=abc123 password=hunter2 secret=topsecret".to_string(),
+            side_effect: "write".to_string(),
+            policy_decision: "allow".to_string(),
+            result_status: "completed".to_string(),
+            result_summary: Some("api_key=sk_live_123 credential stored".to_string()),
+            conversation_id: None,
+            message_id: None,
+            timestamp: audit_ts(),
+        })
+        .await
+        .unwrap();
+
+        let export = sink
+            .export(AuditExportRequest {
+                query: AuditQuery::default(),
+                format: AuditExportFormat::Jsonl,
+                requested_by: None,
+                generated_at: audit_ts(),
+            })
+            .await
+            .unwrap();
+
+        assert!(export.body.contains("[REDACTED]"));
+        assert!(!export.body.contains("abc123"));
+        assert!(!export.body.contains("hunter2"));
+        assert!(!export.body.contains("topsecret"));
+        assert!(!export.body.contains("sk_live_123"));
+    }
+
+    #[tokio::test]
+    async fn audit_export_requires_admin_permission_for_matched_resources() {
+        let sink = MemoryAuditSink::new();
+        for event in query_events() {
+            sink.record(event).await.unwrap();
+        }
+        let mut permissions = enterprise_permission_core::PermissionStore::new();
+        permissions.add_grant(enterprise_permission_core::PermissionGrant {
+            grant_id: "grant-public-admin".to_string(),
+            user_id: enterprise_permission_core::EnterpriseUserId::from("exporter-1"),
+            role: enterprise_permission_core::EnterpriseRole::Admin,
+            resource_type: enterprise_permission_core::ResourceType::KnowledgeBase,
+            resource_id: enterprise_permission_core::ResourceId::from("kb-public"),
+            actions: vec![enterprise_permission_core::PermissionAction::Admin],
+            granted_at: audit_ts(),
+            expires_at: None,
+            revoked: false,
+        });
+
+        let request = AuditExportRequest {
+            query: AuditQuery::default(),
+            format: AuditExportFormat::Jsonl,
+            requested_by: Some("exporter-1".to_string()),
+            generated_at: audit_ts(),
+        };
+
+        let export = sink
+            .export_with_permissions(request, &permissions)
+            .await
+            .unwrap();
+
+        assert!(export.body.contains("audit-001"));
+        assert!(export.body.contains("audit-002"));
+        assert!(!export.body.contains("audit-003"));
+        assert_eq!(export.manifest.event_count, 2);
     }
 
     #[test]

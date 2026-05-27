@@ -247,6 +247,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "enterprise-permission-core",
  "serde",
  "serde_json",
  "sha2",
