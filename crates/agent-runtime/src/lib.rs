@@ -48,6 +48,9 @@ pub use tool_loop_checkpoint::{
 
 use action_core::{ActionId, ActionKind, ActionRequest};
 use action_runtime::{ActionRuntime, ActionRuntimeOutcome, ProcessActionRequest};
+use agentos_observability::{
+    InMemoryObservabilitySink, MetricSample, ObservabilityEventKind, TraceEvent,
+};
 use anyhow::{Context, Result};
 use conversation_core::*;
 use conversation_kernel::{ConversationKernel, ConversationState};
@@ -886,6 +889,49 @@ impl ToolLoopExecutionControls {
     }
 }
 
+/// Optional observability wiring for the tool loop.
+pub struct ToolLoopObservability<'a> {
+    sink: &'a mut InMemoryObservabilitySink,
+}
+
+impl<'a> ToolLoopObservability<'a> {
+    pub fn new(sink: &'a mut InMemoryObservabilitySink) -> Self {
+        Self { sink }
+    }
+
+    fn trace(
+        &mut self,
+        run_id: &str,
+        conversation_id: &str,
+        operation: &str,
+        turn: u32,
+        attributes: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) {
+        let mut event = TraceEvent::new(
+            format!("tool-loop:{run_id}:{operation}:{turn}"),
+            ObservabilityEventKind::ToolLoop,
+            "agent-runtime.tool-loop",
+            run_id,
+            chrono::Utc::now(),
+        )
+        .with_operation(operation)
+        .with_attribute("conversation_id", conversation_id.to_string())
+        .with_attribute("turn", i64::from(turn));
+        for (key, value) in attributes {
+            event = event.with_attribute(key, value);
+        }
+        self.sink.record_trace(event);
+    }
+
+    fn counter(&mut self, name: &str, value: f64, run_id: &str, conversation_id: &str) {
+        self.sink.record_metric(
+            MetricSample::counter(name, value)
+                .with_label("run_id", run_id)
+                .with_label("conversation_id", conversation_id),
+        );
+    }
+}
+
 /// Request to run the tool loop.
 pub struct ToolLoopRequest<'a> {
     pub adapter: &'a dyn ToolCallingModelAdapter,
@@ -897,6 +943,7 @@ pub struct ToolLoopRequest<'a> {
     pub tool_choice: ToolChoice,
     pub run_id: &'a str,
     pub conversation_id: &'a str,
+    pub observability: Option<ToolLoopObservability<'a>>,
 }
 
 /// Orchestrates the LLM tool loop.
@@ -943,6 +990,7 @@ impl AgentToolLoop {
         let mut tool_calls_made: u32 = 0;
         let mut aggregated_usage = ModelUsage::default();
         let mut current_request = req.initial_request;
+        let mut observability = req.observability;
         let resume_plan = if let Some(store) = checkpoint_store {
             match store.list(req.run_id).await {
                 Ok(checkpoints) => ToolLoopResumePlan::from_checkpoints(checkpoints),
@@ -959,6 +1007,16 @@ impl AgentToolLoop {
 
         loop {
             if controls.is_cancelled() {
+                if let Some(obs) = observability.as_mut() {
+                    obs.trace(
+                        req.run_id,
+                        req.conversation_id,
+                        "tool_loop.cancelled",
+                        turns_used,
+                        [("reason".to_string(), serde_json::json!("run cancelled"))],
+                    );
+                    obs.counter("tool_loop.cancelled", 1.0, req.run_id, req.conversation_id);
+                }
                 return ToolLoopOutcome::Cancelled {
                     reason: "run cancelled".to_string(),
                     turns_used,
@@ -967,10 +1025,41 @@ impl AgentToolLoop {
             turns_used += 1;
 
             if turns_used > req.config.max_turns {
+                if let Some(obs) = observability.as_mut() {
+                    obs.trace(
+                        req.run_id,
+                        req.conversation_id,
+                        "tool_loop.max_turns_reached",
+                        turns_used - 1,
+                        [(
+                            "max_turns".to_string(),
+                            serde_json::json!(req.config.max_turns),
+                        )],
+                    );
+                    obs.counter(
+                        "tool_loop.max_turns_reached",
+                        1.0,
+                        req.run_id,
+                        req.conversation_id,
+                    );
+                }
                 return ToolLoopOutcome::MaxTurnsReached {
                     last_tool_calls: vec![],
                     turns_used: turns_used - 1,
                 };
+            }
+
+            if let Some(obs) = observability.as_mut() {
+                obs.trace(
+                    req.run_id,
+                    req.conversation_id,
+                    "tool_loop.turn_started",
+                    turns_used,
+                    [(
+                        "request_messages".to_string(),
+                        serde_json::json!(current_request.messages.len()),
+                    )],
+                );
             }
 
             if let Some(store) = checkpoint_store
@@ -993,8 +1082,43 @@ impl AgentToolLoop {
             );
             let output = match with_optional_timeout(model_call, controls.model_call_timeout).await
             {
-                Ok(Ok(o)) => o,
+                Ok(Ok(o)) => {
+                    if let Some(obs) = observability.as_mut() {
+                        obs.trace(
+                            req.run_id,
+                            req.conversation_id,
+                            "tool_loop.model_call_completed",
+                            turns_used,
+                            [],
+                        );
+                        obs.counter(
+                            "tool_loop.model_call.completed",
+                            1.0,
+                            req.run_id,
+                            req.conversation_id,
+                        );
+                    }
+                    o
+                }
                 Err(timeout) => {
+                    if let Some(obs) = observability.as_mut() {
+                        obs.trace(
+                            req.run_id,
+                            req.conversation_id,
+                            "tool_loop.model_call_timed_out",
+                            turns_used - 1,
+                            [(
+                                "timeout_ms".to_string(),
+                                serde_json::json!(duration_millis(timeout)),
+                            )],
+                        );
+                        obs.counter(
+                            "tool_loop.model_call.timed_out",
+                            1.0,
+                            req.run_id,
+                            req.conversation_id,
+                        );
+                    }
                     return ToolLoopOutcome::TimedOut {
                         operation: TimeoutOperation::ModelCall,
                         timeout_ms: duration_millis(timeout),
@@ -1002,6 +1126,21 @@ impl AgentToolLoop {
                     };
                 }
                 Ok(Err(e)) => {
+                    if let Some(obs) = observability.as_mut() {
+                        obs.trace(
+                            req.run_id,
+                            req.conversation_id,
+                            "tool_loop.model_call_failed",
+                            turns_used - 1,
+                            [("error".to_string(), serde_json::json!(e.to_string()))],
+                        );
+                        obs.counter(
+                            "tool_loop.model_call.failed",
+                            1.0,
+                            req.run_id,
+                            req.conversation_id,
+                        );
+                    }
                     return ToolLoopOutcome::Failed {
                         error: format!("model call failed: {e}"),
                         turns_used: turns_used - 1,
@@ -1031,6 +1170,35 @@ impl AgentToolLoop {
 
             match output {
                 ModelOutput::Text { text, .. } => {
+                    if let Some(obs) = observability.as_mut() {
+                        obs.trace(
+                            req.run_id,
+                            req.conversation_id,
+                            "tool_loop.completed",
+                            turns_used - 1,
+                            [
+                                (
+                                    "tool_calls_made".to_string(),
+                                    serde_json::json!(tool_calls_made),
+                                ),
+                                (
+                                    "input_tokens".to_string(),
+                                    serde_json::json!(aggregated_usage.input_tokens),
+                                ),
+                                (
+                                    "output_tokens".to_string(),
+                                    serde_json::json!(aggregated_usage.output_tokens),
+                                ),
+                            ],
+                        );
+                        obs.counter("tool_loop.completed", 1.0, req.run_id, req.conversation_id);
+                        obs.counter(
+                            "tool_loop.tool_calls_made",
+                            f64::from(tool_calls_made),
+                            req.run_id,
+                            req.conversation_id,
+                        );
+                    }
                     return ToolLoopOutcome::Completed {
                         response_text: text,
                         turns_used: turns_used - 1,
@@ -1067,16 +1235,68 @@ impl AgentToolLoop {
                         ) {
                             Ok(ar) => ar,
                             Err(e) => {
+                                if let Some(obs) = observability.as_mut() {
+                                    obs.trace(
+                                        req.run_id,
+                                        req.conversation_id,
+                                        "tool_loop.tool_mapping_failed",
+                                        turns_used,
+                                        [
+                                            (
+                                                "tool_call_id".to_string(),
+                                                serde_json::json!(tc.id.clone()),
+                                            ),
+                                            (
+                                                "tool_name".to_string(),
+                                                serde_json::json!(tc.name.clone()),
+                                            ),
+                                            ("error".to_string(), serde_json::json!(e.to_string())),
+                                        ],
+                                    );
+                                    obs.counter(
+                                        "tool_loop.tool_mapping.failed",
+                                        1.0,
+                                        req.run_id,
+                                        req.conversation_id,
+                                    );
+                                }
                                 tool_results.push((tc.id.clone(), format!("error: {e}")));
                                 continue;
                             }
                         };
                         tool_calls_made += 1;
                         let action_id = action_request.action_id.to_string();
-                        let read_only = is_read_only_tool_action(&action_request.action_kind.0);
+                        let action_kind = action_request.action_kind.0.clone();
+                        let read_only = is_read_only_tool_action(&action_kind);
+                        if let Some(obs) = observability.as_mut() {
+                            obs.trace(
+                                req.run_id,
+                                req.conversation_id,
+                                "tool_loop.action_started",
+                                turns_used,
+                                [
+                                    ("tool_call_id".to_string(), serde_json::json!(tc.id.clone())),
+                                    ("tool_name".to_string(), serde_json::json!(tc.name.clone())),
+                                    (
+                                        "action_id".to_string(),
+                                        serde_json::json!(action_id.clone()),
+                                    ),
+                                    (
+                                        "action_kind".to_string(),
+                                        serde_json::json!(action_kind.clone()),
+                                    ),
+                                    ("read_only".to_string(), serde_json::json!(read_only)),
+                                ],
+                            );
+                            obs.counter(
+                                "tool_loop.action.started",
+                                1.0,
+                                req.run_id,
+                                req.conversation_id,
+                            );
+                        }
 
-                        let action_timeout =
-                            action_timeout_for(&controls, &action_request.action_kind.0);
+                        let action_timeout = action_timeout_for(&controls, &action_kind);
                         let conversation_id = ConversationId::from(req.conversation_id);
                         let action = req.action_runtime.process(ProcessActionRequest {
                             conversation_id: &conversation_id,
@@ -1087,6 +1307,34 @@ impl AgentToolLoop {
                         let outcome = match with_optional_timeout(action, action_timeout).await {
                             Ok(Ok(o)) => o,
                             Err(timeout) => {
+                                if let Some(obs) = observability.as_mut() {
+                                    obs.trace(
+                                        req.run_id,
+                                        req.conversation_id,
+                                        "tool_loop.action_timed_out",
+                                        turns_used,
+                                        [
+                                            (
+                                                "action_id".to_string(),
+                                                serde_json::json!(action_id.clone()),
+                                            ),
+                                            (
+                                                "action_kind".to_string(),
+                                                serde_json::json!(action_kind.clone()),
+                                            ),
+                                            (
+                                                "timeout_ms".to_string(),
+                                                serde_json::json!(duration_millis(timeout)),
+                                            ),
+                                        ],
+                                    );
+                                    obs.counter(
+                                        "tool_loop.action.timed_out",
+                                        1.0,
+                                        req.run_id,
+                                        req.conversation_id,
+                                    );
+                                }
                                 return ToolLoopOutcome::TimedOut {
                                     operation: if is_browser_tool_action(tc.name.as_str()) {
                                         TimeoutOperation::BrowserOperation
@@ -1098,11 +1346,37 @@ impl AgentToolLoop {
                                 };
                             }
                             Ok(Err(e)) => {
+                                if let Some(obs) = observability.as_mut() {
+                                    obs.trace(
+                                        req.run_id,
+                                        req.conversation_id,
+                                        "tool_loop.action_failed",
+                                        turns_used,
+                                        [
+                                            (
+                                                "action_id".to_string(),
+                                                serde_json::json!(action_id.clone()),
+                                            ),
+                                            (
+                                                "action_kind".to_string(),
+                                                serde_json::json!(action_kind.clone()),
+                                            ),
+                                            ("error".to_string(), serde_json::json!(e.to_string())),
+                                        ],
+                                    );
+                                    obs.counter(
+                                        "tool_loop.action.failed",
+                                        1.0,
+                                        req.run_id,
+                                        req.conversation_id,
+                                    );
+                                }
                                 tool_results.push((tc.id.clone(), format!("error: {e}")));
                                 continue;
                             }
                         };
 
+                        let outcome_kind = action_outcome_kind(&outcome).to_string();
                         let result_text = match outcome {
                             ActionRuntimeOutcome::Completed { result, .. } => result.summary,
                             ActionRuntimeOutcome::Denied { reason, .. } => {
@@ -1117,6 +1391,34 @@ impl AgentToolLoop {
                                 ..
                             } => format!("failed ({action_id}): {error_message}"),
                         };
+                        if let Some(obs) = observability.as_mut() {
+                            obs.trace(
+                                req.run_id,
+                                req.conversation_id,
+                                "tool_loop.action_completed",
+                                turns_used,
+                                [
+                                    (
+                                        "action_id".to_string(),
+                                        serde_json::json!(action_id.clone()),
+                                    ),
+                                    (
+                                        "action_kind".to_string(),
+                                        serde_json::json!(action_kind.clone()),
+                                    ),
+                                    (
+                                        "outcome".to_string(),
+                                        serde_json::json!(outcome_kind.clone()),
+                                    ),
+                                ],
+                            );
+                            obs.counter(
+                                &format!("tool_loop.action.{outcome_kind}"),
+                                1.0,
+                                req.run_id,
+                                req.conversation_id,
+                            );
+                        }
 
                         if let Some(store) = checkpoint_store
                             && let Err(e) = store
@@ -1192,6 +1494,15 @@ where
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn action_outcome_kind(outcome: &ActionRuntimeOutcome) -> &'static str {
+    match outcome {
+        ActionRuntimeOutcome::Completed { .. } => "completed",
+        ActionRuntimeOutcome::ApprovalRequired { .. } => "approval_required",
+        ActionRuntimeOutcome::Denied { .. } => "denied",
+        ActionRuntimeOutcome::Failed { .. } => "failed",
+    }
 }
 
 fn action_timeout_for(controls: &ToolLoopExecutionControls, action_kind: &str) -> Option<Duration> {
@@ -2707,6 +3018,7 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 run_id: "run-1",
                 conversation_id: "conv-1",
+                observability: None,
             })
             .await;
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
@@ -2754,12 +3066,80 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 run_id: "run-2",
                 conversation_id: "conv-2",
+                observability: None,
             })
             .await;
             assert!(matches!(outcome, ToolLoopOutcome::Completed {
                 response_text, turns_used: 1, tool_calls_made: 1, usage: Some(usage)
             } if response_text == "Found it!" && usage.input_tokens == 50 && usage.output_tokens == 25));
         });
+    }
+
+    #[tokio::test]
+    async fn tool_loop_records_observability_for_model_and_action_path() {
+        let adapter = FakeToolAdapter::new(vec![
+            ModelOutput::ToolCalls {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_obs".into(),
+                    name: "knowledge.search".into(),
+                    arguments: serde_json::json!({"q": "test"}),
+                    raw_arguments: r#"{"q":"test"}"#.into(),
+                }],
+                usage: Some(ModelUsage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                }),
+            },
+            ModelOutput::Text {
+                text: "Observed".to_string(),
+                usage: Some(ModelUsage {
+                    input_tokens: 30,
+                    output_tokens: 15,
+                }),
+            },
+        ]);
+        let mut sink = InMemoryObservabilitySink::default();
+        with_tool_runtime!(_k, rt, {
+            let outcome = AgentToolLoop::run(ToolLoopRequest {
+                adapter: &adapter,
+                action_runtime: &rt,
+                mapper: &TestMapper,
+                config: &ToolLoopConfig::default(),
+                initial_request: ModelRequest::new("test", vec![ModelMessage::user("search")]),
+                tools: vec![],
+                tool_choice: ToolChoice::Auto,
+                run_id: "run-observed",
+                conversation_id: "conv-observed",
+                observability: Some(ToolLoopObservability::new(&mut sink)),
+            })
+            .await;
+            assert!(
+                matches!(outcome, ToolLoopOutcome::Completed { response_text, .. } if response_text == "Observed")
+            );
+        });
+
+        let operations = sink
+            .traces()
+            .iter()
+            .filter_map(|event| event.operation.as_deref())
+            .collect::<Vec<_>>();
+        assert!(operations.contains(&"tool_loop.turn_started"));
+        assert!(operations.contains(&"tool_loop.model_call_completed"));
+        assert!(operations.contains(&"tool_loop.action_started"));
+        assert!(operations.contains(&"tool_loop.action_failed"));
+        assert!(operations.contains(&"tool_loop.completed"));
+        assert!(sink.traces().iter().all(|event| {
+            event.kind == ObservabilityEventKind::ToolLoop
+                && event.scope == "agent-runtime.tool-loop"
+                && event.correlation_id == "run-observed"
+        }));
+        assert!(sink.metrics().iter().any(|metric| {
+            metric.name == "tool_loop.action.failed" && metric.values == vec![1.0]
+        }));
+        assert!(sink.metrics().iter().any(|metric| {
+            metric.name == "tool_loop.tool_calls_made" && metric.values == vec![1.0]
+        }));
     }
 
     #[tokio::test]
@@ -2806,6 +3186,7 @@ mod tests {
                     tool_choice: ToolChoice::Auto,
                     run_id: "run-resume",
                     conversation_id: "conv-resume",
+                    observability: None,
                 },
                 &checkpoint_store,
             )
@@ -2843,6 +3224,7 @@ mod tests {
                     tool_choice: ToolChoice::Auto,
                     run_id: "run-cancelled",
                     conversation_id: "conv-cancelled",
+                    observability: None,
                 },
                 controls,
             )
@@ -2900,6 +3282,7 @@ mod tests {
                     tool_choice: ToolChoice::Auto,
                     run_id: "run-timeout",
                     conversation_id: "conv-timeout",
+                    observability: None,
                 },
                 controls,
             )
@@ -2945,6 +3328,7 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 run_id: "run-3",
                 conversation_id: "conv-3",
+                observability: None,
             })
             .await;
             assert!(matches!(
@@ -2968,6 +3352,7 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 run_id: "run-4",
                 conversation_id: "conv-4",
+                observability: None,
             })
             .await;
             assert!(

@@ -9,6 +9,7 @@ description = "Agent runtime — bridges conversation kernel with model adapter 
 [dependencies]
 action-core = { path = "../action-core" }
 action-runtime = { path = "../action-runtime" }
+agentos-observability = { path = "../agentos-observability" }
 conversation-core = { path = "../conversation-core" }
 conversation-kernel = { path = "../conversation-kernel" }
 entity-core = { path = "../entity-core" }
