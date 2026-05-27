@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::{AgentRunRecord, AgentRunStore, AgentRunStoreError, DurableAgentRunStatus};
 
@@ -32,6 +33,7 @@ where
 {
     store: Arc<S>,
     lease_timeout: Duration,
+    lease_lock: Arc<Mutex<()>>,
 }
 
 impl<S> AgentRunQueue<S>
@@ -42,6 +44,7 @@ where
         Self {
             store,
             lease_timeout,
+            lease_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -55,6 +58,7 @@ where
     }
 
     pub async fn lease(&self) -> AgentRunQueueResult<Option<AgentRunLease>> {
+        let _lease_guard = self.lease_lock.lock().await;
         let queued = self
             .store
             .list()
