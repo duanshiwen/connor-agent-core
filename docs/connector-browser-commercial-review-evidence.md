@@ -54,6 +54,35 @@ Evidence mapping:
 | Do read/list mail actions remain read-only under policy? | `mail_action_schema_side_effects_match_policy_contract`, `mail_list_and_get_are_allowed_by_default_safe_policy` | Rehearsed |
 | Do draft/send mail actions require approval or deny by default? | `mail_create_draft_requires_approval_by_default_safe_policy`, `mail_send_is_denied_by_default_safe_policy` | Rehearsed |
 
+## PR206 OAuth Provider Lifecycle Evidence
+
+PR206 closes the provider-shaped OAuth endpoint, revocation, and credential-store offboarding boundary for enabled connectors. This remains provider-shaped evidence rather than a live Google/GitHub network call so the release gate is deterministic and does not require secrets.
+
+Additional evidence commands:
+
+```bash
+cargo test -p identity-core revoke_oauth_credential_calls_provider_and_deletes_store_record
+cargo test -p identity-core offboard_connector_account_revokes_credentials_and_refresh_fails_closed
+cargo test -p identity-core oauth_lifecycle_audit_event_is_metadata_only
+```
+
+Evidence mapping:
+
+| Risk question | Evidence | Result |
+| --- | --- | --- |
+| Is a provider token/revocation endpoint boundary explicit? | `OAuthProviderEndpointConfig` and `FakeOAuthTokenRevoker` | Rehearsed |
+| Does revocation call the provider-shaped revoker before deleting the local credential? | `revoke_oauth_credential_calls_provider_and_deletes_store_record` | Rehearsed |
+| Does account offboarding revoke connector-account credentials and fail closed on future refresh? | `offboard_connector_account_revokes_credentials_and_refresh_fails_closed` | Rehearsed |
+| Are refresh/revocation/offboarding audit records metadata-only? | `OAuthCredentialLifecycleAuditEvent`, `oauth_lifecycle_audit_event_is_metadata_only` | Rehearsed |
+
+PR206 disposition:
+
+- Token refresh and revocation behavior are covered by deterministic provider-shaped fakes.
+- Offboarded connector accounts cannot refresh after credentials are revoked from the store.
+- OAuth lifecycle audit evidence is metadata-only and omits access/refresh token material.
+- Real provider retry, timeout, and rate-limit behavior remain tracked under PR207.
+- Gmail connector host audit and end-to-end connector-runtime offboarding remain tracked under PR208.
+
 Open blockers before commercial pilot:
 
 - host/provider production retry policy;

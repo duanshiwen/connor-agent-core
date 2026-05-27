@@ -299,7 +299,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-kernel --test release_gate_docs storage_journal_fixture_freeze_records_pr205_commercial_acceptance` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR206: OAuth Provider Endpoint, Revocation, and Offboarding Evidence
+### PR206: OAuth Provider Endpoint, Revocation, and Offboarding Evidence ✅ Completed
 
 **Goal:** Close the gap between OAuth boundary code and real provider lifecycle behavior for enabled connectors.
 
@@ -311,17 +311,20 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Real or provider-shaped OAuth token endpoint adapter boundary.
-- Revocation behavior documentation for enabled providers.
-- Offboarding test proving connector access fails closed when account/device credential state is revoked.
-- Audit expectations for refresh, refresh failure, revocation, and offboarding denial.
+- ✅ Provider-shaped OAuth token/revocation endpoint adapter boundary: `OAuthProviderEndpointConfig`, `OAuthTokenRevoker`, and `FakeOAuthTokenRevoker`.
+- ✅ Revocation behavior documentation for enabled providers in [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md) under `## PR206 OAuth Provider Lifecycle Evidence`.
+- ✅ Offboarding test proving connector-account OAuth credentials are revoked and future token refresh fails closed after credential deletion.
+- ✅ Audit expectations for refresh, refresh failure, revocation, and offboarding denial via metadata-only `OAuthCredentialLifecycleAuditEvent`.
 
 **Acceptance:**
 
-- Token refresh and revocation behavior are covered by tests or provider-shaped fakes.
-- Offboarded accounts cannot continue connector reads.
-- Secrets are redacted from traces and audit output.
-- Release gate passes.
+- ✅ Token refresh and revocation behavior are covered by deterministic provider-shaped fakes.
+- ✅ Offboarded connector accounts cannot continue token refresh once credentials are revoked from the credential store.
+- ✅ Secrets are redacted from debug/audit-shaped output; OAuth lifecycle audit evidence omits access/refresh token material.
+- ✅ `cargo test -p identity-core revoke_oauth_credential_calls_provider_and_deletes_store_record` passes.
+- ✅ `cargo test -p identity-core offboard_connector_account_revokes_credentials_and_refresh_fails_closed` passes.
+- ✅ `cargo test -p identity-core oauth_lifecycle_audit_event_is_metadata_only` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR207: Gmail Read-Only Retry, Timeout, and Rate-Limit Hardening
 

@@ -60,6 +60,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
             && script.contains("Migration Release Note Template"),
         "release gate must include PR205 commercial storage/journal fixture freeze checks"
     );
+    assert!(
+        script.contains("PR206 OAuth Provider Lifecycle Evidence"),
+        "release gate must include PR206 OAuth provider lifecycle evidence checks"
+    );
 
     #[cfg(unix)]
     {
@@ -161,5 +165,37 @@ fn storage_journal_fixture_freeze_records_pr205_commercial_acceptance() {
     assert!(
         plan.contains("PR205: Storage/Journal Commercial Fixture Freeze Acceptance ✅ Completed"),
         "commercial pilot readiness plan must mark PR205 complete"
+    );
+}
+
+#[test]
+fn oauth_provider_lifecycle_records_pr206_evidence() {
+    let root = workspace_root();
+    let evidence =
+        fs::read_to_string(root.join("docs/connector-browser-commercial-review-evidence.md"))
+            .expect("connector/browser commercial review evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## PR206 OAuth Provider Lifecycle Evidence",
+        "OAuthProviderEndpointConfig",
+        "FakeOAuthTokenRevoker",
+        "revoke_oauth_credential_calls_provider_and_deletes_store_record",
+        "offboard_connector_account_revokes_credentials_and_refresh_fails_closed",
+        "oauth_lifecycle_audit_event_is_metadata_only",
+        "metadata-only and omits access/refresh token material",
+    ] {
+        assert!(
+            evidence.contains(required),
+            "PR206 OAuth lifecycle evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains(
+            "PR206: OAuth Provider Endpoint, Revocation, and Offboarding Evidence ✅ Completed"
+        ),
+        "commercial pilot readiness plan must mark PR206 complete"
     );
 }

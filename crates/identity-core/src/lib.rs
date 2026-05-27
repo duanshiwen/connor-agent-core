@@ -1017,6 +1017,225 @@ pub async fn refresh_oauth_credential(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthProviderEndpointConfig {
+    pub provider_id: String,
+    pub token_endpoint: String,
+    pub revocation_endpoint: Option<String>,
+}
+
+impl OAuthProviderEndpointConfig {
+    pub fn new(
+        provider_id: impl Into<String>,
+        token_endpoint: impl Into<String>,
+        revocation_endpoint: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            token_endpoint: token_endpoint.into(),
+            revocation_endpoint: revocation_endpoint.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OAuthTokenRevocationError {
+    #[error("oauth revocation endpoint is missing for provider {0}")]
+    MissingRevocationEndpoint(String),
+    #[error("oauth provider revocation failed: {0}")]
+    ProviderUnavailable(String),
+    #[error("oauth provider returned invalid revocation response: {0}")]
+    InvalidResponse(String),
+    #[error("credential error: {0}")]
+    Credential(#[from] CredentialError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthTokenRevocationOutcome {
+    pub provider_id: String,
+    pub connector_id: String,
+    pub account_id: Option<String>,
+    pub credential_id: CredentialId,
+    pub revocation_endpoint: Option<String>,
+    pub revoked_at: DateTime<Utc>,
+    pub provider_status: String,
+}
+
+#[async_trait]
+pub trait OAuthTokenRevoker: Send + Sync {
+    fn endpoint_config(&self) -> &OAuthProviderEndpointConfig;
+
+    async fn revoke(
+        &self,
+        credential_ref: &OAuthCredentialRef,
+        current: &OAuthTokenSet,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<OAuthTokenRevocationOutcome, OAuthTokenRevocationError>;
+}
+
+pub struct FakeOAuthTokenRevoker {
+    endpoint_config: OAuthProviderEndpointConfig,
+    failure: Option<String>,
+    revocation_count: Mutex<u64>,
+}
+
+impl FakeOAuthTokenRevoker {
+    pub fn new(endpoint_config: OAuthProviderEndpointConfig) -> Self {
+        Self {
+            endpoint_config,
+            failure: None,
+            revocation_count: Mutex::new(0),
+        }
+    }
+
+    pub fn failing(
+        endpoint_config: OAuthProviderEndpointConfig,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint_config,
+            failure: Some(reason.into()),
+            revocation_count: Mutex::new(0),
+        }
+    }
+
+    pub fn revocation_count(&self) -> u64 {
+        self.revocation_count
+            .lock()
+            .map(|count| *count)
+            .unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for FakeOAuthTokenRevoker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FakeOAuthTokenRevoker")
+            .field("endpoint_config", &self.endpoint_config)
+            .field("failure", &self.failure)
+            .field("revocation_count", &self.revocation_count())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl OAuthTokenRevoker for FakeOAuthTokenRevoker {
+    fn endpoint_config(&self) -> &OAuthProviderEndpointConfig {
+        &self.endpoint_config
+    }
+
+    async fn revoke(
+        &self,
+        credential_ref: &OAuthCredentialRef,
+        _current: &OAuthTokenSet,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<OAuthTokenRevocationOutcome, OAuthTokenRevocationError> {
+        if self.endpoint_config.revocation_endpoint.is_none() {
+            return Err(OAuthTokenRevocationError::MissingRevocationEndpoint(
+                self.endpoint_config.provider_id.clone(),
+            ));
+        }
+        if let Some(reason) = &self.failure {
+            return Err(OAuthTokenRevocationError::ProviderUnavailable(
+                reason.clone(),
+            ));
+        }
+        {
+            let mut count = self
+                .revocation_count
+                .lock()
+                .map_err(|err| OAuthTokenRevocationError::InvalidResponse(err.to_string()))?;
+            *count += 1;
+        }
+        Ok(OAuthTokenRevocationOutcome {
+            provider_id: self.endpoint_config.provider_id.clone(),
+            connector_id: credential_ref.connector_id.clone(),
+            account_id: credential_ref.account_id.clone(),
+            credential_id: credential_ref.credential_id.clone(),
+            revocation_endpoint: self.endpoint_config.revocation_endpoint.clone(),
+            revoked_at,
+            provider_status: "revoked".to_string(),
+        })
+    }
+}
+
+pub async fn revoke_oauth_credential(
+    store: &dyn CredentialStore,
+    revoker: &dyn OAuthTokenRevoker,
+    credential_ref: &OAuthCredentialRef,
+    revoked_at: DateTime<Utc>,
+) -> Result<OAuthTokenRevocationOutcome, OAuthTokenRevocationError> {
+    let record = store.read(&credential_ref.credential_id).await?;
+    let current = OAuthTokenSet::from_credential_record(&record)?;
+    let outcome = revoker.revoke(credential_ref, &current, revoked_at).await?;
+    store.delete(&credential_ref.credential_id).await?;
+    Ok(outcome)
+}
+
+pub async fn offboard_connector_account_oauth_credentials(
+    store: &dyn CredentialStore,
+    revoker: &dyn OAuthTokenRevoker,
+    connector_id: &str,
+    account_id: &str,
+    revoked_at: DateTime<Utc>,
+) -> Result<Vec<OAuthTokenRevocationOutcome>, OAuthTokenRevocationError> {
+    let scope = CredentialScope::ConnectorAccount {
+        connector_id: connector_id.to_string(),
+        account_id: account_id.to_string(),
+    };
+    let credentials = list_credentials_by_scope(store, &scope).await?;
+    let mut outcomes = Vec::with_capacity(credentials.len());
+    for metadata in credentials {
+        let credential_ref = OAuthCredentialRef::new(
+            metadata.id,
+            connector_id.to_string(),
+            Some(account_id.to_string()),
+            Vec::new(),
+        );
+        outcomes.push(revoke_oauth_credential(store, revoker, &credential_ref, revoked_at).await?);
+    }
+    Ok(outcomes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OAuthCredentialLifecycleEventKind {
+    Refreshed,
+    RefreshFailed,
+    Revoked,
+    OffboardingDenied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCredentialLifecycleAuditEvent {
+    pub kind: OAuthCredentialLifecycleEventKind,
+    pub connector_id: String,
+    pub account_id: Option<String>,
+    pub credential_id: CredentialId,
+    pub scopes: Vec<String>,
+    pub provider_status: String,
+    pub occurred_at: DateTime<Utc>,
+    pub secret_redaction: String,
+}
+
+impl OAuthCredentialLifecycleAuditEvent {
+    pub fn new(
+        kind: OAuthCredentialLifecycleEventKind,
+        credential_ref: &OAuthCredentialRef,
+        provider_status: impl Into<String>,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            kind,
+            connector_id: credential_ref.connector_id.clone(),
+            account_id: credential_ref.account_id.clone(),
+            credential_id: credential_ref.credential_id.clone(),
+            scopes: credential_ref.scopes.clone(),
+            provider_status: provider_status.into(),
+            occurred_at,
+            secret_redaction: "oauth token material omitted".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OAuthTokenSetSerde {
     access_token: String,
     refresh_token: Option<String>,
@@ -2485,5 +2704,96 @@ mod tests {
             result,
             Err(OAuthTokenRefreshError::ProviderUnavailable(reason)) if reason == "provider offline"
         ));
+    }
+
+    #[tokio::test]
+    async fn revoke_oauth_credential_calls_provider_and_deletes_store_record() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        store
+            .write(
+                sample_oauth_token(now)
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let revoker = FakeOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
+            "github",
+            "https://github.example/oauth/token",
+            Some("https://github.example/oauth/revoke"),
+        ));
+
+        let outcome = revoke_oauth_credential(&store, &revoker, &credential_ref, now)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.provider_id, "github");
+        assert_eq!(
+            outcome.revocation_endpoint.as_deref(),
+            Some("https://github.example/oauth/revoke")
+        );
+        assert_eq!(revoker.revocation_count(), 1);
+        assert!(matches!(
+            store.read(&credential_ref.credential_id).await,
+            Err(CredentialError::NotFound(id)) if id == credential_ref.credential_id.0
+        ));
+    }
+
+    #[tokio::test]
+    async fn offboard_connector_account_revokes_credentials_and_refresh_fails_closed() {
+        let store = MemoryCredentialStore::new();
+        let credential_ref = sample_oauth_ref();
+        let now = ts();
+        store
+            .write(
+                sample_oauth_token(now - chrono::Duration::seconds(1))
+                    .to_credential_record(&credential_ref, "GitHub OAuth", now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let revoker = FakeOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
+            "github",
+            "https://github.example/oauth/token",
+            Some("https://github.example/oauth/revoke"),
+        ));
+
+        let outcomes =
+            offboard_connector_account_oauth_credentials(&store, &revoker, "github", "user-1", now)
+                .await
+                .unwrap();
+        let refresh_after_offboarding = refresh_oauth_credential(
+            &store,
+            &FakeOAuthTokenRefresher::new("rotated-access"),
+            &credential_ref,
+            now,
+            60,
+        )
+        .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            refresh_after_offboarding,
+            Err(OAuthTokenRefreshError::Credential(CredentialError::NotFound(id)))
+                if id == credential_ref.credential_id.0
+        ));
+    }
+
+    #[test]
+    fn oauth_lifecycle_audit_event_is_metadata_only() {
+        let event = OAuthCredentialLifecycleAuditEvent::new(
+            OAuthCredentialLifecycleEventKind::Revoked,
+            &sample_oauth_ref(),
+            "provider_revoked",
+            ts(),
+        );
+        let rendered = format!("{event:?}");
+
+        assert_eq!(event.secret_redaction, "oauth token material omitted");
+        assert!(rendered.contains("provider_revoked"));
+        assert!(!rendered.contains("access-secret"));
+        assert!(!rendered.contains("refresh-secret"));
     }
 }
