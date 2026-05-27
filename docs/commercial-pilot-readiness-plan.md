@@ -142,7 +142,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `./scripts/release-gate.sh` passes.
 - ✅ Backend/macOS host owners can identify exactly which crate APIs are safe to depend on.
 
-### PR201: Backend and macOS Host Integration Examples
+### PR201: Backend and macOS Host Integration Examples ✅ Completed
 
 **Goal:** Provide minimal host-shaped examples that prove the kernel can be embedded by backend and desktop hosts.
 
@@ -155,24 +155,27 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Server-shaped example:
+- ✅ Server-shaped example:
   - initialize kernel;
   - submit message;
   - start run;
   - process action;
   - approve/deny action;
   - query audit/diagnostics.
-- Desktop-shaped/macOS-oriented example:
+- ✅ Desktop-shaped/macOS-oriented example:
   - local storage root;
   - local credential provider boundary;
   - approval UX handoff shape;
   - diagnostics/debug bundle export shape.
-- CI/release-gate coverage that examples compile.
+- ✅ CI/release-gate coverage that examples compile.
 
 **Acceptance:**
 
-- Examples compile on release gate.
-- Host teams can bootstrap integration without reverse-engineering tests.
+- ✅ `cargo check -p agentos-kernel --example minimal-cli-host` passes.
+- ✅ `cargo check -p agentos-kernel --example minimal-server-host` passes.
+- ✅ `cargo check -p agentos-kernel --example minimal-desktop-host` passes.
+- ✅ `cargo test -p agentos-kernel --test kernel_host_examples` passes.
+- ✅ Host teams can bootstrap integration without reverse-engineering tests.
 
 ### PR202: Credential Host Rehearsal
 

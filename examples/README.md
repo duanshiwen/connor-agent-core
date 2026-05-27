@@ -2,6 +2,10 @@
 
 These examples are intentionally minimal. They do not implement product behavior; they only prove that the stable kernel host API can be integrated by different host shapes.
 
+## PR201 commercial pilot host integration evidence
+
+PR201 uses these examples as release-gated host integration evidence for backend and macOS/desktop teams. The examples intentionally remain small, but they now cover the host-shaped paths needed for commercial pilot bootstrap: runtime startup, message submission, run start/status, action processing, approval handoff, diagnostics bundle export, local storage boundary, and host-selected credential backend documentation.
+
 ## minimal CLI host
 
 File: [`minimal_cli_host.rs`](minimal_cli_host.rs)

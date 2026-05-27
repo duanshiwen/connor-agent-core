@@ -53,6 +53,11 @@ grep -q "storage-journal-fixture-freeze-acceptance" docs/feature-matrix.md
 grep -q "credential-operations-rehearsal" docs/feature-matrix.md
 grep -q "connector-browser-commercial-review-evidence" docs/feature-matrix.md
 
+echo "==> cargo check host examples"
+cargo check -p agentos-kernel --example minimal-cli-host
+cargo check -p agentos-kernel --example minimal-server-host
+cargo check -p agentos-kernel --example minimal-desktop-host
+
 echo "==> cargo fmt --all --check"
 cargo fmt --all --check
 
