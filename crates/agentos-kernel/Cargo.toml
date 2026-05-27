@@ -27,3 +27,15 @@ anyhow.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "minimal-cli-host"
+path = "../../examples/minimal_cli_host.rs"
+
+[[example]]
+name = "minimal-server-host"
+path = "../../examples/minimal_server_host.rs"
+
+[[example]]
+name = "minimal-desktop-host"
+path = "../../examples/minimal_desktop_host.rs"
