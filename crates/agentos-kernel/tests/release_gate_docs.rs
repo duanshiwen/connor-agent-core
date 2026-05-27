@@ -68,6 +68,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
         script.contains("PR207 Gmail Retry Timeout Rate-Limit Evidence"),
         "release gate must include PR207 Gmail retry/timeout/rate-limit evidence checks"
     );
+    assert!(
+        script.contains("PR208 Gmail Host Audit and Offboarding Evidence"),
+        "release gate must include PR208 Gmail host audit/offboarding evidence checks"
+    );
 
     #[cfg(unix)]
     {
@@ -232,5 +236,35 @@ fn gmail_retry_timeout_rate_limit_records_pr207_evidence() {
             "PR207: Gmail Read-Only Retry, Timeout, and Rate-Limit Hardening ✅ Completed"
         ),
         "commercial pilot readiness plan must mark PR207 complete"
+    );
+}
+
+#[test]
+fn gmail_host_audit_offboarding_records_pr208_evidence() {
+    let root = workspace_root();
+    let evidence =
+        fs::read_to_string(root.join("docs/connector-browser-commercial-review-evidence.md"))
+            .expect("connector/browser commercial review evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## PR208 Gmail Host Audit and Offboarding Evidence",
+        "ConnectorOperationAuditEvent",
+        "gmail_connector_operation_audit_shape_is_metadata_only",
+        "gmail_read_records_start_and_result_audit_events",
+        "gmail_offboarded_account_access_is_denied_and_audited",
+        "evaluate_connector_account_access",
+        "Gmail message content/snippets and OAuth token material are omitted",
+    ] {
+        assert!(
+            evidence.contains(required),
+            "PR208 Gmail host audit/offboarding evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains("PR208: Gmail Host Audit and End-to-End Offboarding Evidence ✅ Completed"),
+        "commercial pilot readiness plan must mark PR208 complete"
     );
 }

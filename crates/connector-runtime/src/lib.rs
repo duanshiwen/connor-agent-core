@@ -935,6 +935,173 @@ fn non_retryable_gmail_reason(error_class: GmailProviderErrorClass) -> &'static 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectorOperationKind {
+    ListResources,
+    GetResource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectorOperationOutcome {
+    Started,
+    Succeeded,
+    Failed,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectorHostAccountLifecycle {
+    Active,
+    Disabled,
+    Offboarded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorOperationAuditEvent {
+    pub service: ExternalServiceKind,
+    pub connector_id: String,
+    pub account_id: Option<String>,
+    pub operation: ConnectorOperationKind,
+    pub resource_kind: ExternalResourceKind,
+    pub resource_id: Option<String>,
+    pub outcome: ConnectorOperationOutcome,
+    pub error_class: Option<GmailProviderErrorClass>,
+    pub reason: String,
+    pub occurred_at: DateTime<Utc>,
+    pub payload_redaction: String,
+    pub credential_redaction: String,
+}
+
+impl ConnectorOperationAuditEvent {
+    pub fn started(
+        service: ExternalServiceKind,
+        connector_id: impl Into<String>,
+        account_id: Option<&str>,
+        operation: ConnectorOperationKind,
+        resource_kind: ExternalResourceKind,
+        resource_id: Option<&str>,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self::new(
+            service,
+            connector_id,
+            account_id,
+            operation,
+            resource_kind,
+            resource_id,
+            ConnectorOperationOutcome::Started,
+            None,
+            "connector operation started",
+            occurred_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn result(
+        service: ExternalServiceKind,
+        connector_id: impl Into<String>,
+        account_id: Option<&str>,
+        operation: ConnectorOperationKind,
+        resource_kind: ExternalResourceKind,
+        resource_id: Option<&str>,
+        outcome: ConnectorOperationOutcome,
+        error_class: Option<GmailProviderErrorClass>,
+        reason: impl Into<String>,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self::new(
+            service,
+            connector_id,
+            account_id,
+            operation,
+            resource_kind,
+            resource_id,
+            outcome,
+            error_class,
+            reason,
+            occurred_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        service: ExternalServiceKind,
+        connector_id: impl Into<String>,
+        account_id: Option<&str>,
+        operation: ConnectorOperationKind,
+        resource_kind: ExternalResourceKind,
+        resource_id: Option<&str>,
+        outcome: ConnectorOperationOutcome,
+        error_class: Option<GmailProviderErrorClass>,
+        reason: impl Into<String>,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        let payload_redaction = connector_payload_redaction(&service).to_string();
+        Self {
+            service,
+            connector_id: connector_id.into(),
+            account_id: account_id.map(str::to_string),
+            operation,
+            resource_kind,
+            resource_id: resource_id.map(str::to_string),
+            outcome,
+            error_class,
+            reason: reason.into(),
+            occurred_at,
+            payload_redaction,
+            credential_redaction: "oauth token material omitted".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectorAccountAccessDecision {
+    Allowed,
+    Denied(Box<ConnectorOperationAuditEvent>),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_connector_account_access(
+    service: ExternalServiceKind,
+    connector_id: impl Into<String>,
+    account_id: Option<&str>,
+    lifecycle: ConnectorHostAccountLifecycle,
+    operation: ConnectorOperationKind,
+    resource_kind: ExternalResourceKind,
+    resource_id: Option<&str>,
+    occurred_at: DateTime<Utc>,
+) -> ConnectorAccountAccessDecision {
+    match lifecycle {
+        ConnectorHostAccountLifecycle::Active => ConnectorAccountAccessDecision::Allowed,
+        ConnectorHostAccountLifecycle::Disabled | ConnectorHostAccountLifecycle::Offboarded => {
+            let reason = match lifecycle {
+                ConnectorHostAccountLifecycle::Disabled => "connector account is disabled",
+                ConnectorHostAccountLifecycle::Offboarded => "connector account is offboarded",
+                ConnectorHostAccountLifecycle::Active => unreachable!(),
+            };
+            ConnectorAccountAccessDecision::Denied(Box::new(ConnectorOperationAuditEvent::result(
+                service,
+                connector_id,
+                account_id,
+                operation,
+                resource_kind,
+                resource_id,
+                ConnectorOperationOutcome::Denied,
+                Some(GmailProviderErrorClass::Authentication),
+                reason,
+                occurred_at,
+            )))
+        }
+    }
+}
+
+fn connector_payload_redaction(service: &ExternalServiceKind) -> &'static str {
+    match service {
+        ExternalServiceKind::Gmail => "gmail message content omitted",
+        _ => "connector payload omitted",
+    }
+}
+
 /// Read-only Gmail connector.
 #[allow(dead_code)]
 pub struct GmailConnector {
@@ -2348,5 +2515,102 @@ mod tests {
                 attempts: 2,
             }
         );
+    }
+
+    #[test]
+    fn gmail_connector_operation_audit_shape_is_metadata_only() {
+        let now = Utc::now();
+        let event = ConnectorOperationAuditEvent::result(
+            ExternalServiceKind::Gmail,
+            "gmail-connector-1",
+            Some("user-1"),
+            ConnectorOperationKind::GetResource,
+            ExternalResourceKind::EmailThread,
+            Some("thread-1"),
+            ConnectorOperationOutcome::Succeeded,
+            None,
+            "metadata read completed",
+            now,
+        );
+
+        assert_eq!(event.service, ExternalServiceKind::Gmail);
+        assert_eq!(event.connector_id, "gmail-connector-1");
+        assert_eq!(event.account_id.as_deref(), Some("user-1"));
+        assert_eq!(event.resource_id.as_deref(), Some("thread-1"));
+        assert_eq!(event.payload_redaction, "gmail message content omitted");
+        assert_eq!(event.credential_redaction, "oauth token material omitted");
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("access-token"));
+        assert!(!serialized.contains("refresh-token"));
+        assert!(!serialized.contains("message body"));
+        assert!(!serialized.contains("snippet text"));
+    }
+
+    #[tokio::test]
+    async fn gmail_read_records_start_and_result_audit_events() {
+        let connector = GmailConnector::with_credentials(ExternalServiceCredentials::new("token"));
+        let now = Utc::now();
+        let start = ConnectorOperationAuditEvent::started(
+            connector.service_kind(),
+            "gmail-connector-1",
+            Some("user-1"),
+            ConnectorOperationKind::ListResources,
+            ExternalResourceKind::EmailThread,
+            None,
+            now,
+        );
+        let result = connector
+            .list_resources(&ExternalResourceKind::EmailThread, None, None)
+            .await
+            .unwrap();
+        let completed = ConnectorOperationAuditEvent::result(
+            connector.service_kind(),
+            "gmail-connector-1",
+            Some("user-1"),
+            ConnectorOperationKind::ListResources,
+            ExternalResourceKind::EmailThread,
+            None,
+            ConnectorOperationOutcome::Succeeded,
+            None,
+            "read-only list completed",
+            now,
+        );
+
+        assert!(result.resources.is_empty());
+        assert_eq!(start.outcome, ConnectorOperationOutcome::Started);
+        assert_eq!(completed.outcome, ConnectorOperationOutcome::Succeeded);
+        assert_eq!(completed.resource_kind, ExternalResourceKind::EmailThread);
+        assert_eq!(completed.payload_redaction, "gmail message content omitted");
+    }
+
+    #[test]
+    fn gmail_offboarded_account_access_is_denied_and_audited() {
+        let decision = evaluate_connector_account_access(
+            ExternalServiceKind::Gmail,
+            "gmail-connector-1",
+            Some("user-1"),
+            ConnectorHostAccountLifecycle::Offboarded,
+            ConnectorOperationKind::ListResources,
+            ExternalResourceKind::EmailThread,
+            None,
+            Utc::now(),
+        );
+
+        match decision {
+            ConnectorAccountAccessDecision::Denied(event) => {
+                assert_eq!(event.outcome, ConnectorOperationOutcome::Denied);
+                assert_eq!(
+                    event.error_class,
+                    Some(GmailProviderErrorClass::Authentication)
+                );
+                assert_eq!(event.reason, "connector account is offboarded");
+                assert_eq!(event.payload_redaction, "gmail message content omitted");
+                assert_eq!(event.credential_redaction, "oauth token material omitted");
+            }
+            ConnectorAccountAccessDecision::Allowed => {
+                panic!("offboarded Gmail account must fail closed")
+            }
+        }
     }
 }

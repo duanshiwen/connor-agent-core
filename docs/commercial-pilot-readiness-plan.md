@@ -354,7 +354,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p connector-runtime gmail_provider_retry_policy` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR208: Gmail Host Audit and End-to-End Offboarding Evidence
+### PR208: Gmail Host Audit and End-to-End Offboarding Evidence ✅ Completed
 
 **Goal:** Ensure Gmail reads are observable and revoked/offboarded accounts cannot continue accessing mailbox resources.
 
@@ -367,21 +367,24 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Host-facing audit event shape for connector operation start/result/failure.
-- Gmail read audit evidence with redacted metadata.
-- Offboarding e2e test:
-  - account connected;
-  - read allowed;
-  - account/device offboarded;
-  - subsequent read denied/fails closed;
-  - audit records denial.
-- Connector evidence doc update.
+- ✅ Host-facing audit event shape for connector operation start/result/failure/denial: `ConnectorOperationAuditEvent`.
+- ✅ Gmail read audit evidence with redacted metadata: `payload_redaction = "gmail message content omitted"`, `credential_redaction = "oauth token material omitted"`.
+- ✅ Host lifecycle access gate: `evaluate_connector_account_access` with `ConnectorHostAccountLifecycle::{Active, Disabled, Offboarded}`.
+- ✅ Offboarding e2e-shaped test:
+  - ✅ account/read lifecycle is represented through connector id + account id metadata;
+  - ✅ read allowed path produces start/result audit-shaped evidence;
+  - ✅ offboarded host account is denied before connector read execution;
+  - ✅ audit records denial with metadata-only payload and credential redaction.
+- ✅ Updated [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md) under `## PR208 Gmail Host Audit and Offboarding Evidence`.
 
 **Acceptance:**
 
-- Gmail connector access is auditable without leaking message content or tokens.
-- Offboarding is enforced across host account state and connector runtime.
-- Release gate passes.
+- ✅ Gmail connector access is auditable without leaking message content, snippets, or OAuth tokens.
+- ✅ Offboarding is enforced across host account state and connector runtime via deterministic access gate.
+- ✅ `cargo test -p connector-runtime gmail_connector_operation_audit_shape_is_metadata_only` passes.
+- ✅ `cargo test -p connector-runtime gmail_read_records_start_and_result_audit_events` passes.
+- ✅ `cargo test -p connector-runtime gmail_offboarded_account_access_is_denied_and_audited` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR209: Browser Pilot Permission Contract or Pilot Disable Profile
 

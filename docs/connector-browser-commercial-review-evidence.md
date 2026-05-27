@@ -107,12 +107,40 @@ PR207 disposition:
 - Timeout, transient provider failure, and rate-limit classes are explicit.
 - Rate-limit `Retry-After` is preserved as metadata and preferred over exponential backoff.
 - Authentication/credential failures and invalid requests are not retried, preserving fail-closed behavior.
-- Gmail connector host audit and end-to-end connector-runtime offboarding remain tracked under PR208.
+
+## PR208 Gmail Host Audit and Offboarding Evidence
+
+PR208 closes the Gmail read-only host audit and connector-runtime offboarding evidence gap with deterministic metadata-only audit shapes and a host lifecycle access gate. It does not call the live Gmail API; host products still own real account lifecycle wiring, but connector-runtime now exposes the auditable decision shape needed for commercial pilot integration.
+
+Additional evidence commands:
+
+```bash
+cargo test -p connector-runtime gmail_connector_operation_audit_shape_is_metadata_only
+cargo test -p connector-runtime gmail_read_records_start_and_result_audit_events
+cargo test -p connector-runtime gmail_offboarded_account_access_is_denied_and_audited
+```
+
+Evidence mapping:
+
+| Risk question | Evidence | Result |
+| --- | --- | --- |
+| Are Gmail connector operation audit records metadata-only? | `ConnectorOperationAuditEvent`, `gmail_connector_operation_audit_shape_is_metadata_only` | Rehearsed |
+| Can a Gmail read produce host-facing start/result audit evidence? | `gmail_read_records_start_and_result_audit_events` | Rehearsed |
+| Does an offboarded host account fail closed before connector access? | `evaluate_connector_account_access`, `gmail_offboarded_account_access_is_denied_and_audited` | Rehearsed |
+| Are Gmail payloads and OAuth token material omitted from audit evidence? | `payload_redaction`, `credential_redaction` assertions | Rehearsed |
+
+PR208 disposition:
+
+- Gmail connector operation start/result/failure/denial audit shape is metadata-only.
+- Gmail message content/snippets and OAuth token material are omitted from audit-shaped output.
+- Host lifecycle status `Offboarded` or `Disabled` denies connector access before read execution.
+- Offboarding denial records an auditable `Denied` event with redacted payload/credential evidence.
+- Gmail read-only has now completed PR206 provider lifecycle, PR207 retry/timeout/rate-limit, and PR208 audit/offboarding evidence for first pilot conditional enablement.
 
 Open blockers before commercial pilot:
 
-- host audit event implementation for connector start/result;
-- end-to-end offboarding across host account state and connector runtime.
+- host product must wire its real account lifecycle source into `evaluate_connector_account_access`;
+- host product must persist/export `ConnectorOperationAuditEvent` through its selected audit backend.
 
 ## Browser Kernel Current Capability Review Evidence
 
