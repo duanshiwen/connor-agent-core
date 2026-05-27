@@ -27,7 +27,24 @@ mode = "ask"
 
 [browser]
 profile = "default"
+profile_policy = "isolated"
 allow_js = false
+
+[actions]
+default_policy_mode = "inherit"
+
+[actions.per_action."mail.send"]
+mode = "ask"
+
+[connectors.gmail]
+enabled = true
+endpoint = "https://gmail.googleapis.com"
+token = "gmail-secret"
+
+[connectors.gmail.runtime]
+isolation = "network_only"
+rate_limit_per_minute = 60
+health_check_interval_secs = 300
 "#
 }
 
@@ -41,6 +58,17 @@ fn parses_agentos_toml() {
     assert_eq!(config.model.default_model, "gpt-4o-mini");
     assert_eq!(config.policy.mode, "ask");
     assert_eq!(config.browser.profile.as_deref(), Some("default"));
+    assert_eq!(config.browser.profile_policy, "isolated");
+    assert_eq!(config.actions.default_policy_mode, "inherit");
+    assert_eq!(
+        config.actions.per_action.get("mail.send").unwrap().mode,
+        "ask"
+    );
+    let gmail = config.connectors.get("gmail").unwrap();
+    assert!(gmail.enabled);
+    assert_eq!(gmail.runtime.isolation, "network_only");
+    assert_eq!(gmail.runtime.rate_limit_per_minute, Some(60));
+    assert_eq!(gmail.runtime.health_check_interval_secs, Some(300));
 
     let provider = config.model.providers.get("openai").unwrap();
     assert_eq!(provider.endpoint, "https://api.openai.com/v1");
@@ -111,6 +139,55 @@ mode = "invalid"
 }
 
 #[test]
+fn invalid_runtime_config_returns_typed_diagnostics() {
+    let config = AgentOsConfig::from_toml_str(
+        r#"
+[storage]
+root = ".agentos"
+
+[model]
+default_provider = "openai"
+default_model = "gpt-4o-mini"
+
+[model.providers.openai]
+provider = "openai"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[actions]
+default_policy_mode = "sometimes"
+
+[actions.per_action.""]
+mode = "prompt"
+
+[browser]
+profile_policy = "shared"
+
+[connectors.gmail]
+enabled = true
+
+[connectors.gmail.runtime]
+isolation = "vm"
+rate_limit_per_minute = 0
+health_check_interval_secs = 0
+"#,
+    )
+    .unwrap();
+
+    let report = config.validate();
+    let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code).collect();
+
+    assert!(codes.contains(&ConfigDiagnosticCode::ActionDefaultPolicyModeInvalid));
+    assert!(codes.contains(&ConfigDiagnosticCode::ActionKindEmpty));
+    assert!(codes.contains(&ConfigDiagnosticCode::ActionPolicyModeInvalid));
+    assert!(codes.contains(&ConfigDiagnosticCode::BrowserProfilePolicyInvalid));
+    assert!(codes.contains(&ConfigDiagnosticCode::ConnectorEndpointMissing));
+    assert!(codes.contains(&ConfigDiagnosticCode::ConnectorIsolationInvalid));
+    assert!(codes.contains(&ConfigDiagnosticCode::ConnectorRateLimitInvalid));
+    assert!(codes.contains(&ConfigDiagnosticCode::ConnectorHealthCheckIntervalInvalid));
+}
+
+#[test]
 fn redacted_debug_does_not_leak_api_key() {
     let config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
 
@@ -119,8 +196,10 @@ fn redacted_debug_does_not_leak_api_key() {
 
     assert!(!debug.contains("sk-test-secret"));
     assert!(!redacted_debug.contains("sk-test-secret"));
+    assert!(!redacted_debug.contains("gmail-secret"));
     assert!(debug.contains("<redacted>"));
     assert!(redacted_debug.contains("<redacted>"));
+    assert!(redacted_debug.contains("network_only"));
 }
 
 #[test]
@@ -215,6 +294,18 @@ root = ".agentos-local"
 
 [profiles.local.browser]
 profile = "local-browser"
+profile_policy = "ephemeral"
+
+[profiles.local.actions]
+default_policy_mode = "ask"
+
+[profiles.local.connectors.gmail]
+enabled = true
+endpoint = "https://gmail.googleapis.com"
+
+[profiles.local.connectors.gmail.runtime]
+isolation = "network_only"
+rate_limit_per_minute = 30
 
 [profiles.dev]
 extends = "local"
@@ -253,6 +344,12 @@ fn profile_override_is_deterministic() {
     assert_eq!(resolved.storage.root, ".agentos-dev");
     assert_eq!(resolved.policy.mode, "allow");
     assert_eq!(resolved.browser.profile.as_deref(), Some("local-browser"));
+    assert_eq!(resolved.browser.profile_policy, "ephemeral");
+    assert_eq!(resolved.actions.default_policy_mode, "ask");
+    assert_eq!(
+        resolved.connectors.get("gmail").unwrap().runtime.isolation,
+        "network_only"
+    );
     assert_eq!(resolved.model.default_model, "gpt-4.1-mini");
     assert_eq!(provider.endpoint, "https://api.openai.com/v1");
     assert_eq!(provider.api_key.as_deref(), Some("sk-profile-secret"));

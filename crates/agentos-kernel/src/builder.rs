@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use action_core::{ActionExecutor, ActionRegistry};
+use action_core::{ActionExecutor, ActionRegistry, SideEffectKind};
 use action_runtime::ArtifactResolver;
+use agentos_config::{AgentOsConfig, RedactedAgentOsConfig};
 use agentos_storage::AgentOsStorage;
 use audit_log::AuditLog;
-use capability_policy::CapabilityPolicy;
+use capability_policy::{CapabilityPolicy, PolicyRule, PolicyRuleDecision};
 use conversation_journal::ConversationJournal;
 use conversation_kernel::ConversationKernel;
 use enterprise_permission_core::PermissionStore;
@@ -28,6 +29,7 @@ pub struct KernelRuntimeBuilder {
     storage: Option<Arc<AgentOsStorage>>,
     storage_provider_registry: Option<Arc<StorageProviderRegistry>>,
     policy_provider_registry: Option<Arc<PolicyProviderRegistry>>,
+    runtime_config: Option<Arc<RedactedAgentOsConfig>>,
 }
 
 impl KernelRuntimeBuilder {
@@ -90,6 +92,14 @@ impl KernelRuntimeBuilder {
         self
     }
 
+    pub fn agentos_config(mut self, config: AgentOsConfig) -> Self {
+        if self.capability_policy.is_none() {
+            self.capability_policy = Some(Arc::new(capability_policy_from_config(&config)));
+        }
+        self.runtime_config = Some(Arc::new(config.redacted()));
+        self
+    }
+
     pub fn enterprise_permission_store(
         self,
         permission_store: Arc<Mutex<PermissionStore>>,
@@ -144,8 +154,39 @@ impl KernelRuntimeBuilder {
             storage: self.storage,
             storage_provider_registry: self.storage_provider_registry,
             policy_provider_registry: self.policy_provider_registry,
+            runtime_config: self.runtime_config,
         };
 
         Ok(KernelRuntime::new(services))
+    }
+}
+
+fn capability_policy_from_config(config: &AgentOsConfig) -> CapabilityPolicy {
+    let default_decision =
+        policy_mode_to_decision(match config.actions.default_policy_mode.as_str() {
+            "inherit" => config.policy.mode.as_str(),
+            value => value,
+        });
+    // Keep the default safe read behavior unless explicitly configured otherwise.
+    let rules = vec![
+        PolicyRule {
+            side_effect: SideEffectKind::None,
+            decision: PolicyRuleDecision::Allow,
+        },
+        PolicyRule {
+            side_effect: SideEffectKind::ReadOnly,
+            decision: PolicyRuleDecision::Allow,
+        },
+    ];
+
+    CapabilityPolicy::new(rules, default_decision)
+}
+
+fn policy_mode_to_decision(mode: &str) -> PolicyRuleDecision {
+    match mode {
+        "allow" => PolicyRuleDecision::Allow,
+        "deny" => PolicyRuleDecision::Deny,
+        "ask" | "inherit" => PolicyRuleDecision::Ask,
+        _ => PolicyRuleDecision::Ask,
     }
 }

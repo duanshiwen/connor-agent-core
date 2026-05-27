@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agentos_config::AgentOsConfig;
+use agentos_config::{AgentOsConfig, RedactedAgentOsConfig};
 use agentos_storage::AgentOsStorage;
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +38,20 @@ impl RedactedRuntimeConfig {
 
     pub fn from_agentos_config(config: &AgentOsConfig) -> KernelResult<Self> {
         let validation_report = config.validate();
-        let redacted_config = serde_json::to_string(&config.redacted()).map_err(|err| {
+        let mut redacted = Self::from_redacted_agentos_config(config.redacted())?;
+        redacted.values.insert(
+            "agentos_config_valid".to_string(),
+            validation_report.is_valid().to_string(),
+        );
+        redacted.values.insert(
+            "agentos_config_error_count".to_string(),
+            validation_report.diagnostics.len().to_string(),
+        );
+        Ok(redacted)
+    }
+
+    pub fn from_redacted_agentos_config(config: RedactedAgentOsConfig) -> KernelResult<Self> {
+        let redacted_config = serde_json::to_string(&config).map_err(|err| {
             crate::KernelError::DiagnosticsFailed {
                 reason: err.to_string(),
             }
@@ -46,13 +59,10 @@ impl RedactedRuntimeConfig {
 
         let mut values = BTreeMap::new();
         values.insert("agentos_config".to_string(), redacted_config);
-        values.insert(
-            "agentos_config_valid".to_string(),
-            validation_report.is_valid().to_string(),
-        );
+        values.insert("agentos_config_valid".to_string(), "unknown".to_string());
         values.insert(
             "agentos_config_error_count".to_string(),
-            validation_report.diagnostics.len().to_string(),
+            "unknown".to_string(),
         );
 
         Ok(Self { values })

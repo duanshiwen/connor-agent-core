@@ -144,6 +144,7 @@ async fn diagnostics_bundle_for_config_redacts_typed_agentos_config() {
             enabled: true,
             endpoint: Some("https://api.github.example".to_string()),
             token: Some("ghp-typed-secret".to_string()),
+            ..ConnectorConfig::default()
         },
     );
 

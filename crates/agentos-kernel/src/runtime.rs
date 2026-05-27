@@ -148,6 +148,21 @@ impl KernelRuntime {
         &self,
         runtime_config: BTreeMap<String, String>,
     ) -> KernelResult<crate::KernelDiagnosticsBundle> {
+        if runtime_config.is_empty()
+            && let Some(config) = self.services.runtime_config.as_ref()
+        {
+            let runtime_config = crate::RedactedRuntimeConfig::from_redacted_agentos_config(
+                config.as_ref().clone(),
+            )?;
+            return crate::diagnostics::build_diagnostics_bundle_from_redacted_config(
+                runtime_config,
+                self.health_check(),
+                self.services.audit_log.as_ref(),
+                self.services.storage.as_deref(),
+            )
+            .await;
+        }
+
         crate::diagnostics::build_diagnostics_bundle(
             runtime_config,
             self.health_check(),

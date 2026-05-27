@@ -5,6 +5,7 @@ use action_runtime::{
     ActionRuntime, ActionRuntimeOutcome, ArtifactResolver, ExecuteApprovedActionRequest,
     ProcessActionRequest,
 };
+use agentos_config::RedactedAgentOsConfig;
 use agentos_storage::AgentOsStorage;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
@@ -85,4 +86,5 @@ pub struct KernelServices {
     pub storage: Option<Arc<AgentOsStorage>>,
     pub storage_provider_registry: Option<Arc<StorageProviderRegistry>>,
     pub policy_provider_registry: Option<Arc<PolicyProviderRegistry>>,
+    pub runtime_config: Option<Arc<RedactedAgentOsConfig>>,
 }

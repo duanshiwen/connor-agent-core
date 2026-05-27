@@ -146,6 +146,7 @@ pub struct AgentOsConfig {
     pub storage: StorageConfig,
     pub model: ModelConfig,
     pub policy: PolicyConfig,
+    pub actions: ActionRuntimeConfig,
     pub identity: IdentityConfig,
     pub browser: BrowserConfig,
     pub connectors: BTreeMap<String, ConnectorConfig>,
@@ -291,6 +292,33 @@ impl AgentOsConfig {
             ));
         }
 
+        if !matches!(
+            self.actions.default_policy_mode.as_str(),
+            "allow" | "ask" | "deny" | "inherit"
+        ) {
+            diagnostics.push(ConfigDiagnostic::error(
+                ConfigDiagnosticCode::ActionDefaultPolicyModeInvalid,
+                "actions.default_policy_mode",
+                "actions.default_policy_mode must be one of: inherit, allow, ask, deny",
+            ));
+        }
+        for (action_kind, policy) in &self.actions.per_action {
+            if action_kind.trim().is_empty() {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ActionKindEmpty,
+                    "actions.per_action",
+                    "action policy keys must not be empty",
+                ));
+            }
+            if !matches!(policy.mode.as_str(), "allow" | "ask" | "deny") {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ActionPolicyModeInvalid,
+                    format!("actions.per_action.{action_kind}.mode"),
+                    "per-action policy mode must be one of: allow, ask, deny",
+                ));
+            }
+        }
+
         if !matches!(self.identity.mode.as_str(), "development" | "production") {
             diagnostics.push(ConfigDiagnostic::error(
                 ConfigDiagnosticCode::IdentityModeInvalid,
@@ -315,6 +343,59 @@ impl AgentOsConfig {
             ));
         }
 
+        if !matches!(
+            self.browser.profile_policy.as_str(),
+            "default" | "ephemeral" | "isolated" | "enterprise_restricted"
+        ) {
+            diagnostics.push(ConfigDiagnostic::error(
+                ConfigDiagnosticCode::BrowserProfilePolicyInvalid,
+                "browser.profile_policy",
+                "browser.profile_policy must be one of: default, ephemeral, isolated, enterprise_restricted",
+            ));
+        }
+
+        for (connector_key, connector) in &self.connectors {
+            let prefix = format!("connectors.{connector_key}");
+            if connector.enabled
+                && connector
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ConnectorEndpointMissing,
+                    format!("{prefix}.endpoint"),
+                    "enabled connectors must provide endpoint",
+                ));
+            }
+            if !matches!(
+                connector.runtime.isolation.as_str(),
+                "shared" | "sandboxed" | "network_only"
+            ) {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ConnectorIsolationInvalid,
+                    format!("{prefix}.runtime.isolation"),
+                    "connector runtime isolation must be one of: shared, sandboxed, network_only",
+                ));
+            }
+            if connector.runtime.rate_limit_per_minute == Some(0) {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ConnectorRateLimitInvalid,
+                    format!("{prefix}.runtime.rate_limit_per_minute"),
+                    "connector rate_limit_per_minute must be greater than zero when set",
+                ));
+            }
+            if connector.runtime.health_check_interval_secs == Some(0) {
+                diagnostics.push(ConfigDiagnostic::error(
+                    ConfigDiagnosticCode::ConnectorHealthCheckIntervalInvalid,
+                    format!("{prefix}.runtime.health_check_interval_secs"),
+                    "connector health_check_interval_secs must be greater than zero when set",
+                ));
+            }
+        }
+
         ConfigValidationReport { diagnostics }
     }
 
@@ -325,6 +406,7 @@ impl AgentOsConfig {
             storage: self.storage.clone(),
             model: self.model.redacted(),
             policy: self.policy.clone(),
+            actions: self.actions.clone(),
             identity: self.identity.clone(),
             browser: self.browser.clone(),
             connectors: self
@@ -426,6 +508,36 @@ impl Default for PolicyConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ActionRuntimeConfig {
+    pub default_policy_mode: String,
+    pub per_action: BTreeMap<String, ActionPolicyConfig>,
+}
+
+impl Default for ActionRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_policy_mode: "inherit".to_string(),
+            per_action: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActionPolicyConfig {
+    pub mode: String,
+}
+
+impl Default for ActionPolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: "ask".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IdentityConfig {
     pub mode: String,
     pub crypto_provider: String,
@@ -440,11 +552,22 @@ impl Default for IdentityConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
     pub profile: Option<String>,
+    pub profile_policy: String,
     pub allow_js: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            profile_policy: "default".to_string(),
+            allow_js: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -453,6 +576,25 @@ pub struct ConnectorConfig {
     pub enabled: bool,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    pub runtime: ConnectorRuntimeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnectorRuntimeConfig {
+    pub isolation: String,
+    pub rate_limit_per_minute: Option<u32>,
+    pub health_check_interval_secs: Option<u64>,
+}
+
+impl Default for ConnectorRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            isolation: "shared".to_string(),
+            rate_limit_per_minute: None,
+            health_check_interval_secs: None,
+        }
+    }
 }
 
 /// Profile override patch. All fields are optional so omitted values inherit deterministically.
@@ -464,6 +606,7 @@ pub struct AgentOsProfile {
     pub storage: Option<StorageConfigPatch>,
     pub model: Option<ModelConfigPatch>,
     pub policy: Option<PolicyConfigPatch>,
+    pub actions: Option<ActionRuntimeConfigPatch>,
     pub identity: Option<IdentityConfigPatch>,
     pub browser: Option<BrowserConfigPatch>,
     pub connectors: BTreeMap<String, ConnectorConfigPatch>,
@@ -482,6 +625,9 @@ impl AgentOsProfile {
         }
         if let Some(patch) = &self.policy {
             patch.apply_to(&mut config.policy);
+        }
+        if let Some(patch) = &self.actions {
+            patch.apply_to(&mut config.actions);
         }
         if let Some(patch) = &self.identity {
             patch.apply_to(&mut config.identity);
@@ -593,6 +739,39 @@ impl PolicyConfigPatch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub struct ActionRuntimeConfigPatch {
+    pub default_policy_mode: Option<String>,
+    pub per_action: BTreeMap<String, ActionPolicyConfigPatch>,
+}
+
+impl ActionRuntimeConfigPatch {
+    fn apply_to(&self, config: &mut ActionRuntimeConfig) {
+        if let Some(value) = &self.default_policy_mode {
+            config.default_policy_mode = value.clone();
+        }
+        for (action_kind, patch) in &self.per_action {
+            let action_policy = config.per_action.entry(action_kind.clone()).or_default();
+            patch.apply_to(action_policy);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ActionPolicyConfigPatch {
+    pub mode: Option<String>,
+}
+
+impl ActionPolicyConfigPatch {
+    fn apply_to(&self, config: &mut ActionPolicyConfig) {
+        if let Some(value) = &self.mode {
+            config.mode = value.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct IdentityConfigPatch {
     pub mode: Option<String>,
     pub crypto_provider: Option<String>,
@@ -613,6 +792,7 @@ impl IdentityConfigPatch {
 #[serde(default)]
 pub struct BrowserConfigPatch {
     pub profile: Option<String>,
+    pub profile_policy: Option<String>,
     pub allow_js: Option<bool>,
 }
 
@@ -620,6 +800,9 @@ impl BrowserConfigPatch {
     fn apply_to(&self, config: &mut BrowserConfig) {
         if let Some(value) = &self.profile {
             config.profile = Some(value.clone());
+        }
+        if let Some(value) = &self.profile_policy {
+            config.profile_policy = value.clone();
         }
         if let Some(value) = self.allow_js {
             config.allow_js = value;
@@ -633,6 +816,7 @@ pub struct ConnectorConfigPatch {
     pub enabled: Option<bool>,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    pub runtime: Option<ConnectorRuntimeConfigPatch>,
 }
 
 impl ConnectorConfigPatch {
@@ -646,6 +830,31 @@ impl ConnectorConfigPatch {
         if let Some(value) = &self.token {
             config.token = Some(value.clone());
         }
+        if let Some(patch) = &self.runtime {
+            patch.apply_to(&mut config.runtime);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectorRuntimeConfigPatch {
+    pub isolation: Option<String>,
+    pub rate_limit_per_minute: Option<u32>,
+    pub health_check_interval_secs: Option<u64>,
+}
+
+impl ConnectorRuntimeConfigPatch {
+    fn apply_to(&self, config: &mut ConnectorRuntimeConfig) {
+        if let Some(value) = &self.isolation {
+            config.isolation = value.clone();
+        }
+        if let Some(value) = self.rate_limit_per_minute {
+            config.rate_limit_per_minute = Some(value);
+        }
+        if let Some(value) = self.health_check_interval_secs {
+            config.health_check_interval_secs = Some(value);
+        }
     }
 }
 
@@ -655,6 +864,7 @@ impl ConnectorConfig {
             enabled: self.enabled,
             endpoint: self.endpoint.clone(),
             token: self.token.as_ref().map(|_| "<redacted>".to_string()),
+            runtime: self.runtime.clone(),
         }
     }
 }
@@ -756,6 +966,14 @@ pub enum ConfigDiagnosticCode {
     IdentityModeInvalid,
     IdentityCryptoProviderInvalid,
     FakeCryptoForbiddenInProduction,
+    ActionDefaultPolicyModeInvalid,
+    ActionKindEmpty,
+    ActionPolicyModeInvalid,
+    BrowserProfilePolicyInvalid,
+    ConnectorEndpointMissing,
+    ConnectorIsolationInvalid,
+    ConnectorRateLimitInvalid,
+    ConnectorHealthCheckIntervalInvalid,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -796,6 +1014,7 @@ pub struct RedactedAgentOsConfig {
     pub storage: StorageConfig,
     pub model: RedactedModelConfig,
     pub policy: PolicyConfig,
+    pub actions: ActionRuntimeConfig,
     pub identity: IdentityConfig,
     pub browser: BrowserConfig,
     pub connectors: BTreeMap<String, RedactedConnectorConfig>,
@@ -822,6 +1041,7 @@ pub struct RedactedConnectorConfig {
     pub enabled: bool,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    pub runtime: ConnectorRuntimeConfig,
 }
 
 #[cfg(test)]
@@ -844,6 +1064,7 @@ mod tests {
                 enabled: true,
                 endpoint: Some("https://api.github.com".to_string()),
                 token: Some("ghp-secret".to_string()),
+                ..ConnectorConfig::default()
             },
         );
 
