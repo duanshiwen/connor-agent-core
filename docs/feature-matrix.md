@@ -1,6 +1,6 @@
 # Feature Matrix
 
-This matrix records the minimum release-gate coverage for the stable public API boundary. It is intentionally lightweight: PR167 only automates the presence check and keeps detailed feature certification in crate-level tests.
+This matrix records the minimum release-gate coverage for the stable public API boundary. It also links the M25 controlled-beta posture docs that turn the M24 readiness review into operational gates. Detailed feature certification remains in crate-level tests.
 
 | Crate | Stable boundary role | Release-gate coverage |
 | --- | --- | --- |
@@ -9,6 +9,17 @@ This matrix records the minimum release-gate coverage for the stable public API 
 | `audit-log` | Audit recording and JSONL export boundary | Workspace tests and export permission/redaction coverage |
 | `enterprise-permission-core` | Enterprise grants, user lifecycle, offboarding denial invariants | Workspace tests and concurrency/offboarding coverage |
 
+## Beta hardening posture
+
+Controlled beta is governed by:
+
+- [m24-beta-hardening-decision.md](m24-beta-hardening-decision.md)
+- [credential-operations-runbook.md](credential-operations-runbook.md)
+- [production-observability-policy.md](production-observability-policy.md)
+- [release-operations-runbook.md](release-operations-runbook.md)
+- [connector-browser-risk-review-templates.md](connector-browser-risk-review-templates.md)
+- [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-policy.md)
+
 ## Release expectation
 
-A release candidate should run `./scripts/release-gate.sh` from the repository root. The script verifies this matrix exists before running formatting, linting, and the full workspace test suite.
+A release candidate should run `./scripts/release-gate.sh` from the repository root. The script verifies this matrix and M25 beta hardening docs exist before running formatting, linting, and the full workspace test suite.
