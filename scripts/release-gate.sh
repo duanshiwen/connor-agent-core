@@ -9,6 +9,8 @@ grep -q "## Release Checklist" README.md
 grep -q "./scripts/release-gate.sh" README.md
 test -f docs/security-review-checklist.md
 grep -q "High-risk PRs must reference this checklist" docs/security-review-checklist.md
+test -f docs/v2-commercial-readiness-review.md
+grep -q "## Commercial Pilot Entry Conditions" docs/v2-commercial-readiness-review.md
 
 echo "==> feature matrix check"
 test -f docs/feature-matrix.md

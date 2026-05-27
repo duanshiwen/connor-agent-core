@@ -257,7 +257,8 @@ The release gate performs the minimum M24 checklist in order:
 3. Formatting: `cargo fmt --all --check`.
 4. Linting: `cargo clippy --workspace -- -D warnings`.
 5. Security checklist docs: verifies [docs/security-review-checklist.md](docs/security-review-checklist.md) exists and states that high-risk PRs must reference it.
-6. Tests: `cargo test --workspace`.
+6. Commercial readiness docs: verifies [docs/v2-commercial-readiness-review.md](docs/v2-commercial-readiness-review.md) exists and states beta/commercial pilot entry conditions.
+7. Tests: `cargo test --workspace`.
 
 ## 最小示例
 
