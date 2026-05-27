@@ -31,6 +31,10 @@ grep -q "## Redaction Requirements" docs/production-observability-policy.md
 grep -q "## Production-Like File Export Sink" docs/production-observability-policy.md
 test -f docs/release-operations-runbook.md
 grep -q "## Rollback Decision Tree" docs/release-operations-runbook.md
+test -f docs/release-artifact-rollback-rehearsal.md
+grep -q "## Release Artifact Rehearsal" docs/release-artifact-rollback-rehearsal.md
+grep -q "## Rollback Rehearsal Evidence" docs/release-artifact-rollback-rehearsal.md
+grep -q "## Incident Escalation Tabletop" docs/release-artifact-rollback-rehearsal.md
 test -f docs/connector-browser-risk-review-templates.md
 grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-review-templates.md
 test -f docs/connector-browser-commercial-review-evidence.md

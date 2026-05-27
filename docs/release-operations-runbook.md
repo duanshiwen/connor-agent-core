@@ -2,6 +2,8 @@
 
 This runbook defines the beta/commercial-pilot release process for `connor-agent-core`.
 
+Rehearsal evidence: [release-artifact-rollback-rehearsal.md](release-artifact-rollback-rehearsal.md)
+
 ## Release Gate
 
 `./scripts/release-gate.sh` is the mandatory pre-release quality gate. It is not complete packaging automation.

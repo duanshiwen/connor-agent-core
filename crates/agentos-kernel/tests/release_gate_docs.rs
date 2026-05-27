@@ -48,6 +48,12 @@ fn release_gate_script_documents_and_runs_required_checks() {
         script.contains("Production-Like File Export Sink"),
         "release gate must include PR203 production observability file sink checks"
     );
+    assert!(
+        script.contains("docs/release-artifact-rollback-rehearsal.md")
+            && script.contains("Release Artifact Rehearsal")
+            && script.contains("Rollback Rehearsal Evidence"),
+        "release gate must include PR204 release artifact and rollback rehearsal evidence checks"
+    );
 
     #[cfg(unix)]
     {
@@ -78,5 +84,39 @@ fn release_checklist_is_documented_in_readme_and_feature_matrix() {
             && feature_matrix.contains("audit-log")
             && feature_matrix.contains("enterprise-permission-core"),
         "feature matrix must cover the stable public API boundary crates"
+    );
+}
+
+#[test]
+fn release_artifact_rollback_rehearsal_records_pr204_evidence() {
+    let root = workspace_root();
+    let rehearsal = fs::read_to_string(root.join("docs/release-artifact-rollback-rehearsal.md"))
+        .expect("release artifact rollback rehearsal evidence should exist");
+    let runbook = fs::read_to_string(root.join("docs/release-operations-runbook.md"))
+        .expect("release operations runbook should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## Release Artifact Rehearsal",
+        "## Rollback Rehearsal Evidence",
+        "## Incident Escalation Tabletop",
+        "v0.1.0-beta.rehearsal",
+        "release gate passed",
+        "non-production storage root",
+    ] {
+        assert!(
+            rehearsal.contains(required),
+            "PR204 rehearsal evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        runbook.contains("release-artifact-rollback-rehearsal.md"),
+        "release runbook must link PR204 rehearsal evidence"
+    );
+    assert!(
+        plan.contains("PR204: Beta/Pilot Release Artifact and Rollback Rehearsal ✅ Completed"),
+        "commercial pilot readiness plan must mark PR204 complete"
     );
 }

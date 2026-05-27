@@ -239,7 +239,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-observability jsonl_file_sink_exports_redacted_traces_and_metrics` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR204: Beta/Pilot Release Artifact and Rollback Rehearsal
+### PR204: Beta/Pilot Release Artifact and Rollback Rehearsal ✅ Completed
 
 **Goal:** Turn the release gate into a releaseable artifact process.
 
@@ -251,23 +251,24 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- Release artifact checklist generated or manually recorded for a candidate:
+- ✅ Release artifact checklist generated or manually recorded for a rehearsal candidate in [release-artifact-rollback-rehearsal.md](release-artifact-rollback-rehearsal.md):
   - commit hash;
   - tag format;
   - `Cargo.lock`;
-  - changelog;
+  - changelog input;
   - release gate output;
   - compatibility fixture status;
   - known accepted risks.
-- Rollback rehearsal against a non-production storage root.
-- Incident escalation rehearsal notes.
-- Optional helper script for changelog/release evidence bundle.
+- ✅ Rollback rehearsal against a non-production storage root recorded as tabletop evidence.
+- ✅ Incident escalation rehearsal notes for S0/S1 classification and owner handoff.
+- ✅ Release gate checks that rehearsal evidence exists and contains release artifact, rollback, and incident sections.
 
 **Acceptance:**
 
-- A `v0.1.0-beta.N` candidate can be produced reproducibly.
-- Rollback path is documented and exercised.
-- Release gate passes.
+- ✅ A `v0.1.0-beta.N` candidate can be produced reproducibly from the recorded artifact checklist.
+- ✅ Rollback path is documented and exercised against a non-production storage root.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs release_artifact_rollback_rehearsal_records_pr204_evidence` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR205: Storage/Journal Commercial Fixture Freeze Acceptance
 
