@@ -1,267 +1,99 @@
 # Connor Agent Core
 
-`connor-agent-core` 是 Agent OS 中**对话内核 (Conversation Kernel)** 第一版的 Rust 工作区。
+`connor-agent-core` is the Rust workspace for AgentOS core runtime boundaries: conversation event sourcing, agent runs, action execution, audit, storage, identity, connectors, browser/kernel entities, and host-facing integration APIs.
 
-内核设计为一个**仅追加 (append-only)、可重放 (replayable)、可测试 (testable)** 的对话子系统。它将对话状态变化记录为事件，通过投影器将事件转换为可查询的状态，并为未来的 Agent 运行构建上下文切片——整个过程不直接调用 LLM、浏览器、插件系统或长期记忆层。
+The workspace is intentionally layered. Domain crates define stable data and policy shapes; runtime crates orchestrate side effects through explicit boundaries; host-facing crates compose those pieces without hiding audit, permission, storage, or lifecycle decisions.
 
-## 设计目标
+## Design Principles
 
-- **仅追加事件日志**：每个状态变化都由一个 `ConversationEvent` 表示。
-- **确定性重放**：`ConversationState` 通过 `ConversationProjector` 从事件重建。
-- **关注点分离**：内核管理对话，不涉及模型推理或外部工具。
-- **测试优先实现**：核心行为通过单元测试和集成测试覆盖。
-- **可扩展接口**：未来的浏览器、插件、记忆或多 Agent 功能可以作为事件和策略层叠加在内核之上。
+- **Append-only conversation history**: conversation state changes are represented as events and can be replayed deterministically.
+- **Explicit side-effect boundary**: external effects flow through `action-core` / `action-runtime`, policy checks, and audit logging.
+- **Host-owned production integration**: credentials, telemetry export, release artifacts, and product UX are represented by boundaries and examples, not hard-coded product infrastructure.
+- **Testable defaults**: in-memory stores and fake providers are available for deterministic tests and examples.
+- **Stable host API first**: `agentos-kernel` exposes the current host-facing composition boundary for backend/macOS integration.
 
-## 工作区结构
+## Workspace Map
 
-```text
-.
-├── Cargo.toml
-├── Cargo.lock
-├── LICENSE
-├── README.md
-└── crates
-    ├── conversation-core
-    │   └── src
-    │       ├── action_lifecycle.rs
-    │       ├── agent_run.rs
-    │       ├── error.rs
-    │       ├── event.rs
-    │       ├── ids.rs
-    │       ├── lib.rs
-    │       ├── message.rs
-    │       ├── participant.rs
-    │       ├── session.rs
-    │       ├── slice.rs
-    │       └── visibility.rs
-    ├── conversation-journal
-    │   └── src
-    │       ├── jsonl.rs
-    │       ├── lib.rs
-    │       └── memory.rs
-    ├── conversation-kernel
-    │   ├── src
-    │   │   ├── commands.rs
-    │   │   ├── kernel.rs
-    │   │   ├── lib.rs
-    │   │   ├── policy.rs
-    │   │   ├── projector.rs
-    │   │   ├── slice_builder.rs
-    │   │   └── state.rs
-    │   └── tests
-    │       ├── action_lifecycle.rs
-    │       ├── agent_run_lifecycle.rs
-    │       ├── command_validation.rs
-    │       ├── full_lifecycle.rs
-    │       ├── linked_entity_events.rs
-    │       └── message_edit.rs
-    ├── entity-core
-    ├── assistant-core
-    ├── model-adapter
-    ├── agent-runtime
-    ├── action-core
-    ├── action-runtime
-    ├── capability-policy
-    ├── audit-log
-    ├── artifact-core
-    ├── surface-core
-    ├── asset-core
-    ├── asset-index
-    └── conversation-runtime
-        └── src
-            └── lib.rs
-```
+### Conversation Layer
 
-## Crate 说明
+- `conversation-core` — IDs, participants, messages, events, visibility, slices, action/run lifecycle types.
+- `conversation-journal` — append-only journal abstraction plus memory and segmented JSONL implementations.
+- `conversation-kernel` — commands, projector, state, policies, snapshots, and context slice building.
 
-### `conversation-core`
+### Agent and Model Layer
 
-对话子系统共享的领域类型，包括：
+- `agent-runtime` — current agent run processor, context building, tool/action proposal routing, retry/run/action stores, approval queues, checkpoints.
+- `model-adapter` — model provider abstraction plus OpenAI-compatible and Anthropic adapters, streaming/tool call support, token budgeting, and fake adapters.
+- `assistant-core` — assistant profiles, capabilities, preferences, and conversation helpers.
 
-- **ID 新类型**：`ConversationId`、`EventId`、`MessageId`、`ParticipantId`、`ThreadId`
-- **会话模型**：`ConversationSession`、`ConversationKind`、`ConversationStatus`
-- **参与者模型**：`Participant`、`ParticipantKind`
-- **消息模型**：`Message`、`MessageContent`、`SuggestedAction`
-- **可见性模型**：`Visibility`
-- **事件模型**：`ConversationEvent`、`ConversationEventEnvelope`
-- **上下文切片模型**：`ConversationSlice`、`SliceBuildReason`
+### Action, Policy, and Audit Layer
 
-### `conversation-journal`
+- `action-core` — action IDs, schemas, requests, results, and registry primitives.
+- `action-runtime` — policy → executor → audit → conversation lifecycle orchestration.
+- `capability-policy` — allow/ask/deny policy evaluation and policy-file loading.
+- `audit-log` — memory/JSONL/enterprise audit sinks, audit queries, export, and integrity reporting.
+- `enterprise-permission-core` — enterprise users, roles, grants, lifecycle/offboarding, cached and server-backed permission stores.
 
-仅追加的事件存储抽象，包括：
+### Host, Storage, and Observability Layer
 
-- `ConversationJournal` trait
-- `MemoryConversationJournal`：用于测试和内存工作流
-- `JsonlConversationJournal`：用于本地持久化 JSONL 存储
+- `agentos-kernel` — host-facing composition root, runtime builder, service registries, host API, diagnostics, and error taxonomy.
+- `agentos-config` — typed config parsing, overlays, validation, and redaction.
+- `agentos-storage` — durable storage layout, artifact store, migration, backup, locking, and repair primitives.
+- `agentos-observability` — structured telemetry, metrics, redaction, JSONL export, and pilot operations drill types.
 
-分段 JSONL 布局如下：
+### Domain and Connector Layer
 
-```text
-{root_dir}/{conversation_id}/
-├── manifest.json
-└── segments/
-    ├── 00000000000000000000.jsonl
-    ├── 00000000000000000001.jsonl
-    └── ...
-```
+- `entity-core`, `artifact-core`, `surface-core`, `asset-core`, `asset-index` — shared domain objects and indexes.
+- `browser-entity`, `browser-kernel-core` — browser action schemas, permission profiles, CDP-oriented kernel domain and executor skeletons.
+- `knowledge-entity`, `mail-entity`, `calendar-entity`, `reminder-core`, `notification-core`, `scheduler` — product-domain entities and deterministic stores/executors.
+- `identity-core`, `server-account-core`, `connector-runtime` — local identity, credentials, server bindings, OAuth/provider lifecycle, connector audit/offboarding boundaries.
+- `device-pairing-core`, `sync-runtime`, `p2p-sync-runtime` — device trust, sync manifests/merge, and P2P sync orchestration.
+- `person-entity`, `relationship-core`, `people-intelligence`, `server-search-core` — people/relationship/search policy domains.
 
-每个分段文件中的每一行都是一个序列化的 `ConversationEventEnvelope`。每个 envelope 包含 `schema_version`（当前为 `1`），以便持久化的事件格式可以有意识地演进。`manifest.json` 跟踪活跃分段和分段元数据，避免长对话产生单个不断增长的日志文件。
-
-### `conversation-kernel`
-
-命令处理、投影、上下文切片和本地分诊策略，包括：
-
-- `ConversationKernel`
-- `ConversationProjector`
-- `ConversationState`
-- `ConversationSliceBuilder`
-- `ConversationPolicy`
-- `RuleBasedPolicy`
-
-支持的命令：
-
-- `CreateConversationCommand` — 创建对话
-- `AppendMessageCommand` — 追加消息
-- `CreateAssistantSuggestionCommand` — 创建助手建议
-- `RequestAgentRunCommand` — 请求 Agent 运行
-- `CompleteAgentRunCommand` — 完成 Agent 运行
-
-### `agent-runtime`
-
-当前的运行时边界，用于纯文本 Agent 运行和确定性假动作提议。它桥接对话内核与 `model-adapter`，构建上下文，调用模型适配器，可选地检测动作提议，通过 `action-runtime` 路由动作，追加助手输出，并记录 Agent 运行生命周期事件。
-
-### `action-core`、`action-runtime`、`capability-policy` 和 `audit-log`
-
-动作执行管道的基础 crate。对话内核记录动作生命周期事件并投影动作状态。`action-runtime` 现在协调 `ActionRequest → ActionRegistry → CapabilityPolicy → ActionExecutor → AuditLog`，处理 Allow / Ask / Deny / 失败路径。具体的 Browser / Knowledge / Mail 执行器仍属于未来工作。
-
-### `conversation-runtime`
-
-已废弃的运行时边界，用于消费 `AgentRunRequested` 事件并将 Agent 输出写回对话。它已被 `agent-runtime` 取代。
-
-包括：
-
-- `AgentRunRequest`
-- `AgentRunOutput`
-- `AgentRunExecutor`
-- `FakeAgentRunExecutor`
-- `PendingAgentRun`
-- `ConversationRuntime`
-
-运行时可以列出待处理的运行、幂等处理运行、追加助手输出并标记运行完成。当前使用假的确定性执行器以确保可测试性。真实的本地或远程 LLM 应作为额外的 `AgentRunExecutor` 实现添加，而非在内核内部实现。
-
-### `entity-core`
-
-实体系统核心，定义可由对话引用的实体（如文件、URL、数据对象等）的领域类型。
-
-### `assistant-core`
-
-助手核心，定义助手角色、能力、配置等相关领域类型。
-
-### `model-adapter`
-
-模型适配器抽象层，为对话内核提供统一的 LLM 调用接口。包含：
-
-- `ModelAdapter` async trait — 统一 LLM 调用接口
-- `FakeModelAdapter` — 确定性假适配器，用于测试
-- `ModelRegistry` — 模型注册与解析
-- `OpenAiCompatibleAdapter` — 真实 LLM 适配器，支持所有 OpenAI Chat Completions API 兼容端点（DeepSeek、Qwen、OpenAI、vLLM、Ollama 等）
-- `OpenAiProviderConfig` — 支持从环境变量 `OPENAI_API_KEY`、`OPENAI_ENDPOINT`、`OPENAI_MODEL` 构建配置
-
-### `artifact-core`
-
-产物核心，定义对话过程中产生的结构化产物（如代码片段、图表、文件等）的领域类型。
-
-### `surface-core`
-
-界面核心，定义对话在不同界面上的展示方式和交互模型。
-
-### `asset-core`
-
-资产核心，定义可被对话引用的资产（如图片、文档、媒体等）的领域类型。
-
-### `asset-index`
-
-资产索引，提供资产的索引和检索能力。
-
-## 事件溯源流程
-
-```mermaid
-graph LR
-    Command[命令] --> Kernel[ConversationKernel]
-    Kernel --> Event[ConversationEventEnvelope]
-    Event --> Journal[ConversationJournal]
-    Journal --> Projector[ConversationProjector]
-    Projector --> State[ConversationState]
-    State --> SliceBuilder[ConversationSliceBuilder]
-    SliceBuilder --> Slice[ConversationSlice]
-    Kernel --> BoundaryEvent[AgentRunRequested]
-    BoundaryEvent --> Runtime[ConversationRuntime]
-    Runtime --> Executor[AgentRunExecutor]
-    Executor --> Output[AgentRunOutput]
-    Runtime --> AssistantMessage[助手消息]
-    Runtime --> Completed[AgentRunCompleted]
-```
-
-内核不直接调用模型。当需要 Agent 运行时，内核记录边界事件，如：
-
-- `ContextSliceBuilt`
-- `AgentRunRequested`
-
-`conversation-runtime` 通过 `AgentRunExecutor` 消费这些事件，追加助手输出消息，并记录 `AgentRunCompleted`。
-
-## 快速开始
-
-### 构建
+## Quick Start
 
 ```bash
 cargo build --workspace
-```
-
-### 测试
-
-```bash
 cargo test --workspace
 ```
 
-当前状态：
-
-```text
-519 个测试全部通过
-```
-
-### 格式化
+Run host examples:
 
 ```bash
-cargo fmt --all
+cargo run -p agentos-kernel --example minimal-cli-host
+cargo run -p agentos-kernel --example minimal-server-host
+cargo run -p agentos-kernel --example minimal-desktop-host
 ```
-
-### 代码检查
-
-```bash
-cargo clippy --workspace -- -D warnings
-```
-
 
 ## Release Checklist
 
-Run the one-command release gate from the repository root before cutting a release candidate:
+Run the release gate from the repository root before cutting or reviewing a release candidate:
 
 ```bash
 ./scripts/release-gate.sh
 ```
 
-The release gate performs the minimum M24 checklist in order:
+The release gate verifies:
 
-1. Docs check: verifies this README documents the release checklist command.
-2. Feature matrix check: verifies [docs/feature-matrix.md](docs/feature-matrix.md) exists and covers the stable public API boundary crates.
-3. Formatting: `cargo fmt --all --check`.
-4. Linting: `cargo clippy --workspace -- -D warnings`.
-5. Security checklist docs: verifies [docs/security-review-checklist.md](docs/security-review-checklist.md) exists and states that high-risk PRs must reference it.
-6. Commercial readiness docs: verifies [docs/v2-commercial-readiness-review.md](docs/v2-commercial-readiness-review.md) exists and states beta/commercial pilot entry conditions.
-7. Beta hardening docs: verifies [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md), [docs/host-api-freeze.md](docs/host-api-freeze.md), [docs/credential-operations-runbook.md](docs/credential-operations-runbook.md), [docs/credential-operations-rehearsal.md](docs/credential-operations-rehearsal.md), [docs/production-observability-policy.md](docs/production-observability-policy.md), [docs/release-operations-runbook.md](docs/release-operations-runbook.md), [docs/connector-browser-risk-review-templates.md](docs/connector-browser-risk-review-templates.md), [docs/connector-browser-commercial-review-evidence.md](docs/connector-browser-commercial-review-evidence.md), [docs/storage-journal-fixture-freeze-policy.md](docs/storage-journal-fixture-freeze-policy.md), and [docs/storage-journal-fixture-freeze-acceptance.md](docs/storage-journal-fixture-freeze-acceptance.md) exist.
-8. Tests: `cargo test --workspace`.
+1. Required stable documentation exists.
+2. Host API and feature-matrix docs remain discoverable.
+3. Host examples compile.
+4. Formatting passes: `cargo fmt --all --check`.
+5. Linting passes across normal, test, and example targets: `cargo clippy --workspace --all-targets -- -D warnings`.
+6. Tests pass: `cargo test --workspace`.
 
-## 最小示例
+For a stricter local preflight, run:
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
+
+Real provider smoke tests in `model-adapter` are ignored by default and require provider-specific environment variables. If those variables are missing, the ignored smoke tests print a skip message instead of failing.
+
+## Minimal Conversation Kernel Example
 
 ```rust
 use conversation_core::*;
@@ -313,108 +145,49 @@ async fn main() -> anyhow::Result<()> {
         .build_recent_window(&state, &message_id)?;
 
     println!("slice messages: {}", slice.messages.len());
-
     Ok(())
 }
 ```
 
-## 本地策略
-
-`RuleBasedPolicy` 是一个轻量级的本地分诊策略，可以检测应请求 Agent 运行的消息，例如：
-
-- 明确的提及
-- 帮助请求
-- 摘要请求
-- 分析请求
-- 解释请求
-
-此策略仅决定是否应请求 Agent 运行，不执行模型推理。
-
-## 测试策略
-
-项目采用分层测试方法：
-
-1. **核心类型测试**：序列化往返和领域不变量。
-2. **日志测试**：追加/加载顺序、JSONL 持久化、重新打开行为。
-3. **投影器测试**：从事件流进行确定性重放。
-4. **内核测试**：命令验证和发出的事件序列。
-5. **切片构建器测试**：近期窗口、线程、触发器中心和用户可见性过滤。
-6. **集成测试**：跨内核、日志、投影器、策略和切片构建器的完整生命周期流程。
-
-## 架构决策
-
-- [ADR 0001: 延迟实现每对话事件序列](./docs/adr/0001-defer-event-sequence.md)
-
-`sequence` 当前有意不包含在 `ConversationEventEnvelope` 中。只有在日志追加所有权和并发语义被明确后才会添加。
-
-## v0.1 非目标
-
-第一版有意**不**实现：
-
-- 生产级 LLM/模型推理
-- 浏览器控制
-- 插件执行
-- 长期记忆写入
-- 复杂摘要
-- 远程同步
-
-这些功能应作为事件流之上的层实现，而非内核内部。
-
-## 许可证
-
-Apache-2.0。详见 [LICENSE](./LICENSE)。
-
 ## Public API Stability Boundary
 
-M24 introduces the first explicit public API stability boundary for commercial hardening. M25 records the controlled-beta posture in [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md), and PR200 accepts the backend/macOS host-facing API freeze contract in [docs/host-api-freeze.md](docs/host-api-freeze.md). Release, credential, observability, connector/browser, and storage fixture decisions remain in dedicated runbooks. Storage/journal controlled-beta baseline evidence is tracked in [docs/storage-journal-fixture-freeze-acceptance.md](docs/storage-journal-fixture-freeze-acceptance.md). The goal is to make host-facing AgentOS integration points discoverable without freezing every internal crate detail too early.
+The current stable host/application integration boundary for the `0.1.x` line is maintained directly in this README and enforced by tests plus the release gate.
 
 ### Stable API
 
-The following APIs are considered stable for host/application integration within the current `0.1.x` line. They may grow additively, but breaking semantic or signature changes require a deprecation note first.
+Stable host-facing crates include:
 
 - `agentos-kernel`
-  - `KernelRuntimeBuilder`
-  - `KernelRuntime`, `KernelRuntimeState`, `KernelHealthReport`
-  - `KernelServices`
-  - `KernelHostApi`
-  - host request/response/error types re-exported from `agentos-kernel::host_api`
-  - diagnostics bundle types re-exported from `agentos-kernel::diagnostics`
-  - service registry traits re-exported from `agentos-kernel::registries`
 - `action-runtime`
-  - `ActionRuntime`
-  - `ProcessActionRequest`
-  - `ExecuteApprovedActionRequest`
-  - `ActionRuntimeOutcome`
-  - `ArtifactResolver`
-  - `ArtifactStoreResolver`
 - `audit-log`
-  - `AuditEvent`
-  - `AuditLog`
-  - `MemoryAuditSink`
-  - `JsonlAuditSink`
-  - `AuditQuery`, `AuditPagination`, `AuditQueryResult`, `AuditLogQueryExt`
-  - audit integrity types: `AuditIntegrityEnvelope`, `AuditIntegrityReport`, `AuditIntegrityIssue`, `AuditSegmentChecksum`
-  - enterprise audit sink/export types: `EnterpriseAuditSink`, `EnterpriseMirrorAuditLog`, `EnterpriseAuditBatch`, `EnterpriseAuditSinkResult`, `AuditExportRequest`, `AuditExportFormat`, `AuditExportManifest`, `AuditExport`, `AuditLogExportExt`
 - `enterprise-permission-core`
-  - identity/lifecycle types: `EnterpriseUserId`, `EnterpriseUserLifecycle`, `EnterpriseUserStatus`
-  - permission model types: `EnterpriseRole`, `ResourceType`, `ResourceId`, `PermissionAction`, `PermissionDecision`, `PermissionGrant`, `EnterpriseAssetPolicy`
-  - stores and provider boundaries: `PermissionStore`, `OrganizationalPermissionStore`, `RemotePermissionProvider`, `ServerBackedPermissionStore`, `ServerPermissionSnapshot`, `CachePolicy`, `CacheStatus`, `CachedPermissionDecision`
-  - organization/membership/offboarding types: `OrganizationId`, `TeamId`, `GroupId`, `Membership`, `MembershipType`, `OffboardingEvent`, `OffboardingEventKind`, `OffboardingEventStore`, `MemoryOffboardingEventStore`
+
+These APIs may grow additively. Breaking signature or semantic changes require an intentional migration path, compatibility coverage, and a release note unless the change is needed for a security/privacy fix.
 
 ### Unstable API
 
-The following areas remain internal or experimental. They can change without deprecation while the kernel is still converging:
+The following remain unstable unless specifically documented otherwise:
 
-- Module layout inside each crate, including private modules such as `agentos-kernel::{builder, runtime, services, host_api, diagnostics, registries}`.
-- Test-only fake providers, fixtures, and helper constructors that are not listed under Stable API.
-- Concrete resource extraction heuristics used by audit export permission filtering.
-- Internal diagnostics field additions where existing fields keep their meaning.
-- Any crate not explicitly listed in this Public API Stability Boundary section.
+- Internal module layout inside crates.
+- Test-only fakes, fixtures, and helper constructors.
+- Experimental domain crates and connector implementations.
+- Concrete heuristics for audit export filtering, browser evidence extraction, or diagnostics enrichment.
 
 ### Deprecation Policy
 
-- Stable APIs should prefer additive evolution: new fields, enum variants, builder options, and trait extension methods are allowed when existing callers keep compiling.
-- Breaking changes to stable APIs require a documented deprecation period in this README or crate-level rustdoc before removal or signature changes.
-- Deprecated stable APIs should remain available for at least one subsequent roadmap PR unless they are unsound or create a security/privacy issue.
-- Security fixes may bypass the normal deprecation period, but the replacement API and migration path must be documented in the same PR.
-- Unstable APIs may change at any time; callers should wrap them behind application-local adapters if they need longer-term compatibility.
+Deprecated stable APIs must remain available for at least one subsequent roadmap PR before removal unless removal is required for a security/privacy issue. Deprecated compatibility code that is not part of the stable host-facing boundary may be removed once current `agent-runtime` / `agentos-kernel` coverage and release gates pass. The old event-consumer conversation runtime crate has been removed; new integrations should use `agent-runtime` and `agentos-kernel`.
+
+## Testing Strategy
+
+The workspace uses layered tests:
+
+1. Domain serialization and invariant tests.
+2. Journal/storage append, reload, fixture, and integrity tests.
+3. Projector and kernel command lifecycle tests.
+4. Runtime, policy, action, approval, and audit orchestration tests.
+5. Host API, diagnostics, release-gate, and example compile tests.
+6. Provider compatibility tests with deterministic mocks plus optional ignored real-provider smoke tests.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

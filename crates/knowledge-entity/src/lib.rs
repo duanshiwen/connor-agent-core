@@ -4875,8 +4875,6 @@ mod tests {
 
     #[tokio::test]
     async fn permission_aware_citation_filters_unauthorized_evidence() {
-        use enterprise_permission_core::{EnterpriseRole, PermissionGrant, ResourceId};
-
         let store_inner = MemoryCitationEvidenceStore::new();
         let evidence = store_inner
             .register_evidence(

@@ -1924,7 +1924,7 @@ mod tests {
 
         // Verify agent run is completed.
         let run_state = state.agent_runs.get(&run_id).unwrap();
-        assert!(matches!(run_state.status, AgentRunStatus::Completed { .. }));
+        assert!(matches!(run_state.status, AgentRunStatus::Completed));
     }
 
     #[tokio::test]
@@ -2017,7 +2017,7 @@ mod tests {
         // Verify agent run is failed in state.
         let state = kernel.load_state(&conv_id).await.unwrap();
         let run_state = state.agent_runs.get(&run_id).unwrap();
-        assert!(matches!(run_state.status, AgentRunStatus::Failed { .. }));
+        assert!(matches!(run_state.status, AgentRunStatus::Failed));
     }
 
     #[tokio::test]

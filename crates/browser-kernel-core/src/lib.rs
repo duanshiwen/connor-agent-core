@@ -6508,7 +6508,7 @@ mod tests {
         let profile = storage.create_temporary().unwrap();
         assert!(profile.is_temporary);
         assert!(profile.path.exists());
-        assert!(profile.name.len() > 0);
+        assert!(!profile.name.is_empty());
     }
 
     #[test]

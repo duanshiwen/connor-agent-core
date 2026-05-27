@@ -159,10 +159,18 @@ fn provider_configs_can_be_built_from_mock_matrix() {
 #[tokio::test]
 #[ignore = "real provider smoke test; enable manually with AGENTOS_OPENAI_COMPAT_SMOKE_URL"]
 async fn real_openai_compatible_smoke_is_env_gated() {
-    let smoke_url = std::env::var("AGENTOS_OPENAI_COMPAT_SMOKE_URL")
-        .expect("AGENTOS_OPENAI_COMPAT_SMOKE_URL must be set for real smoke tests");
-    let api_key = std::env::var("AGENTOS_OPENAI_COMPAT_SMOKE_API_KEY")
-        .expect("AGENTOS_OPENAI_COMPAT_SMOKE_API_KEY must be set for real smoke tests");
+    let Ok(smoke_url) = std::env::var("AGENTOS_OPENAI_COMPAT_SMOKE_URL") else {
+        eprintln!(
+            "skipping real OpenAI-compatible smoke test: AGENTOS_OPENAI_COMPAT_SMOKE_URL is not set"
+        );
+        return;
+    };
+    let Ok(api_key) = std::env::var("AGENTOS_OPENAI_COMPAT_SMOKE_API_KEY") else {
+        eprintln!(
+            "skipping real OpenAI-compatible smoke test: AGENTOS_OPENAI_COMPAT_SMOKE_API_KEY is not set"
+        );
+        return;
+    };
     let model = std::env::var("AGENTOS_OPENAI_COMPAT_SMOKE_MODEL")
         .unwrap_or_else(|_| "test-model".to_string());
 
@@ -174,10 +182,14 @@ async fn real_openai_compatible_smoke_is_env_gated() {
 #[tokio::test]
 #[ignore = "real provider smoke test; enable manually with AGENTOS_ANTHROPIC_SMOKE_URL"]
 async fn real_anthropic_smoke_is_env_gated() {
-    let base_url = std::env::var("AGENTOS_ANTHROPIC_SMOKE_URL")
-        .expect("AGENTOS_ANTHROPIC_SMOKE_URL must be set for real smoke tests");
-    let api_key = std::env::var("AGENTOS_ANTHROPIC_SMOKE_API_KEY")
-        .expect("AGENTOS_ANTHROPIC_SMOKE_API_KEY must be set for real smoke tests");
+    let Ok(base_url) = std::env::var("AGENTOS_ANTHROPIC_SMOKE_URL") else {
+        eprintln!("skipping real Anthropic smoke test: AGENTOS_ANTHROPIC_SMOKE_URL is not set");
+        return;
+    };
+    let Ok(api_key) = std::env::var("AGENTOS_ANTHROPIC_SMOKE_API_KEY") else {
+        eprintln!("skipping real Anthropic smoke test: AGENTOS_ANTHROPIC_SMOKE_API_KEY is not set");
+        return;
+    };
     let default_model = std::env::var("AGENTOS_ANTHROPIC_SMOKE_MODEL")
         .unwrap_or_else(|_| "claude-test".to_string());
 

@@ -410,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn store_list_unread() {
         let store = MemoryNotificationStore::new();
-        let mut n1 = sample_notification("n-1");
+        let n1 = sample_notification("n-1");
         store.save(&n1).await.unwrap();
         let n2 = sample_notification("n-2");
         store.save(&n2).await.unwrap();

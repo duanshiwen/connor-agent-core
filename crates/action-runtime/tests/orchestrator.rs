@@ -218,6 +218,7 @@ async fn process_action(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_action_with_artifact_resolver(
     kernel: &ConversationKernel,
     registry: &ActionRegistry,
@@ -242,6 +243,7 @@ async fn process_action_with_artifact_resolver(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_action_with_input(
     kernel: &ConversationKernel,
     registry: &ActionRegistry,

@@ -41,7 +41,7 @@ fn write_legacy_v1_journal_fixture(root: &std::path::Path, conversation_id: &str
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    let bytes = jsonl.as_bytes().len() as u64;
+    let bytes = jsonl.len() as u64;
     std::fs::write(segments_dir.join("00000000000000000000.jsonl"), jsonl).unwrap();
 
     // Legacy v1 fixture intentionally omits checksum fields. Current loader accepts this

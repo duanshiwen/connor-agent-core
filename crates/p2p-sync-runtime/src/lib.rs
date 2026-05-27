@@ -743,6 +743,10 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(outcome.peer_device, device_b());
+        assert_eq!(outcome.diff.conflicting, vec![SyncObjectId::from("obj-1")]);
+        assert_eq!(outcome.objects_received, 1);
+
         // After sync, local should have the newer version
         let record = local.get(&SyncObjectId::from("obj-1")).unwrap();
         assert_eq!(record.version_hash, "hash-new");

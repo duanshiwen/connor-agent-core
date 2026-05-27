@@ -81,8 +81,7 @@ async fn create_conversation(
     host: &KernelHostApi,
     desktop_user: ParticipantId,
 ) -> anyhow::Result<ConversationId> {
-    Ok(host
-        .runtime()
+    host.runtime()
         .services()
         .conversation_kernel
         .create_conversation(CreateConversationCommand {
@@ -95,7 +94,7 @@ async fn create_conversation(
             }],
             actor_id: Some(desktop_user),
         })
-        .await?)
+        .await
 }
 
 fn action_request(
