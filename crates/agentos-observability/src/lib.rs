@@ -257,6 +257,95 @@ pub struct JsonlObservabilityFileSink {
     retention_days: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservabilityAccessRole {
+    Operator,
+    Admin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryRetentionPolicy {
+    pub max_retention_days: u32,
+    pub cleanup_job_documented: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryAccessPolicy {
+    pub minimum_role: ObservabilityAccessRole,
+    pub tenant_partitioning_required: bool,
+    pub incident_access_audit_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugBundleAccessWorkflow {
+    pub named_incident_required: bool,
+    pub operator_approval_required: bool,
+    pub secret_scan_required: bool,
+    pub expiration_required: bool,
+    pub access_audit_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PilotObservabilityOperationsDrill {
+    pub export_metadata: ObservabilityExportMetadata,
+    pub retention_policy: TelemetryRetentionPolicy,
+    pub access_policy: TelemetryAccessPolicy,
+    pub debug_bundle_workflow: DebugBundleAccessWorkflow,
+}
+
+impl PilotObservabilityOperationsDrill {
+    pub fn readiness_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+
+        if self.export_metadata.export_mode != "file" {
+            blockers.push("production-like file export sink is not selected".to_string());
+        }
+        if self.export_metadata.redaction.trim().is_empty() {
+            blockers.push("export redaction metadata is missing".to_string());
+        }
+        if self.retention_policy.max_retention_days == 0 {
+            blockers.push("retention period must be greater than zero days".to_string());
+        }
+        if self.retention_policy.max_retention_days > self.export_metadata.retention_days {
+            blockers.push("retention policy exceeds export sink retention metadata".to_string());
+        }
+        if !self.retention_policy.cleanup_job_documented {
+            blockers.push("retention cleanup job is not documented".to_string());
+        }
+        if self.access_policy.minimum_role < ObservabilityAccessRole::Admin {
+            blockers.push("telemetry export access must require admin role".to_string());
+        }
+        if !self.access_policy.tenant_partitioning_required {
+            blockers.push("tenant partitioning is not required".to_string());
+        }
+        if !self.access_policy.incident_access_audit_required {
+            blockers.push("incident access audit is not required".to_string());
+        }
+        if !self.debug_bundle_workflow.named_incident_required {
+            blockers.push("debug bundle workflow does not require a named incident".to_string());
+        }
+        if !self.debug_bundle_workflow.operator_approval_required {
+            blockers.push("debug bundle workflow does not require operator approval".to_string());
+        }
+        if !self.debug_bundle_workflow.secret_scan_required {
+            blockers.push("debug bundle secret scan is not required".to_string());
+        }
+        if !self.debug_bundle_workflow.expiration_required {
+            blockers.push("debug bundle expiration is not required".to_string());
+        }
+        if !self.debug_bundle_workflow.access_audit_required {
+            blockers.push("debug bundle access audit is not required".to_string());
+        }
+
+        blockers
+    }
+
+    pub fn is_ready_for_commercial_pilot(&self) -> bool {
+        self.readiness_blockers().is_empty()
+    }
+}
+
 impl JsonlObservabilityFileSink {
     pub fn open(
         export_root: impl AsRef<Path>,

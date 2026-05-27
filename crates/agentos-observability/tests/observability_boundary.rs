@@ -1,7 +1,9 @@
 use agentos_kernel::KernelErrorCategory;
 use agentos_observability::{
-    InMemoryObservabilitySink, JsonlObservabilityFileSink, MetricKind, MetricSample,
-    ObservabilityEventKind, ObservabilityRedactor, RedactionPolicy, TraceEvent,
+    DebugBundleAccessWorkflow, InMemoryObservabilitySink, JsonlObservabilityFileSink, MetricKind,
+    MetricSample, ObservabilityAccessRole, ObservabilityEventKind, ObservabilityRedactor,
+    PilotObservabilityOperationsDrill, RedactionPolicy, TelemetryAccessPolicy,
+    TelemetryRetentionPolicy, TraceEvent,
 };
 use chrono::{TimeZone, Utc};
 use serde_json::json;
@@ -134,4 +136,69 @@ fn jsonl_file_sink_exports_redacted_traces_and_metrics() {
 
     let metric_jsonl = std::fs::read_to_string(temp_dir.path().join("metrics.jsonl")).unwrap();
     assert!(metric_jsonl.contains("connector.read.completed"));
+}
+
+#[test]
+fn pilot_observability_operations_drill_requires_retention_access_and_incident_workflow() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sink = JsonlObservabilityFileSink::open_with_retention(
+        temp_dir.path(),
+        RedactionPolicy::default(),
+        14,
+    )
+    .expect("file sink should open under host-owned export root");
+
+    let incomplete = PilotObservabilityOperationsDrill {
+        export_metadata: sink.export_metadata(),
+        retention_policy: TelemetryRetentionPolicy {
+            max_retention_days: 14,
+            cleanup_job_documented: false,
+        },
+        access_policy: TelemetryAccessPolicy {
+            minimum_role: ObservabilityAccessRole::Operator,
+            tenant_partitioning_required: true,
+            incident_access_audit_required: true,
+        },
+        debug_bundle_workflow: DebugBundleAccessWorkflow {
+            named_incident_required: true,
+            operator_approval_required: true,
+            secret_scan_required: false,
+            expiration_required: true,
+            access_audit_required: true,
+        },
+    };
+    assert!(!incomplete.is_ready_for_commercial_pilot());
+    assert!(
+        incomplete
+            .readiness_blockers()
+            .contains(&"retention cleanup job is not documented".to_string())
+    );
+    assert!(
+        incomplete
+            .readiness_blockers()
+            .contains(&"debug bundle secret scan is not required".to_string())
+    );
+
+    let ready = PilotObservabilityOperationsDrill {
+        retention_policy: TelemetryRetentionPolicy {
+            max_retention_days: 14,
+            cleanup_job_documented: true,
+        },
+        access_policy: TelemetryAccessPolicy {
+            minimum_role: ObservabilityAccessRole::Admin,
+            tenant_partitioning_required: true,
+            incident_access_audit_required: true,
+        },
+        debug_bundle_workflow: DebugBundleAccessWorkflow {
+            named_incident_required: true,
+            operator_approval_required: true,
+            secret_scan_required: true,
+            expiration_required: true,
+            access_audit_required: true,
+        },
+        ..incomplete
+    };
+
+    assert!(ready.is_ready_for_commercial_pilot());
+    assert!(ready.readiness_blockers().is_empty());
 }

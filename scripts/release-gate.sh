@@ -29,6 +29,8 @@ grep -q "## Host-Level Pilot Rehearsal Evidence" docs/credential-operations-rehe
 test -f docs/production-observability-policy.md
 grep -q "## Redaction Requirements" docs/production-observability-policy.md
 grep -q "## Production-Like File Export Sink" docs/production-observability-policy.md
+grep -q "## PR211 Pilot Observability Operations Drill" docs/production-observability-policy.md
+grep -q "PilotObservabilityOperationsDrill" docs/production-observability-policy.md
 test -f docs/release-operations-runbook.md
 grep -q "## Rollback Decision Tree" docs/release-operations-runbook.md
 test -f docs/release-artifact-rollback-rehearsal.md

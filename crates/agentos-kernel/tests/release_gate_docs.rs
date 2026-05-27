@@ -49,6 +49,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
         "release gate must include PR203 production observability file sink checks"
     );
     assert!(
+        script.contains("PR211 Pilot Observability Operations Drill"),
+        "release gate must include PR211 observability operations drill checks"
+    );
+    assert!(
         script.contains("docs/release-artifact-rollback-rehearsal.md")
             && script.contains("Release Artifact Rehearsal")
             && script.contains("Rollback Rehearsal Evidence"),
@@ -301,5 +305,36 @@ fn browser_pilot_permission_profile_records_pr209_evidence() {
             "PR209: Browser Pilot Permission Contract or Pilot Disable Profile ✅ Completed"
         ),
         "commercial pilot readiness plan must mark PR209 complete"
+    );
+}
+
+#[test]
+fn observability_operations_drill_records_pr211_evidence() {
+    let root = workspace_root();
+    let policy = fs::read_to_string(root.join("docs/production-observability-policy.md"))
+        .expect("production observability policy should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## PR211 Pilot Observability Operations Drill",
+        "PilotObservabilityOperationsDrill",
+        "TelemetryRetentionPolicy",
+        "TelemetryAccessPolicy",
+        "DebugBundleAccessWorkflow",
+        "admin-only telemetry export access",
+        "pilot_observability_operations_drill_requires_retention_access_and_incident_workflow",
+    ] {
+        assert!(
+            policy.contains(required),
+            "PR211 observability operations drill evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains(
+            "PR211: Production Telemetry Retention and Access-Control Enforcement ✅ Completed"
+        ),
+        "commercial pilot readiness plan must mark PR211 complete"
     );
 }

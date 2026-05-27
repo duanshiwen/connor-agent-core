@@ -94,6 +94,33 @@ Evidence command:
 cargo test -p agentos-observability jsonl_file_sink_exports_redacted_traces_and_metrics
 ```
 
+## PR211 Pilot Observability Operations Drill
+
+PR211 promotes the PR203 JSONL file sink from export capability to pilot operations evidence. The selected first-pilot posture is a host-owned local file export with explicit retention, access-control, cleanup, and incident/debug-bundle workflow requirements.
+
+Operational contract:
+
+- `PilotObservabilityOperationsDrill` records the selected export metadata, retention policy, access policy, and debug-bundle workflow.
+- `TelemetryRetentionPolicy` must set a positive retention period no greater than the file sink `retention_days`, and the host cleanup job must be documented.
+- `TelemetryAccessPolicy` requires admin-only telemetry export access, tenant partitioning, and host audit logging for incident access.
+- `DebugBundleAccessWorkflow` requires a named incident, operator approval, secret scan/redaction pass, expiration, and access audit before raw trace/debug attachments are retained.
+- `readiness_blockers()` returns deterministic blocker strings so release, support, and host-product reviews can fail closed before pilot if an operations requirement is missing.
+
+Pilot operations drill evidence:
+
+- Selected export mode: `file` via `JsonlObservabilityFileSink`.
+- Retention: 14 days for the first pilot file sink metadata unless host policy sets a shorter value.
+- Cleanup: host-owned scheduled cleanup job required before pilot acceptance.
+- Access: admin-only export access; incident access must be audited by the host product.
+- Debug bundle workflow: named incident + operator approval + secret scan + expiration + access audit.
+- Redaction: trace attributes redacted before JSONL write; raw connector/browser/model content remains excluded by default.
+
+Evidence command:
+
+```bash
+cargo test -p agentos-observability pilot_observability_operations_drill_requires_retention_access_and_incident_workflow
+```
+
 ## Debug Bundle Attachments
 
 Debug bundles may attach redacted trace summaries. Raw trace attachments require:

@@ -446,7 +446,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - Captured DOM/screenshot/network artifacts follow retention/redaction policy.
 - Release gate passes.
 
-### PR211: Production Telemetry Retention and Access-Control Enforcement
+### PR211: Production Telemetry Retention and Access-Control Enforcement ✅ Completed
 
 **Goal:** Ensure observability data can be used in pilot operations without becoming a privacy/security liability.
 
@@ -456,20 +456,22 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - Redaction policy.
 - Observability schema and in-memory sink.
 - Diagnostics bundle.
+- PR203 `JsonlObservabilityFileSink` production-like file export sink.
 
 **Deliverables:**
 
-- Retention configuration for file/export sink.
-- Access-control expectations for diagnostics/trace export.
-- Tests for retention pruning or retention metadata.
-- Tests proving sensitive values are redacted in exported telemetry.
-- Update observability policy.
+- ✅ Retention configuration for file/export sink: `TelemetryRetentionPolicy` checked against sink `retention_days` metadata.
+- ✅ Access-control expectations for diagnostics/trace export: `TelemetryAccessPolicy` requires admin-only export access, tenant partitioning, and incident access audit.
+- ✅ Tests for retention pruning or retention metadata: `pilot_observability_operations_drill_requires_retention_access_and_incident_workflow` verifies retention metadata and cleanup-job documentation requirements.
+- ✅ Tests proving sensitive values are redacted in exported telemetry: PR203 `jsonl_file_sink_exports_redacted_traces_and_metrics` remains release-gated; PR211 requires redaction metadata before pilot readiness.
+- ✅ Update observability policy: `## PR211 Pilot Observability Operations Drill`.
 
 **Acceptance:**
 
-- Pilot telemetry has documented retention and access semantics.
-- Exported traces/metrics remain redacted.
-- Release gate passes.
+- ✅ Pilot telemetry has documented retention and access semantics.
+- ✅ Exported traces/metrics remain redacted and debug bundles require named incident, operator approval, secret scan, expiration, and access audit.
+- ✅ `cargo test -p agentos-observability pilot_observability_operations_drill_requires_retention_access_and_incident_workflow` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR212: Pilot Release, Rollback, and Incident Exercise
 
