@@ -59,6 +59,12 @@ fn release_gate_script_documents_and_runs_required_checks() {
         "release gate must include PR204 release artifact and rollback rehearsal evidence checks"
     );
     assert!(
+        script.contains("docs/pilot-release-rollback-incident-exercise.md")
+            && script.contains("Pilot Release Candidate Exercise")
+            && script.contains("Pilot Incident Exercise"),
+        "release gate must include PR212 pilot release/rollback/incident exercise checks"
+    );
+    assert!(
         script.contains("Commercial-Pilot Fixture Freeze Acceptance")
             && script.contains("Long-Lived Fixture Support Policy")
             && script.contains("Migration Release Note Template"),
@@ -336,5 +342,37 @@ fn observability_operations_drill_records_pr211_evidence() {
             "PR211: Production Telemetry Retention and Access-Control Enforcement ✅ Completed"
         ),
         "commercial pilot readiness plan must mark PR211 complete"
+    );
+}
+
+#[test]
+fn pilot_release_rollback_incident_exercise_records_pr212_evidence() {
+    let root = workspace_root();
+    let exercise =
+        fs::read_to_string(root.join("docs/pilot-release-rollback-incident-exercise.md"))
+            .expect("pilot release rollback incident exercise evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## Pilot Release Candidate Exercise",
+        "## Pilot Rollback Exercise",
+        "## Pilot Incident Exercise",
+        "## Go/No-Go Inputs",
+        "v0.1.0-pilot.0-exercise",
+        "release gate passed",
+        "storage/journal fixture baseline accepted",
+        "S0 credential leak or data-loss scenario",
+        "S1 telemetry redaction or audit export failure scenario",
+    ] {
+        assert!(
+            exercise.contains(required),
+            "PR212 pilot exercise evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains("PR212: Pilot Release, Rollback, and Incident Exercise ✅ Completed"),
+        "commercial pilot readiness plan must mark PR212 complete"
     );
 }

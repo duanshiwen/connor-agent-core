@@ -37,6 +37,10 @@ test -f docs/release-artifact-rollback-rehearsal.md
 grep -q "## Release Artifact Rehearsal" docs/release-artifact-rollback-rehearsal.md
 grep -q "## Rollback Rehearsal Evidence" docs/release-artifact-rollback-rehearsal.md
 grep -q "## Incident Escalation Tabletop" docs/release-artifact-rollback-rehearsal.md
+test -f docs/pilot-release-rollback-incident-exercise.md
+grep -q "## Pilot Release Candidate Exercise" docs/pilot-release-rollback-incident-exercise.md
+grep -q "## Pilot Rollback Exercise" docs/pilot-release-rollback-incident-exercise.md
+grep -q "## Pilot Incident Exercise" docs/pilot-release-rollback-incident-exercise.md
 test -f docs/connector-browser-risk-review-templates.md
 grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-review-templates.md
 test -f docs/connector-browser-commercial-review-evidence.md

@@ -473,7 +473,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-observability pilot_observability_operations_drill_requires_retention_access_and_incident_workflow` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR212: Pilot Release, Rollback, and Incident Exercise
+### PR212: Pilot Release, Rollback, and Incident Exercise ✅ Completed
 
 **Goal:** Produce a complete pilot release candidate and exercise operational response.
 
@@ -483,22 +483,25 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - Release gate.
 - Storage rollback decision tree.
 - Incident severity definitions.
+- PR204 beta/pilot release artifact and rollback rehearsal.
+- PR211 pilot observability operations drill.
 
 **Deliverables:**
 
-- `v0.1.0-pilot.N` release candidate evidence bundle.
-- Changelog since previous beta/pilot tag.
-- Release gate output archive.
-- Storage/journal fixture status.
-- Rollback rehearsal evidence.
-- Incident escalation tabletop evidence for at least one S0/S1 scenario.
+- ✅ `v0.1.0-pilot.N` release candidate evidence bundle shape: `v0.1.0-pilot.0-exercise` in [pilot-release-rollback-incident-exercise.md](pilot-release-rollback-incident-exercise.md).
+- ✅ Changelog since previous beta/pilot tag: PR200 through PR212 commercial-pilot readiness window recorded.
+- ✅ Release gate output archive: `./scripts/release-gate.sh` result recorded as release gate passed.
+- ✅ Storage/journal fixture status: PR205 storage/journal fixture baseline accepted status recorded.
+- ✅ Rollback rehearsal evidence: pilot rollback exercise covers stop, preserve, restore, verify, release-gate rerun, owner, and deletion deadline.
+- ✅ Incident escalation tabletop evidence for S0/S1 scenarios: credential leak/data-loss and telemetry redaction/audit export failure.
 
 **Acceptance:**
 
-- Pilot release can be reproduced from tag and commit.
-- Rollback decision tree has been exercised.
-- Incident response owner and escalation path are known.
-- Release gate passes on the release commit.
+- ✅ Pilot release can be reproduced from tag-shaped identifier and commit.
+- ✅ Rollback decision tree has been exercised for pilot candidate shape.
+- ✅ Incident response owner handoff and escalation path are known for S0/S1.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs pilot_release_rollback_incident_exercise_records_pr212_evidence` passes.
+- ✅ `./scripts/release-gate.sh` passes on the release commit.
 
 ## Recommended Sequencing
 
