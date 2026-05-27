@@ -103,6 +103,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-observability"
+version = "0.1.0"
+dependencies = [
+ "agentos-kernel",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "agentos-storage"
 version = "0.1.0"
 dependencies = [
