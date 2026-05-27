@@ -56,6 +56,7 @@ Recent completed evidence PRs:
 - PR197: Connector/browser commercial review evidence.
 - PR198: Storage/journal fixture freeze acceptance evidence.
 - PR199: Browser irreversible side-effect approval/deny/audit evidence for click/type/fill/upload/download and upload/download schema registration.
+- PR200: Host API freeze contract accepted for backend/macOS integration and release-gate-checkable via [host-api-freeze.md](host-api-freeze.md).
 
 The full release gate passed after PR199.
 
@@ -110,7 +111,7 @@ The pilot release candidate should satisfy all controlled beta criteria plus the
 
 The plan below assumes the target is commercial pilot, not only controlled beta.
 
-### PR200: Beta/Commercial Host API Freeze Acceptance
+### PR200: Beta/Commercial Host API Freeze Acceptance ✅ Completed
 
 **Goal:** Turn the current stable boundary into an explicit host integration contract for backend and macOS client teams.
 
@@ -123,20 +124,23 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Deliverables:**
 
-- New `docs/host-api-freeze.md` or equivalent section documenting:
+- ✅ New [host-api-freeze.md](host-api-freeze.md) documenting:
   - stable crates;
   - stable host-facing types;
   - allowed additive changes;
   - breaking-change/deprecation policy;
   - unstable crates/features outside the pilot contract.
-- README update linking the freeze contract.
-- Release gate check that the host API freeze doc exists.
-- Compatibility test or doc test showing host-facing entry points compile.
+- ✅ README update linking the freeze contract.
+- ✅ Feature matrix update linking the freeze contract and commercial pilot plan.
+- ✅ Release gate check that the host API freeze doc and commercial pilot readiness plan exist.
+- ✅ Doc tests requiring the freeze contract from README, feature matrix, and release gate.
 
 **Acceptance:**
 
-- `./scripts/release-gate.sh` passes.
-- Backend/macOS host owners can identify exactly which crate APIs are safe to depend on.
+- ✅ `cargo test -p agentos-kernel --test public_api_docs host_api_freeze_document_records_beta_commercial_contract` passes.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs release_gate_script_documents_and_runs_required_checks` passes.
+- ✅ `./scripts/release-gate.sh` passes.
+- ✅ Backend/macOS host owners can identify exactly which crate APIs are safe to depend on.
 
 ### PR201: Backend and macOS Host Integration Examples
 

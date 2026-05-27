@@ -13,6 +13,13 @@ test -f docs/v2-commercial-readiness-review.md
 grep -q "## Commercial Pilot Entry Conditions" docs/v2-commercial-readiness-review.md
 test -f docs/m24-beta-hardening-decision.md
 grep -q "## Remaining Gap Disposition" docs/m24-beta-hardening-decision.md
+test -f docs/host-api-freeze.md
+grep -q "## Stable Host-Facing Boundary" docs/host-api-freeze.md
+grep -q "## Compatibility Rules" docs/host-api-freeze.md
+grep -q "## Pilot Acceptance Status" docs/host-api-freeze.md
+test -f docs/commercial-pilot-readiness-plan.md
+grep -q "## Proposed PR Plan" docs/commercial-pilot-readiness-plan.md
+grep -q "PR200: Beta/Commercial Host API Freeze Acceptance" docs/commercial-pilot-readiness-plan.md
 test -f docs/credential-operations-runbook.md
 grep -q "## Offboarding Sequence" docs/credential-operations-runbook.md
 test -f docs/credential-operations-rehearsal.md
@@ -39,6 +46,8 @@ grep -q "action-runtime" docs/feature-matrix.md
 grep -q "audit-log" docs/feature-matrix.md
 grep -q "enterprise-permission-core" docs/feature-matrix.md
 grep -q "m24-beta-hardening-decision" docs/feature-matrix.md
+grep -q "host-api-freeze.md" docs/feature-matrix.md
+grep -q "commercial-pilot-readiness-plan.md" docs/feature-matrix.md
 grep -q "storage-journal-fixture-freeze-policy" docs/feature-matrix.md
 grep -q "storage-journal-fixture-freeze-acceptance" docs/feature-matrix.md
 grep -q "credential-operations-rehearsal" docs/feature-matrix.md

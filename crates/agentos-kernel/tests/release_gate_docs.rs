@@ -31,6 +31,11 @@ fn release_gate_script_documents_and_runs_required_checks() {
         "release gate must include a feature matrix check"
     );
     assert!(
+        script.contains("docs/host-api-freeze.md")
+            && script.contains("Stable Host-Facing Boundary"),
+        "release gate must include host API freeze contract checks"
+    );
+    assert!(
         script.contains("Release Checklist"),
         "release gate must include a docs check for release checklist docs"
     );

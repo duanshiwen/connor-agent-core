@@ -14,6 +14,8 @@ This matrix records the minimum release-gate coverage for the stable public API 
 Controlled beta is governed by:
 
 - [m24-beta-hardening-decision.md](m24-beta-hardening-decision.md)
+- [host-api-freeze.md](host-api-freeze.md)
+- [commercial-pilot-readiness-plan.md](commercial-pilot-readiness-plan.md)
 - [credential-operations-runbook.md](credential-operations-runbook.md)
 - [credential-operations-rehearsal.md](credential-operations-rehearsal.md)
 - [production-observability-policy.md](production-observability-policy.md)
