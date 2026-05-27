@@ -23,6 +23,7 @@ The workspace is intentionally layered. Domain crates define stable data and pol
 ### Agent and Model Layer
 
 - `agent-runtime` — current agent run processor, context building, tool/action proposal routing, retry/run/action stores, approval queues, checkpoints.
+- `client-substrate` — commercial client facade with typed commands/events, UI projections, and conservative safety defaults.
 - `model-adapter` — model provider abstraction plus OpenAI-compatible and Anthropic adapters, streaming/tool call support, token budgeting, and fake adapters.
 - `assistant-core` — assistant profiles, capabilities, preferences, and conversation helpers.
 
@@ -75,20 +76,29 @@ Run the release gate from the repository root before cutting or reviewing a rele
 
 The release gate verifies:
 
-1. Required stable documentation exists.
-2. Host API and feature-matrix docs remain discoverable.
-3. Host examples compile.
-4. Formatting passes: `cargo fmt --all --check`.
-5. Linting passes across normal, test, and example targets: `cargo clippy --workspace --all-targets -- -D warnings`.
-6. Tests pass: `cargo test --workspace`.
+1. README release checklist remains discoverable.
+2. Host examples compile.
+3. Formatting passes: `cargo fmt --all --check`.
+4. Linting passes across normal, test, and example targets: `cargo clippy --workspace --all-targets -- -D warnings`.
+5. Tests pass: `cargo test --workspace`.
+6. Fast commercial-client substrate smoke passes: `./scripts/perf-smoke-gate.sh`.
 
 For a stricter local preflight, run:
 
 ```bash
 cargo fmt --all -- --check
+cargo check -p client-substrate --all-targets
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+./scripts/perf-smoke-gate.sh
+```
+
+Real provider and connector smoke tests are optional because they require external accounts and secrets. Use these only in an environment configured for real integrations:
+
+```bash
+./scripts/provider-smoke-gate.sh
+./scripts/connector-smoke-gate.sh
 ```
 
 Real provider smoke tests in `model-adapter` are ignored by default and require provider-specific environment variables. If those variables are missing, the ignored smoke tests print a skip message instead of failing.

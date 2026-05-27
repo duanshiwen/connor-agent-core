@@ -13,6 +13,9 @@ cargo check -p agentos-kernel --example minimal-cli-host
 cargo check -p agentos-kernel --example minimal-server-host
 cargo check -p agentos-kernel --example minimal-desktop-host
 
+echo "==> cargo check client substrate"
+cargo check -p client-substrate --all-targets
+
 echo "==> cargo fmt --all --check"
 cargo fmt --all --check
 
@@ -21,5 +24,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
 cargo test --workspace
+
+echo "==> perf smoke gate"
+./scripts/perf-smoke-gate.sh
 
 echo "release gate passed"

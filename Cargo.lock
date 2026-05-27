@@ -482,6 +482,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "client-substrate"
+version = "0.1.0"
+dependencies = [
+ "action-core",
+ "action-runtime",
+ "agentos-kernel",
+ "anyhow",
+ "async-trait",
+ "audit-log",
+ "capability-policy",
+ "chrono",
+ "conversation-core",
+ "conversation-journal",
+ "conversation-kernel",
+ "model-adapter",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "connector-runtime"
 version = "0.1.0"
 dependencies = [
