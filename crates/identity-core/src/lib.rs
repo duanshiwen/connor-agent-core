@@ -13,6 +13,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -588,6 +589,8 @@ pub enum CredentialError {
     BackendUnavailable(String),
     #[error("credential encryption unavailable: {0}")]
     EncryptionUnavailable(String),
+    #[error("credential io error: {0}")]
+    Io(String),
     #[error("credential internal error: {0}")]
     Internal(String),
 }
@@ -1091,54 +1094,175 @@ impl MacOsKeychainBackend for SystemMacOsKeychainBackend {
     }
 }
 
-/// Skeleton for encrypted file credential storage.
+/// File-backed encrypted credential storage.
 ///
-/// PR98 intentionally does not implement real filesystem persistence or encryption.
-pub struct EncryptedFileCredentialStore {
-    path: String,
+/// The file contains an encrypted JSON document. Metadata and secrets are encrypted together,
+/// while `list_metadata` only returns decrypted metadata and never exposes secret values.
+pub struct EncryptedFileCredentialStore<C> {
+    path: PathBuf,
+    cipher: C,
+    lock: Mutex<()>,
 }
 
-impl EncryptedFileCredentialStore {
-    pub fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+impl<C> EncryptedFileCredentialStore<C>
+where
+    C: CredentialCipher,
+{
+    pub fn new(path: impl Into<PathBuf>, cipher: C) -> Self {
+        Self {
+            path: path.into(),
+            cipher,
+            lock: Mutex::new(()),
+        }
     }
 
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    fn skeleton_error(&self) -> CredentialError {
-        CredentialError::EncryptionUnavailable(format!(
-            "encrypted file credential store skeleton is not yet implemented for {}",
-            self.path
-        ))
+    fn load_records_locked(
+        &self,
+    ) -> Result<BTreeMap<CredentialId, CredentialRecord>, CredentialError> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
+        }
+
+        let ciphertext = std::fs::read(&self.path)
+            .map_err(|err| CredentialError::Io(format!("read {}: {err}", self.path.display())))?;
+        if ciphertext.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let plaintext = self.cipher.decrypt(&ciphertext)?;
+        let document: EncryptedCredentialFileDocument = serde_json::from_slice(&plaintext)
+            .map_err(|err| CredentialError::Internal(format!("decode credential file: {err}")))?;
+        if document.version != ENCRYPTED_CREDENTIAL_FILE_VERSION {
+            return Err(CredentialError::Internal(format!(
+                "unsupported encrypted credential file version {}; current {}",
+                document.version, ENCRYPTED_CREDENTIAL_FILE_VERSION
+            )));
+        }
+
+        document
+            .records
+            .into_iter()
+            .map(|entry| Ok((entry.metadata.id.clone(), entry.into_record())))
+            .collect()
+    }
+
+    fn persist_records_locked(
+        &self,
+        records: &BTreeMap<CredentialId, CredentialRecord>,
+    ) -> Result<(), CredentialError> {
+        let document = EncryptedCredentialFileDocument {
+            version: ENCRYPTED_CREDENTIAL_FILE_VERSION,
+            records: records
+                .values()
+                .cloned()
+                .map(EncryptedCredentialFileEntry::from_record)
+                .collect(),
+        };
+        let plaintext = serde_json::to_vec_pretty(&document)
+            .map_err(|err| CredentialError::Internal(format!("encode credential file: {err}")))?;
+        let ciphertext = self.cipher.encrypt(&plaintext)?;
+
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                CredentialError::Io(format!("create {}: {err}", parent.display()))
+            })?;
+        }
+        std::fs::write(&self.path, ciphertext)
+            .map_err(|err| CredentialError::Io(format!("write {}: {err}", self.path.display())))
     }
 }
 
-impl fmt::Debug for EncryptedFileCredentialStore {
+impl<C> fmt::Debug for EncryptedFileCredentialStore<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EncryptedFileCredentialStore")
             .field("path", &self.path)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl CredentialStore for EncryptedFileCredentialStore {
-    async fn write(&self, _record: CredentialRecord) -> Result<(), CredentialError> {
-        Err(self.skeleton_error())
+impl<C> CredentialStore for EncryptedFileCredentialStore<C>
+where
+    C: CredentialCipher,
+{
+    async fn write(&self, record: CredentialRecord) -> Result<(), CredentialError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        let mut records = self.load_records_locked()?;
+        records.insert(record.metadata.id.clone(), record);
+        self.persist_records_locked(&records)
     }
 
-    async fn read(&self, _id: &CredentialId) -> Result<CredentialRecord, CredentialError> {
-        Err(self.skeleton_error())
+    async fn read(&self, id: &CredentialId) -> Result<CredentialRecord, CredentialError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        let records = self.load_records_locked()?;
+        records
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CredentialError::NotFound(id.0.clone()))
     }
 
-    async fn delete(&self, _id: &CredentialId) -> Result<(), CredentialError> {
-        Err(self.skeleton_error())
+    async fn delete(&self, id: &CredentialId) -> Result<(), CredentialError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        let mut records = self.load_records_locked()?;
+        records.remove(id);
+        self.persist_records_locked(&records)
     }
 
     async fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, CredentialError> {
-        Err(self.skeleton_error())
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|err| CredentialError::Internal(err.to_string()))?;
+        let records = self.load_records_locked()?;
+        Ok(records
+            .values()
+            .map(|record| record.metadata.clone())
+            .collect())
+    }
+}
+
+const ENCRYPTED_CREDENTIAL_FILE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EncryptedCredentialFileDocument {
+    version: u32,
+    records: Vec<EncryptedCredentialFileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EncryptedCredentialFileEntry {
+    metadata: CredentialMetadata,
+    secret: String,
+}
+
+impl EncryptedCredentialFileEntry {
+    fn from_record(record: CredentialRecord) -> Self {
+        Self {
+            metadata: record.metadata,
+            secret: record.secret.expose_secret().to_string(),
+        }
+    }
+
+    fn into_record(self) -> CredentialRecord {
+        CredentialRecord {
+            metadata: self.metadata,
+            secret: SecretValue::new(self.secret),
+        }
     }
 }
 
@@ -1444,15 +1568,109 @@ mod tests {
         assert_eq!(ids, vec!["cred-a", "cred-b", "cred-c"]);
     }
 
-    #[tokio::test]
-    async fn encrypted_file_credential_store_skeleton_returns_typed_error() {
-        let store = EncryptedFileCredentialStore::new("/tmp/agentos-credentials.enc");
+    #[derive(Clone)]
+    struct XorTestCredentialCipher {
+        key: u8,
+    }
 
-        let result = store.read(&CredentialId::from("cred-1")).await;
+    impl CredentialCipher for XorTestCredentialCipher {
+        fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CredentialError> {
+            Ok(plaintext.iter().map(|byte| byte ^ self.key).collect())
+        }
+
+        fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CredentialError> {
+            Ok(ciphertext.iter().map(|byte| byte ^ self.key).collect())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingCredentialCipher;
+
+    impl CredentialCipher for FailingCredentialCipher {
+        fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, CredentialError> {
+            Err(CredentialError::EncryptionUnavailable(
+                "mock encrypt unavailable".to_string(),
+            ))
+        }
+
+        fn decrypt(&self, _ciphertext: &[u8]) -> Result<Vec<u8>, CredentialError> {
+            Err(CredentialError::EncryptionUnavailable(
+                "mock decrypt unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypted_file_credential_store_persists_and_reloads_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let record = sample_credential("cred-1", "encrypted-secret-value");
+
+        let store = EncryptedFileCredentialStore::new(&path, XorTestCredentialCipher { key: 0x5a });
+        store.write(record.clone()).await.unwrap();
+
+        let reloaded =
+            EncryptedFileCredentialStore::new(&path, XorTestCredentialCipher { key: 0x5a });
+        let fetched = reloaded.read(&CredentialId::from("cred-1")).await.unwrap();
+
+        assert_eq!(fetched.metadata, record.metadata);
+        assert_eq!(fetched.secret.expose_secret(), "encrypted-secret-value");
+    }
+
+    #[tokio::test]
+    async fn encrypted_file_credential_store_file_does_not_contain_plaintext_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::new(&path, XorTestCredentialCipher { key: 0x2a });
+
+        store
+            .write(sample_credential("cred-1", "plain-secret-must-not-leak"))
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let encoded = String::from_utf8_lossy(&bytes);
+        let metadata = store.list_metadata().await.unwrap();
+        let metadata_debug = format!("{metadata:?}");
+
+        assert!(!encoded.contains("plain-secret-must-not-leak"));
+        assert!(!metadata_debug.contains("plain-secret-must-not-leak"));
+        assert_eq!(metadata[0].id, CredentialId::from("cred-1"));
+    }
+
+    #[tokio::test]
+    async fn encrypted_file_credential_store_delete_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::new(&path, XorTestCredentialCipher { key: 0x7f });
+
+        store
+            .write(sample_credential("cred-1", "secret"))
+            .await
+            .unwrap();
+        store.delete(&CredentialId::from("cred-1")).await.unwrap();
+
+        let reloaded =
+            EncryptedFileCredentialStore::new(&path, XorTestCredentialCipher { key: 0x7f });
+        let result = reloaded.read(&CredentialId::from("cred-1")).await;
 
         assert!(matches!(
             result,
-            Err(CredentialError::EncryptionUnavailable(reason)) if reason.contains("skeleton")
+            Err(CredentialError::NotFound(id)) if id == "cred-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn encrypted_file_credential_store_cipher_error_is_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::new(&path, FailingCredentialCipher);
+
+        let result = store.write(sample_credential("cred-1", "secret")).await;
+
+        assert!(matches!(
+            result,
+            Err(CredentialError::EncryptionUnavailable(reason)) if reason == "mock encrypt unavailable"
         ));
     }
 
