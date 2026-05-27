@@ -21,6 +21,7 @@ Controlled beta is governed by:
 - [connector-browser-risk-review-templates.md](connector-browser-risk-review-templates.md)
 - [connector-browser-commercial-review-evidence.md](connector-browser-commercial-review-evidence.md)
 - [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-policy.md)
+- [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md)
 
 ## Release expectation
 

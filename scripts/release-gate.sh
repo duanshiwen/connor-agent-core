@@ -28,6 +28,9 @@ grep -q "## Gmail Read-Only Connector Review Evidence" docs/connector-browser-co
 grep -q "## Browser Kernel Current Capability Review Evidence" docs/connector-browser-commercial-review-evidence.md
 test -f docs/storage-journal-fixture-freeze-policy.md
 grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-journal-fixture-freeze-policy.md
+test -f docs/storage-journal-fixture-freeze-acceptance.md
+grep -q "## Acceptance Scope" docs/storage-journal-fixture-freeze-acceptance.md
+grep -q "## Evidence Commands" docs/storage-journal-fixture-freeze-acceptance.md
 
 echo "==> feature matrix check"
 test -f docs/feature-matrix.md
@@ -37,6 +40,7 @@ grep -q "audit-log" docs/feature-matrix.md
 grep -q "enterprise-permission-core" docs/feature-matrix.md
 grep -q "m24-beta-hardening-decision" docs/feature-matrix.md
 grep -q "storage-journal-fixture-freeze-policy" docs/feature-matrix.md
+grep -q "storage-journal-fixture-freeze-acceptance" docs/feature-matrix.md
 grep -q "credential-operations-rehearsal" docs/feature-matrix.md
 grep -q "connector-browser-commercial-review-evidence" docs/feature-matrix.md
 

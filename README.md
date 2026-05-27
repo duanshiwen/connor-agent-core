@@ -258,7 +258,7 @@ The release gate performs the minimum M24 checklist in order:
 4. Linting: `cargo clippy --workspace -- -D warnings`.
 5. Security checklist docs: verifies [docs/security-review-checklist.md](docs/security-review-checklist.md) exists and states that high-risk PRs must reference it.
 6. Commercial readiness docs: verifies [docs/v2-commercial-readiness-review.md](docs/v2-commercial-readiness-review.md) exists and states beta/commercial pilot entry conditions.
-7. Beta hardening docs: verifies [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md), [docs/credential-operations-runbook.md](docs/credential-operations-runbook.md), [docs/credential-operations-rehearsal.md](docs/credential-operations-rehearsal.md), [docs/production-observability-policy.md](docs/production-observability-policy.md), [docs/release-operations-runbook.md](docs/release-operations-runbook.md), [docs/connector-browser-risk-review-templates.md](docs/connector-browser-risk-review-templates.md), [docs/connector-browser-commercial-review-evidence.md](docs/connector-browser-commercial-review-evidence.md), and [docs/storage-journal-fixture-freeze-policy.md](docs/storage-journal-fixture-freeze-policy.md) exist.
+7. Beta hardening docs: verifies [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md), [docs/credential-operations-runbook.md](docs/credential-operations-runbook.md), [docs/credential-operations-rehearsal.md](docs/credential-operations-rehearsal.md), [docs/production-observability-policy.md](docs/production-observability-policy.md), [docs/release-operations-runbook.md](docs/release-operations-runbook.md), [docs/connector-browser-risk-review-templates.md](docs/connector-browser-risk-review-templates.md), [docs/connector-browser-commercial-review-evidence.md](docs/connector-browser-commercial-review-evidence.md), [docs/storage-journal-fixture-freeze-policy.md](docs/storage-journal-fixture-freeze-policy.md), and [docs/storage-journal-fixture-freeze-acceptance.md](docs/storage-journal-fixture-freeze-acceptance.md) exist.
 8. Tests: `cargo test --workspace`.
 
 ## 最小示例
@@ -366,7 +366,7 @@ Apache-2.0。详见 [LICENSE](./LICENSE)。
 
 ## Public API Stability Boundary
 
-M24 introduces the first explicit public API stability boundary for commercial hardening. M25 records the controlled-beta posture in [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md) and keeps release, credential, observability, connector/browser, and storage fixture decisions in dedicated runbooks. The goal is to make host-facing AgentOS integration points discoverable without freezing every internal crate detail too early.
+M24 introduces the first explicit public API stability boundary for commercial hardening. M25 records the controlled-beta posture in [docs/m24-beta-hardening-decision.md](docs/m24-beta-hardening-decision.md) and keeps release, credential, observability, connector/browser, and storage fixture decisions in dedicated runbooks. Storage/journal controlled-beta baseline evidence is tracked in [docs/storage-journal-fixture-freeze-acceptance.md](docs/storage-journal-fixture-freeze-acceptance.md). The goal is to make host-facing AgentOS integration points discoverable without freezing every internal crate detail too early.
 
 ### Stable API
 

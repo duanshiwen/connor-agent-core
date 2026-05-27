@@ -35,7 +35,7 @@ Beta rules:
 - Conversation journal event-shape changes require replay compatibility fixtures.
 - Destructive migrations are blocked unless explicitly approved for a commercial pilot.
 
-See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-policy.md).
+See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-policy.md) and the controlled-beta acceptance evidence in [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md).
 
 ## Remaining Gap Disposition
 
@@ -45,7 +45,7 @@ See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-po
 | Browser automation product-level permission UX | Browser Kernel code-level review evidence recorded; broad end-user exposure blocked | Must be closed for each enabled browser capability | Host product owner | Browser review evidence exists; product permission UX and irreversible side-effect tests remain required |
 | Credential storage integration and rotation guidance | Documented and code-level rehearsal recorded | Must be operationally rehearsed by pilot host | Host/security owner | Credential runbook and rehearsal evidence exist; host-level backend rehearsal remains |
 | Production telemetry export/retention policy | Must be documented before beta release candidate | Must be enforced by pilot host | Host/security owner | Observability policy exists and names allowed sinks/redaction/retention |
-| Storage and journal compatibility fixtures | Accepted with beta fixture policy | Must be frozen or explicitly deferred | Kernel owner | Fixture lifecycle policy exists and release gate remains green |
+| Storage and journal compatibility fixtures | Baseline acceptance evidence recorded for controlled beta | Must be frozen or explicitly deferred | Kernel owner | Fixture lifecycle policy and acceptance evidence exist; release gate remains green |
 | Release packaging, changelog, rollback runbooks | Must be documented before beta release candidate | Must be exercised for pilot release | Release owner | Release operations runbook exists and is linked from README |
 
 ## Beta Entry Conditions

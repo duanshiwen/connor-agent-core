@@ -10,6 +10,8 @@ Current storage and conversation journal formats are accepted as **controlled-be
 
 Commercial pilot freeze requires explicit approval after the beta fixture lifecycle is exercised at least once.
 
+Current controlled-beta acceptance evidence is recorded in [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md).
+
 ## Baseline Fixture Contract
 
 A persisted format fixture becomes a baseline when it represents a released beta tag and is referenced by compatibility tests.
@@ -80,3 +82,5 @@ Known limitations:
 ## Release Gate Relationship
 
 `./scripts/release-gate.sh` must remain green after fixture changes. If a fixture update requires additional docs checks, update the release gate in the same PR.
+
+The release gate also checks [storage-journal-fixture-freeze-acceptance.md](storage-journal-fixture-freeze-acceptance.md) so the current controlled-beta baseline acceptance evidence cannot be dropped silently.
