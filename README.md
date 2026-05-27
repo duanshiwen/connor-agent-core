@@ -343,3 +343,58 @@ async fn main() -> anyhow::Result<()> {
 ## 许可证
 
 Apache-2.0。详见 [LICENSE](./LICENSE)。
+
+## Public API Stability Boundary
+
+M24 introduces the first explicit public API stability boundary for commercial hardening. The goal is to make host-facing AgentOS integration points discoverable without freezing every internal crate detail too early.
+
+### Stable API
+
+The following APIs are considered stable for host/application integration within the current `0.1.x` line. They may grow additively, but breaking semantic or signature changes require a deprecation note first.
+
+- `agentos-kernel`
+  - `KernelRuntimeBuilder`
+  - `KernelRuntime`, `KernelRuntimeState`, `KernelHealthReport`
+  - `KernelServices`
+  - `KernelHostApi`
+  - host request/response/error types re-exported from `agentos-kernel::host_api`
+  - diagnostics bundle types re-exported from `agentos-kernel::diagnostics`
+  - service registry traits re-exported from `agentos-kernel::registries`
+- `action-runtime`
+  - `ActionRuntime`
+  - `ProcessActionRequest`
+  - `ExecuteApprovedActionRequest`
+  - `ActionRuntimeOutcome`
+  - `ArtifactResolver`
+  - `ArtifactStoreResolver`
+- `audit-log`
+  - `AuditEvent`
+  - `AuditLog`
+  - `MemoryAuditSink`
+  - `JsonlAuditSink`
+  - `AuditQuery`, `AuditPagination`, `AuditQueryResult`, `AuditLogQueryExt`
+  - audit integrity types: `AuditIntegrityEnvelope`, `AuditIntegrityReport`, `AuditIntegrityIssue`, `AuditSegmentChecksum`
+  - enterprise audit sink/export types: `EnterpriseAuditSink`, `EnterpriseMirrorAuditLog`, `EnterpriseAuditBatch`, `EnterpriseAuditSinkResult`, `AuditExportRequest`, `AuditExportFormat`, `AuditExportManifest`, `AuditExport`, `AuditLogExportExt`
+- `enterprise-permission-core`
+  - identity/lifecycle types: `EnterpriseUserId`, `EnterpriseUserLifecycle`, `EnterpriseUserStatus`
+  - permission model types: `EnterpriseRole`, `ResourceType`, `ResourceId`, `PermissionAction`, `PermissionDecision`, `PermissionGrant`, `EnterpriseAssetPolicy`
+  - stores and provider boundaries: `PermissionStore`, `OrganizationalPermissionStore`, `RemotePermissionProvider`, `ServerBackedPermissionStore`, `ServerPermissionSnapshot`, `CachePolicy`, `CacheStatus`, `CachedPermissionDecision`
+  - organization/membership/offboarding types: `OrganizationId`, `TeamId`, `GroupId`, `Membership`, `MembershipType`, `OffboardingEvent`, `OffboardingEventKind`, `OffboardingEventStore`, `MemoryOffboardingEventStore`
+
+### Unstable API
+
+The following areas remain internal or experimental. They can change without deprecation while the kernel is still converging:
+
+- Module layout inside each crate, including private modules such as `agentos-kernel::{builder, runtime, services, host_api, diagnostics, registries}`.
+- Test-only fake providers, fixtures, and helper constructors that are not listed under Stable API.
+- Concrete resource extraction heuristics used by audit export permission filtering.
+- Internal diagnostics field additions where existing fields keep their meaning.
+- Any crate not explicitly listed in this Public API Stability Boundary section.
+
+### Deprecation Policy
+
+- Stable APIs should prefer additive evolution: new fields, enum variants, builder options, and trait extension methods are allowed when existing callers keep compiling.
+- Breaking changes to stable APIs require a documented deprecation period in this README or crate-level rustdoc before removal or signature changes.
+- Deprecated stable APIs should remain available for at least one subsequent roadmap PR unless they are unsound or create a security/privacy issue.
+- Security fixes may bypass the normal deprecation period, but the replacement API and migration path must be documented in the same PR.
+- Unstable APIs may change at any time; callers should wrap them behind application-local adapters if they need longer-term compatibility.
