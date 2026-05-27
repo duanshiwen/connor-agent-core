@@ -1,6 +1,6 @@
 use agentos_config::{
     AgentOsConfig, AgentOsConfigDocument, BuiltinProfile, CURRENT_CONFIG_VERSION,
-    ConfigDiagnosticCode, ConfigError, MapEnvSource,
+    ConfigDiagnosticCode, ConfigError, ConfigMigrationMode, MapEnvSource,
 };
 
 fn sample_config() -> &'static str {
@@ -446,7 +446,74 @@ fn migration_skeleton_sets_current_version() {
     assert_eq!(migrated.version, Some(CURRENT_CONFIG_VERSION));
     assert_eq!(report.from_version, None);
     assert_eq!(report.to_version, CURRENT_CONFIG_VERSION);
-    assert!(report.steps.is_empty());
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.steps[0].from_version, 0);
+    assert_eq!(report.steps[0].to_version, CURRENT_CONFIG_VERSION);
+}
+
+#[test]
+fn config_migration_dry_run_does_not_write_file_or_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agentos.toml");
+    std::fs::write(&path, sample_config()).unwrap();
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    let result =
+        AgentOsConfigDocument::migrate_file_to_current(&path, ConfigMigrationMode::DryRun).unwrap();
+
+    assert!(result.changed);
+    assert!(!result.applied);
+    assert!(result.backup_path.is_none());
+    assert_eq!(
+        result.migrated_document.version,
+        Some(CURRENT_CONFIG_VERSION)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert!(!path.with_extension("toml.bak").exists());
+}
+
+#[test]
+fn config_migration_apply_writes_backup_before_migrated_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agentos.toml");
+    std::fs::write(&path, sample_config()).unwrap();
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    let result =
+        AgentOsConfigDocument::migrate_file_to_current(&path, ConfigMigrationMode::Apply).unwrap();
+
+    let backup_path = result.backup_path.as_ref().unwrap();
+    assert!(result.changed);
+    assert!(result.applied);
+    assert_eq!(backup_path, &path.with_extension("toml.bak"));
+    assert_eq!(std::fs::read_to_string(backup_path).unwrap(), original);
+
+    let rewritten = std::fs::read_to_string(&path).unwrap();
+    assert_ne!(rewritten, original);
+    assert!(rewritten.contains("version = 1"));
+    let migrated = AgentOsConfigDocument::from_file(&path).unwrap();
+    assert_eq!(migrated.version, Some(CURRENT_CONFIG_VERSION));
+}
+
+#[test]
+fn config_migration_apply_is_idempotent_when_already_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agentos.toml");
+    let (migrated, _) = AgentOsConfigDocument::from_toml_str(sample_config())
+        .unwrap()
+        .migrate_to_current()
+        .unwrap();
+    let migrated_toml = toml::to_string_pretty(&migrated).unwrap();
+    std::fs::write(&path, &migrated_toml).unwrap();
+
+    let result =
+        AgentOsConfigDocument::migrate_file_to_current(&path, ConfigMigrationMode::Apply).unwrap();
+
+    assert!(!result.changed);
+    assert!(!result.applied);
+    assert!(result.backup_path.is_none());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated_toml);
+    assert!(!path.with_extension("toml.bak").exists());
 }
 
 #[test]

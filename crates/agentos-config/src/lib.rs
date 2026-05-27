@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -113,8 +113,6 @@ impl AgentOsConfigDocument {
     }
 
     /// Migrate the config document to the current schema version.
-    ///
-    /// PR97 only provides a no-op migration skeleton for version 1.
     pub fn migrate_to_current(mut self) -> Result<(Self, ConfigMigrationReport), ConfigError> {
         if let Some(version) = self.version
             && version > CURRENT_CONFIG_VERSION
@@ -126,15 +124,71 @@ impl AgentOsConfigDocument {
         }
 
         let from_version = self.version;
+        let mut steps = Vec::new();
+        if self.version.is_none() {
+            steps.push(ConfigMigrationStep {
+                from_version: 0,
+                to_version: CURRENT_CONFIG_VERSION,
+                description: "set missing config document version to current schema version"
+                    .to_string(),
+            });
+        }
         self.version = Some(CURRENT_CONFIG_VERSION);
         Ok((
             self,
             ConfigMigrationReport {
                 from_version,
                 to_version: CURRENT_CONFIG_VERSION,
-                steps: Vec::new(),
+                steps,
             },
         ))
+    }
+
+    /// Parse, migrate, and optionally rewrite an `agentos.toml` file.
+    ///
+    /// Dry-run mode returns the same report without writing the migrated document or backup.
+    /// Apply mode writes a deterministic pretty TOML document and creates a sibling `.bak`
+    /// backup when the migrated document differs from the original bytes.
+    pub fn migrate_file_to_current(
+        path: impl AsRef<Path>,
+        mode: ConfigMigrationMode,
+    ) -> Result<ConfigMigrationFileResult, ConfigError> {
+        let path = path.as_ref();
+        let original = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+            path: path.display().to_string(),
+            reason: source.to_string(),
+        })?;
+        let document = Self::from_toml_str(&original)?;
+        let (migrated, report) = document.migrate_to_current()?;
+        let migrated_toml =
+            toml::to_string_pretty(&migrated).map_err(|source| ConfigError::SerializeToml {
+                reason: source.to_string(),
+            })?;
+        let changed = original != migrated_toml;
+
+        let mut backup_path = None;
+        if mode == ConfigMigrationMode::Apply && changed {
+            let backup = config_backup_path(path);
+            std::fs::write(&backup, original).map_err(|source| ConfigError::WriteFile {
+                path: backup.display().to_string(),
+                reason: source.to_string(),
+            })?;
+            std::fs::write(path, migrated_toml.as_bytes()).map_err(|source| {
+                ConfigError::WriteFile {
+                    path: path.display().to_string(),
+                    reason: source.to_string(),
+                }
+            })?;
+            backup_path = Some(backup);
+        }
+
+        Ok(ConfigMigrationFileResult {
+            report,
+            changed,
+            applied: mode == ConfigMigrationMode::Apply && changed,
+            backup_path,
+            migrated_document: migrated,
+        })
     }
 }
 
@@ -984,6 +1038,12 @@ pub enum ConfigError {
     #[error("failed to parse agentos.toml: {reason}")]
     ParseToml { reason: String },
 
+    #[error("failed to serialize agentos.toml: {reason}")]
+    SerializeToml { reason: String },
+
+    #[error("failed to write config file {path}: {reason}")]
+    WriteFile { path: String, reason: String },
+
     #[error("config profile not found: {profile}")]
     ProfileNotFound { profile: String },
 
@@ -992,6 +1052,13 @@ pub enum ConfigError {
 
     #[error("unsupported config version {version}; current supported version is {current}")]
     UnsupportedConfigVersion { version: u32, current: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigMigrationMode {
+    DryRun,
+    Apply,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1006,6 +1073,24 @@ pub struct ConfigMigrationStep {
     pub from_version: u32,
     pub to_version: u32,
     pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigMigrationFileResult {
+    pub report: ConfigMigrationReport,
+    pub changed: bool,
+    pub applied: bool,
+    pub backup_path: Option<PathBuf>,
+    pub migrated_document: AgentOsConfigDocument,
+}
+
+fn config_backup_path(path: &Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{value}.bak"))
+        .unwrap_or_else(|| "bak".to_string());
+    path.with_extension(extension)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
