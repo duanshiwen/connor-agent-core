@@ -17,11 +17,11 @@ pub use diagnostics::{
     AuditEventSummary, KernelDiagnosticsBundle, KernelFailureClassification, KernelFailureSummary,
     RecentAuditSummary, RedactedRuntimeConfig, StorageManifestDump,
 };
-pub use error::{KernelError, KernelResult};
+pub use error::{KernelError, KernelErrorCategory, KernelResult};
 pub use host_api::{
-    HostActionDecisionRequest, HostActorContext, HostApiError, HostApiResult, HostPendingApproval,
-    HostPermissionResource, HostRunStatus, HostRunStatusResponse, KernelHostApi,
-    StartAgentRunRequest, StartAgentRunResponse, SubmitUserMessageRequest,
+    HostActionDecisionRequest, HostActorContext, HostApiError, HostApiErrorResponse, HostApiResult,
+    HostPendingApproval, HostPermissionResource, HostRunStatus, HostRunStatusResponse,
+    KernelHostApi, StartAgentRunRequest, StartAgentRunResponse, SubmitUserMessageRequest,
     SubmitUserMessageResponse,
 };
 pub use registries::{

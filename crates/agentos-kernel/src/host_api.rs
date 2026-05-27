@@ -14,7 +14,7 @@ use enterprise_permission_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{KernelError, KernelRuntime};
+use crate::{KernelError, KernelErrorCategory, KernelRuntime};
 
 pub type HostApiResult<T> = Result<T, HostApiError>;
 
@@ -36,6 +36,43 @@ pub enum HostApiError {
         resource_type: String,
         resource_id: String,
     },
+}
+
+impl HostApiError {
+    pub fn category(&self) -> KernelErrorCategory {
+        match self {
+            Self::KernelOperationFailed { .. } => KernelErrorCategory::External,
+            Self::RunNotFound { .. } => KernelErrorCategory::UserActionable,
+            Self::PermissionStoreUnavailable => KernelErrorCategory::Bug,
+            Self::PermissionDenied { .. } => KernelErrorCategory::UserActionable,
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::KernelOperationFailed { .. } => "kernel_operation_failed",
+            Self::RunNotFound { .. } => "run_not_found",
+            Self::PermissionStoreUnavailable => "permission_store_unavailable",
+            Self::PermissionDenied { .. } => "permission_denied",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostApiErrorResponse {
+    pub category: KernelErrorCategory,
+    pub code: String,
+    pub message: String,
+}
+
+impl From<&HostApiError> for HostApiErrorResponse {
+    fn from(value: &HostApiError) -> Self {
+        Self {
+            category: value.category(),
+            code: value.code().to_string(),
+            message: value.to_string(),
+        }
+    }
 }
 
 impl From<anyhow::Error> for HostApiError {
