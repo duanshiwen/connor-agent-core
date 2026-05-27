@@ -419,7 +419,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p browser-entity browser_pilot_profile` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR210: Real CDP Download/Upload, Origin, Retention, and Human Takeover Evidence
+### PR210: Real CDP Download/Upload, Origin, Retention, and Human Takeover Evidence ⏸ Deferred
 
 **Goal:** Close the remaining browser commercial gap if any browser automation beyond read-only/internal opt-in is enabled.
 
@@ -441,10 +441,11 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 
 **Acceptance:**
 
-- Browser irreversible actions cannot execute silently.
-- Human takeover prevents automation races.
-- Captured DOM/screenshot/network artifacts follow retention/redaction policy.
-- Release gate passes.
+- ⏸ Deferred for lean first pilot because browser broad exposure remains disabled by PR209.
+- Browser irreversible actions cannot execute silently if browser broad exposure is later enabled.
+- Human takeover prevents automation races if browser broad exposure is later enabled.
+- Captured DOM/screenshot/network artifacts follow retention/redaction policy if browser broad exposure is later enabled.
+- Release gate checks `## PR210 Deferred Real CDP Evidence Decision` so this deferred decision remains explicit.
 
 ### PR211: Production Telemetry Retention and Access-Control Enforcement ✅ Completed
 
@@ -528,6 +529,66 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ Gmail read-only inclusion and browser broad exposure disabled decision are explicit.
 - ✅ PR200-PR212 evidence is linked in one reviewable matrix.
 - ✅ `cargo test -p agentos-kernel --test release_gate_docs first_pilot_candidate_bundle_records_pr213_evidence` passes.
+- ✅ `./scripts/release-gate.sh` passes.
+
+### PR214: Pilot Go/No-Go Review ✅ Completed
+
+**Goal:** Record the pilot go/no-go decision based on the assembled evidence bundle.
+
+**Deliverables:**
+
+- ✅ Decision record: [pilot-go-no-go-review.md](pilot-go-no-go-review.md).
+- ✅ Decision: Conditional Go for lean first pilot after host-product integration closure.
+- ✅ Decision: No-Go for browser broad exposure; PR210 remains deferred.
+- ✅ Conditional Go requirements documented for lifecycle, audit, credential backend, OAuth endpoints, telemetry, artifact storage, and pilot owner sign-off.
+
+**Acceptance:**
+
+- ✅ Go/no-go decision is recorded and release-gated.
+
+### PR215: Host Product Integration Closure ✅ Completed
+
+**Goal:** Close the handoff between kernel/runtime readiness evidence and host-owned product integration work.
+
+**Deliverables:**
+
+- ✅ Closure record: [host-product-integration-closure.md](host-product-integration-closure.md).
+- ✅ Host-owned integration items documented for account lifecycle, audit backend, credential backend, OAuth endpoints, telemetry export/access, debug bundles, release artifacts, and pilot approval.
+- ✅ Closure criteria and deferred items documented.
+
+**Acceptance:**
+
+- ✅ Host-product integration closure evidence is recorded without claiming live host wiring inside this repository.
+
+### PR216: Pilot Tag and Distribution Dry Run ✅ Completed
+
+**Goal:** Dry-run pilot tag/distribution preparation without publishing.
+
+**Deliverables:**
+
+- ✅ Dry-run record: [pilot-tag-distribution-dry-run.md](pilot-tag-distribution-dry-run.md).
+- ✅ Dry-run tag shape: `v0.1.0-pilot.0-dry-run`.
+- ✅ Safety result: no tag created or pushed; no distribution artifact uploaded.
+- ✅ Distribution artifact checklist and approval gates documented.
+
+**Acceptance:**
+
+- ✅ Pilot tag/distribution path is dry-run ready and release-gated.
+
+### PR217: Commercial Pilot Monitoring Closeout ✅ Completed
+
+**Goal:** Define post-launch monitoring and closeout evidence before live pilot start.
+
+**Deliverables:**
+
+- ✅ Monitoring closeout record: [commercial-pilot-monitoring-closeout.md](commercial-pilot-monitoring-closeout.md).
+- ✅ Post-launch monitoring windows documented: T+1 hour, T+24 hours, T+7 days, pilot close.
+- ✅ Metadata-safe monitoring signals, access/incident review, and closeout criteria documented.
+
+**Acceptance:**
+
+- ✅ Pilot monitoring closeout plan is recorded and release-gated.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs final_pilot_closure_records_pr214_through_pr217_and_pr210_deferred` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
 ## Recommended Sequencing

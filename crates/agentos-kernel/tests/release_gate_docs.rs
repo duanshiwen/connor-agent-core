@@ -71,6 +71,30 @@ fn release_gate_script_documents_and_runs_required_checks() {
         "release gate must include PR213 first pilot candidate evidence bundle checks"
     );
     assert!(
+        script.contains("docs/pilot-go-no-go-review.md")
+            && script.contains("Pilot Go/No-Go Decision")
+            && script.contains("Conditional Go"),
+        "release gate must include PR214 pilot go/no-go decision checks"
+    );
+    assert!(
+        script.contains("docs/host-product-integration-closure.md")
+            && script.contains("Host Product Integration Closure")
+            && script.contains("Host-Owned Integration Items"),
+        "release gate must include PR215 host product integration closure checks"
+    );
+    assert!(
+        script.contains("docs/pilot-tag-distribution-dry-run.md")
+            && script.contains("Pilot Tag and Distribution Dry Run")
+            && script.contains("no tag created or pushed"),
+        "release gate must include PR216 pilot tag/distribution dry run checks"
+    );
+    assert!(
+        script.contains("docs/commercial-pilot-monitoring-closeout.md")
+            && script.contains("Commercial Pilot Monitoring Closeout")
+            && script.contains("Post-Launch Monitoring Windows"),
+        "release gate must include PR217 commercial pilot monitoring closeout checks"
+    );
+    assert!(
         script.contains("Commercial-Pilot Fixture Freeze Acceptance")
             && script.contains("Long-Lived Fixture Support Policy")
             && script.contains("Migration Release Note Template"),
@@ -415,4 +439,92 @@ fn first_pilot_candidate_bundle_records_pr213_evidence() {
         plan.contains("PR213: First Pilot Candidate Evidence Bundle ✅ Completed"),
         "commercial pilot readiness plan must mark PR213 complete"
     );
+}
+
+#[test]
+fn final_pilot_closure_records_pr214_through_pr217_and_pr210_deferred() {
+    let root = workspace_root();
+    let go_no_go = fs::read_to_string(root.join("docs/pilot-go-no-go-review.md"))
+        .expect("pilot go/no-go review should exist");
+    let host_closure = fs::read_to_string(root.join("docs/host-product-integration-closure.md"))
+        .expect("host product integration closure should exist");
+    let tag_dry_run = fs::read_to_string(root.join("docs/pilot-tag-distribution-dry-run.md"))
+        .expect("pilot tag distribution dry run should exist");
+    let monitoring = fs::read_to_string(root.join("docs/commercial-pilot-monitoring-closeout.md"))
+        .expect("commercial pilot monitoring closeout should exist");
+    let browser_evidence =
+        fs::read_to_string(root.join("docs/connector-browser-commercial-review-evidence.md"))
+            .expect("connector/browser evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "# Pilot Go/No-Go Decision",
+        "Conditional Go for lean first pilot",
+        "No-Go for browser broad exposure",
+        "PR214",
+    ] {
+        assert!(go_no_go.contains(required), "PR214 must contain {required}");
+    }
+
+    for required in [
+        "# Host Product Integration Closure",
+        "## Host-Owned Integration Items",
+        "evaluate_connector_account_access",
+        "ConnectorOperationAuditEvent",
+        "PR215",
+    ] {
+        assert!(
+            host_closure.contains(required),
+            "PR215 must contain {required}"
+        );
+    }
+
+    for required in [
+        "# Pilot Tag and Distribution Dry Run",
+        "v0.1.0-pilot.0-dry-run",
+        "no tag created or pushed",
+        "PR216",
+    ] {
+        assert!(
+            tag_dry_run.contains(required),
+            "PR216 must contain {required}"
+        );
+    }
+
+    for required in [
+        "# Commercial Pilot Monitoring Closeout",
+        "## Post-Launch Monitoring Windows",
+        "telemetry access audit",
+        "PR217",
+    ] {
+        assert!(
+            monitoring.contains(required),
+            "PR217 must contain {required}"
+        );
+    }
+
+    for required in [
+        "## PR210 Deferred Real CDP Evidence Decision",
+        "browser broad exposure remains disabled",
+        "PR210 remains deferred",
+    ] {
+        assert!(
+            browser_evidence.contains(required),
+            "PR210 deferred evidence must contain {required}"
+        );
+    }
+
+    for required in [
+        "PR214: Pilot Go/No-Go Review ✅ Completed",
+        "PR215: Host Product Integration Closure ✅ Completed",
+        "PR216: Pilot Tag and Distribution Dry Run ✅ Completed",
+        "PR217: Commercial Pilot Monitoring Closeout ✅ Completed",
+        "PR210: Real CDP Download/Upload, Origin, Retention, and Human Takeover Evidence ⏸ Deferred",
+    ] {
+        assert!(
+            plan.contains(required),
+            "commercial pilot readiness plan must contain {required}"
+        );
+    }
 }

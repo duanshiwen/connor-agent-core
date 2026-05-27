@@ -207,6 +207,16 @@ Open blockers before browser broad commercial exposure:
 - broader irreversible side-effect tests for real CDP download/upload, origin isolation, retention, and human takeover flows;
 - origin isolation, DOM/screenshot/network trace retention, and debug-bundle handling policy implemented in host.
 
+## PR210 Deferred Real CDP Evidence Decision
+
+PR210 real CDP download/upload, origin, retention, and human takeover evidence remains deferred for the lean first commercial pilot because browser broad exposure remains disabled by PR209.
+
+Decision:
+
+- browser broad exposure remains disabled for the first lean pilot;
+- PR210 remains deferred and is not required for Gmail read-only pilot readiness;
+- any future decision to enable browser broad automation must reopen PR210 and complete product permission UX, real CDP irreversible side-effect evidence, retention/debug-bundle handling, and host risk acceptance before exposure.
+
 ## Pilot Entry Implication
 
 Connector/browser evidence is sufficient to continue controlled beta hardening.

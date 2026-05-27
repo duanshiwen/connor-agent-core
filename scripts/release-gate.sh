@@ -44,6 +44,18 @@ grep -q "## Pilot Incident Exercise" docs/pilot-release-rollback-incident-exerci
 test -f docs/first-pilot-candidate-evidence-bundle.md
 grep -q "# First Pilot Candidate Evidence Bundle" docs/first-pilot-candidate-evidence-bundle.md
 grep -q "## Pilot Go/No-Go Prerequisites" docs/first-pilot-candidate-evidence-bundle.md
+test -f docs/pilot-go-no-go-review.md
+grep -q "# Pilot Go/No-Go Decision" docs/pilot-go-no-go-review.md
+grep -q "Conditional Go" docs/pilot-go-no-go-review.md
+test -f docs/host-product-integration-closure.md
+grep -q "# Host Product Integration Closure" docs/host-product-integration-closure.md
+grep -q "## Host-Owned Integration Items" docs/host-product-integration-closure.md
+test -f docs/pilot-tag-distribution-dry-run.md
+grep -q "# Pilot Tag and Distribution Dry Run" docs/pilot-tag-distribution-dry-run.md
+grep -q "no tag created or pushed" docs/pilot-tag-distribution-dry-run.md
+test -f docs/commercial-pilot-monitoring-closeout.md
+grep -q "# Commercial Pilot Monitoring Closeout" docs/commercial-pilot-monitoring-closeout.md
+grep -q "## Post-Launch Monitoring Windows" docs/commercial-pilot-monitoring-closeout.md
 test -f docs/connector-browser-risk-review-templates.md
 grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-review-templates.md
 test -f docs/connector-browser-commercial-review-evidence.md
@@ -53,6 +65,7 @@ grep -q "## PR207 Gmail Retry Timeout Rate-Limit Evidence" docs/connector-browse
 grep -q "## PR208 Gmail Host Audit and Offboarding Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## Browser Kernel Current Capability Review Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## PR209 Browser Pilot Permission Profile Evidence" docs/connector-browser-commercial-review-evidence.md
+grep -q "## PR210 Deferred Real CDP Evidence Decision" docs/connector-browser-commercial-review-evidence.md
 test -f docs/storage-journal-fixture-freeze-policy.md
 grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-journal-fixture-freeze-policy.md
 test -f docs/storage-journal-fixture-freeze-acceptance.md
