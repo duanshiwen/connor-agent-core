@@ -68,6 +68,8 @@ Commercial pilot decision: blocked for broad exposure; conditional for internal/
 
 Broad exposure remains blocked until product-level permission UX, origin retention policy, and irreversible side-effect tests are complete.
 
+PR199 expands code-level irreversible side-effect evidence for click/type, fill, upload, and download policy behavior. This narrows the test gap but still does not replace host/product UX review.
+
 Evidence commands:
 
 ```bash
@@ -81,6 +83,10 @@ cargo test -p action-runtime --test static_browser static_browser_summarize_is_r
 cargo test -p action-runtime --test orchestrator browser_extract_content_auto_executes_through_action_runtime
 cargo test -p action-runtime --test orchestrator browser_open_url_requires_approval_through_action_runtime
 cargo test -p action-runtime --test orchestrator browser_capture_snapshot_requires_approval_through_action_runtime
+cargo test -p browser-entity browser_action_schemas_side_effects_match_policy_contract
+cargo test -p browser-entity register_browser_action_schemas_adds_expected_actions
+cargo test -p action-runtime --test orchestrator browser_click_and_type_require_approval_through_action_runtime
+cargo test -p action-runtime --test orchestrator browser_fill_upload_and_download_are_denied_by_default_safe_policy
 ```
 
 Evidence mapping:
@@ -89,6 +95,9 @@ Evidence mapping:
 | --- | --- | --- |
 | Are read-only browser actions allowed under safe policy? | `cdp_browser_open_url_is_read_only_allowed`, `cdp_browser_extract_content_is_read_only_allowed`, `static_browser_extract_content_is_read_only_allowed`, `static_browser_summarize_is_read_only_allowed` | Rehearsed |
 | Do click/fill/execute-js operations require approval? | `cdp_browser_click_element_requires_approval`, `cdp_browser_fill_form_requires_approval`, `cdp_browser_execute_js_requires_approval` | Rehearsed |
+| Are upload/download action schemas explicitly registered with conservative side-effect classification? | `browser_action_schemas_side_effects_match_policy_contract`, `register_browser_action_schemas_adds_expected_actions` | Rehearsed in PR199 |
+| Does action runtime enforce approval for click/type paste-like UI mutations? | `browser_click_and_type_require_approval_through_action_runtime` | Rehearsed in PR199 |
+| Does action runtime deny fill/upload/download by default safe policy and audit the side effect? | `browser_fill_upload_and_download_are_denied_by_default_safe_policy` | Rehearsed in PR199 |
 | Does action runtime enforce approval for non-read browser flows? | `browser_open_url_requires_approval_through_action_runtime`, `browser_capture_snapshot_requires_approval_through_action_runtime` | Rehearsed |
 | Can read extraction auto-execute through runtime? | `browser_extract_content_auto_executes_through_action_runtime` | Rehearsed |
 
@@ -96,8 +105,8 @@ Open blockers before commercial pilot:
 
 - product-level permission UX;
 - explicit human takeover semantics;
-- download/upload policy tests;
-- irreversible side-effect tests for click/paste/upload/download flows;
+- host/product review for download/upload policy UX;
+- broader irreversible side-effect tests for real CDP download/upload, origin isolation, retention, and human takeover flows;
 - origin isolation, DOM/screenshot/network trace retention, and debug-bundle handling policy implemented in host.
 
 ## Pilot Entry Implication

@@ -44,6 +44,8 @@ pub const BROWSER_PRESS_KEY_ACTION_KIND: &str = "browser.press_key";
 pub const BROWSER_EXECUTE_JS_ACTION_KIND: &str = "browser.execute_js";
 pub const BROWSER_WAIT_FOR_ELEMENT_ACTION_KIND: &str = "browser.wait_for_element";
 pub const BROWSER_GET_PAGE_SCREENSHOT_ACTION_KIND: &str = "browser.get_page_screenshot";
+pub const BROWSER_UPLOAD_FILE_ACTION_KIND: &str = "browser.upload_file";
+pub const BROWSER_DOWNLOAD_FILE_ACTION_KIND: &str = "browser.download_file";
 
 pub fn browser_open_url_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_OPEN_URL_ACTION_KIND)
@@ -99,6 +101,14 @@ pub fn browser_wait_for_element_action_kind() -> ActionKind {
 
 pub fn browser_get_page_screenshot_action_kind() -> ActionKind {
     ActionKind::from(BROWSER_GET_PAGE_SCREENSHOT_ACTION_KIND)
+}
+
+pub fn browser_upload_file_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_UPLOAD_FILE_ACTION_KIND)
+}
+
+pub fn browser_download_file_action_kind() -> ActionKind {
+    ActionKind::from(BROWSER_DOWNLOAD_FILE_ACTION_KIND)
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +516,23 @@ pub fn register_browser_action_schemas(
         display_name: "Get Page Screenshot".to_string(),
         description: "Capture a screenshot of a web page or element.".to_string(),
         side_effect: SideEffectKind::ReadOnly,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_upload_file_action_kind(),
+        display_name: "Upload File".to_string(),
+        description: "Upload a local file through a web page file input.".to_string(),
+        side_effect: SideEffectKind::ExternalSystemMutation,
+        input_schema: None,
+        output_schema: None,
+    })?;
+    registry.register(ActionSchema {
+        kind: browser_download_file_action_kind(),
+        display_name: "Download File".to_string(),
+        description: "Download a remote file to local storage through browser automation."
+            .to_string(),
+        side_effect: SideEffectKind::FileSystemMutation,
         input_schema: None,
         output_schema: None,
     })?;
@@ -1862,6 +1889,8 @@ mod tests {
         );
         assert!(registry.get(&browser_click_element_action_kind()).is_some());
         assert!(registry.get(&browser_type_text_action_kind()).is_some());
+        assert!(registry.get(&browser_upload_file_action_kind()).is_some());
+        assert!(registry.get(&browser_download_file_action_kind()).is_some());
     }
 
     #[test]
@@ -1917,6 +1946,20 @@ mod tests {
                 .unwrap()
                 .side_effect,
             SideEffectKind::UiSideEffect
+        );
+        assert_eq!(
+            registry
+                .get(&browser_upload_file_action_kind())
+                .unwrap()
+                .side_effect,
+            SideEffectKind::ExternalSystemMutation
+        );
+        assert_eq!(
+            registry
+                .get(&browser_download_file_action_kind())
+                .unwrap()
+                .side_effect,
+            SideEffectKind::FileSystemMutation
         );
     }
 

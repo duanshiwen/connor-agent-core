@@ -1549,3 +1549,102 @@ async fn browser_capture_snapshot_requires_approval_through_action_runtime() {
     assert_eq!(events[0].policy_decision, "ask");
     assert_eq!(events[0].result_status, "approval_required");
 }
+
+#[tokio::test]
+async fn browser_click_and_type_require_approval_through_action_runtime() {
+    for (action_id, kind, input) in [
+        (
+            "action-browser-click",
+            "browser.click_element",
+            serde_json::json!({"url": "https://example.com", "selector": "button#buy"}),
+        ),
+        (
+            "action-browser-type",
+            "browser.type_text",
+            serde_json::json!({"url": "https://example.com", "selector": "textarea", "text": "paste-like user text"}),
+        ),
+    ] {
+        let kernel = test_kernel();
+        let conversation_id = create_conversation(&kernel).await;
+        let registry = browser_registry();
+        let executor = FakeBrowserExecutor::new(Utc::now());
+        let audit = MemoryAuditSink::new();
+
+        let outcome = process_action_with_input(
+            &kernel,
+            &registry,
+            &executor,
+            &audit,
+            &conversation_id,
+            action_id,
+            kind,
+            input,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            ActionRuntimeOutcome::ApprovalRequired { .. }
+        ));
+        let state = kernel.load_state(&conversation_id).await.unwrap();
+        let action = state.actions.get(&ActionId::from(action_id)).unwrap();
+        assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
+
+        let events = audit.list().await.unwrap();
+        assert_eq!(events[0].policy_decision, "ask");
+        assert_eq!(events[0].result_status, "approval_required");
+        assert_eq!(events[0].side_effect, "UiSideEffect");
+    }
+}
+
+#[tokio::test]
+async fn browser_fill_upload_and_download_are_denied_by_default_safe_policy() {
+    for (action_id, kind, input, side_effect) in [
+        (
+            "action-browser-fill",
+            "browser.fill_form",
+            serde_json::json!({"url": "https://example.com", "fields": {"#email": "user@example.com"}}),
+            "ExternalSystemMutation",
+        ),
+        (
+            "action-browser-upload",
+            "browser.upload_file",
+            serde_json::json!({"url": "https://example.com", "selector": "input[type=file]", "local_path": "/tmp/fake.txt"}),
+            "ExternalSystemMutation",
+        ),
+        (
+            "action-browser-download",
+            "browser.download_file",
+            serde_json::json!({"url": "https://example.com/file.pdf", "suggested_filename": "file.pdf"}),
+            "FileSystemMutation",
+        ),
+    ] {
+        let kernel = test_kernel();
+        let conversation_id = create_conversation(&kernel).await;
+        let registry = browser_registry();
+        let executor = FakeBrowserExecutor::new(Utc::now());
+        let audit = MemoryAuditSink::new();
+
+        let outcome = process_action_with_input(
+            &kernel,
+            &registry,
+            &executor,
+            &audit,
+            &conversation_id,
+            action_id,
+            kind,
+            input,
+        )
+        .await;
+
+        assert!(matches!(outcome, ActionRuntimeOutcome::Denied { .. }));
+        let state = kernel.load_state(&conversation_id).await.unwrap();
+        let action = state.actions.get(&ActionId::from(action_id)).unwrap();
+        assert_eq!(action.status, ConversationActionStatus::Denied);
+
+        let events = audit.list().await.unwrap();
+        assert_eq!(events[0].policy_decision, "deny");
+        assert_eq!(events[0].result_status, "denied");
+        assert_eq!(events[0].side_effect, side_effect);
+    }
+}
