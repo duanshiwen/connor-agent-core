@@ -386,7 +386,7 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p connector-runtime gmail_offboarded_account_access_is_denied_and_audited` passes.
 - ✅ `./scripts/release-gate.sh` passes.
 
-### PR209: Browser Pilot Permission Contract or Pilot Disable Profile
+### PR209: Browser Pilot Permission Contract or Pilot Disable Profile ✅ Completed
 
 **Goal:** Decide whether browser automation is enabled for the commercial pilot and enforce that decision.
 
@@ -396,27 +396,28 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - PR199 side-effect approval/deny/audit tests.
 - Browser security policy, human takeover boundary, network trace, screenshot/artifact handling.
 
-**Recommended default:** Browser broad exposure should remain disabled for the first commercial pilot unless product-level permission UX is ready.
+**Selected default:** Browser broad exposure remains disabled for the first commercial pilot unless product-level permission UX, irreversible side-effect mapping, real CDP irreversible evidence, and host risk acceptance are all recorded.
 
 **Deliverables option A - disable broad browser exposure:**
 
-- Pilot profile/config that disables broad browser automation by default.
-- Explicit host-opt-in gate for internal workflows.
-- Release gate/doc evidence that browser broad exposure remains blocked.
+- ✅ Pilot profile/config that disables broad browser automation by default: `BrowserPilotPermissionProfile::first_commercial_pilot_default`.
+- ✅ Explicit host-opt-in gate for internal workflows: `BrowserPilotPermissionProfile::host_opt_in`.
+- ✅ Release gate/doc evidence that browser broad exposure remains blocked: `## PR209 Browser Pilot Permission Profile Evidence`.
 
 **Deliverables option B - enable limited browser capabilities:**
 
-- Product-level permission prompt contract.
-- Irreversible side-effect UX mapping.
-- Human takeover UX semantics.
-- Origin/retention/debug-bundle policy.
-- Capability allowlist for the pilot.
+- Deferred to PR210/product work. Host opt-in remains blocked unless all four PR209 evidence gates are complete:
+  - product-level permission prompt contract;
+  - irreversible side-effect UX mapping;
+  - real CDP irreversible side-effect evidence;
+  - host risk acceptance.
 
 **Acceptance:**
 
-- The pilot cannot accidentally expose broad browser automation.
-- If browser is enabled, every enabled capability has permission, audit, and retention evidence.
-- Release gate passes.
+- ✅ The pilot cannot accidentally expose broad browser automation; default profile blocks all registered browser action kinds.
+- ✅ If browser is enabled, every enabled capability must have permission, audit, real CDP irreversible evidence, and host risk acceptance evidence.
+- ✅ `cargo test -p browser-entity browser_pilot_profile` passes.
+- ✅ `./scripts/release-gate.sh` passes.
 
 ### PR210: Real CDP Download/Upload, Origin, Retention, and Human Takeover Evidence
 

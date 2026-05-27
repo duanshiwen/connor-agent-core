@@ -72,6 +72,10 @@ fn release_gate_script_documents_and_runs_required_checks() {
         script.contains("PR208 Gmail Host Audit and Offboarding Evidence"),
         "release gate must include PR208 Gmail host audit/offboarding evidence checks"
     );
+    assert!(
+        script.contains("PR209 Browser Pilot Permission Profile Evidence"),
+        "release gate must include PR209 browser pilot permission profile evidence checks"
+    );
 
     #[cfg(unix)]
     {
@@ -266,5 +270,36 @@ fn gmail_host_audit_offboarding_records_pr208_evidence() {
     assert!(
         plan.contains("PR208: Gmail Host Audit and End-to-End Offboarding Evidence ✅ Completed"),
         "commercial pilot readiness plan must mark PR208 complete"
+    );
+}
+
+#[test]
+fn browser_pilot_permission_profile_records_pr209_evidence() {
+    let root = workspace_root();
+    let evidence =
+        fs::read_to_string(root.join("docs/connector-browser-commercial-review-evidence.md"))
+            .expect("connector/browser commercial review evidence should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "## PR209 Browser Pilot Permission Profile Evidence",
+        "BrowserPilotExposure::Disabled",
+        "BrowserPilotPermissionProfile::first_commercial_pilot_default",
+        "browser_pilot_profile_blocks_broad_exposure_by_default",
+        "browser_pilot_profile_requires_all_product_gate_evidence_to_enable",
+        "real CDP irreversible evidence ready",
+    ] {
+        assert!(
+            evidence.contains(required),
+            "PR209 browser pilot permission profile evidence must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains(
+            "PR209: Browser Pilot Permission Contract or Pilot Disable Profile ✅ Completed"
+        ),
+        "commercial pilot readiness plan must mark PR209 complete"
     );
 }

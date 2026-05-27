@@ -43,6 +43,7 @@ grep -q "## PR206 OAuth Provider Lifecycle Evidence" docs/connector-browser-comm
 grep -q "## PR207 Gmail Retry Timeout Rate-Limit Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## PR208 Gmail Host Audit and Offboarding Evidence" docs/connector-browser-commercial-review-evidence.md
 grep -q "## Browser Kernel Current Capability Review Evidence" docs/connector-browser-commercial-review-evidence.md
+grep -q "## PR209 Browser Pilot Permission Profile Evidence" docs/connector-browser-commercial-review-evidence.md
 test -f docs/storage-journal-fixture-freeze-policy.md
 grep -q "## Required PR Checklist for Persisted Shape Changes" docs/storage-journal-fixture-freeze-policy.md
 test -f docs/storage-journal-fixture-freeze-acceptance.md

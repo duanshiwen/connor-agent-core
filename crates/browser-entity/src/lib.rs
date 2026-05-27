@@ -539,6 +539,118 @@ pub fn register_browser_action_schemas(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrowserPilotExposure {
+    Disabled,
+    HostOptIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserProductPermissionUxEvidence {
+    pub product_permission_ux_ready: bool,
+    pub irreversible_side_effect_mapping_ready: bool,
+    pub real_cdp_irreversible_evidence_ready: bool,
+    pub host_risk_acceptance_recorded: bool,
+}
+
+impl BrowserProductPermissionUxEvidence {
+    pub fn first_pilot_disabled() -> Self {
+        Self {
+            product_permission_ux_ready: false,
+            irreversible_side_effect_mapping_ready: false,
+            real_cdp_irreversible_evidence_ready: false,
+            host_risk_acceptance_recorded: false,
+        }
+    }
+
+    pub fn is_complete(self) -> bool {
+        self.product_permission_ux_ready
+            && self.irreversible_side_effect_mapping_ready
+            && self.real_cdp_irreversible_evidence_ready
+            && self.host_risk_acceptance_recorded
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrowserPilotPermissionDecision {
+    Allowed { reason: String },
+    Blocked { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPilotPermissionProfile {
+    pub exposure: BrowserPilotExposure,
+    pub evidence: BrowserProductPermissionUxEvidence,
+}
+
+impl BrowserPilotPermissionProfile {
+    pub fn first_commercial_pilot_default() -> Self {
+        Self {
+            exposure: BrowserPilotExposure::Disabled,
+            evidence: BrowserProductPermissionUxEvidence::first_pilot_disabled(),
+        }
+    }
+
+    pub fn host_opt_in(evidence: BrowserProductPermissionUxEvidence) -> Self {
+        Self {
+            exposure: BrowserPilotExposure::HostOptIn,
+            evidence,
+        }
+    }
+
+    pub fn decision(&self) -> BrowserPilotPermissionDecision {
+        match self.exposure {
+            BrowserPilotExposure::Disabled => BrowserPilotPermissionDecision::Blocked {
+                reason: "browser broad exposure disabled for first commercial pilot".to_string(),
+            },
+            BrowserPilotExposure::HostOptIn if self.evidence.is_complete() => {
+                BrowserPilotPermissionDecision::Allowed {
+                    reason: "browser broad exposure enabled by explicit host opt-in evidence"
+                        .to_string(),
+                }
+            }
+            BrowserPilotExposure::HostOptIn => BrowserPilotPermissionDecision::Blocked {
+                reason: "browser broad exposure requires product UX, irreversible side-effect mapping, real CDP evidence, and host risk acceptance".to_string(),
+            },
+        }
+    }
+
+    pub fn allowed_action_kinds(&self) -> Vec<ActionKind> {
+        match self.decision() {
+            BrowserPilotPermissionDecision::Allowed { .. } => all_browser_action_kinds(),
+            BrowserPilotPermissionDecision::Blocked { .. } => Vec::new(),
+        }
+    }
+
+    pub fn blocked_action_kinds(&self) -> Vec<ActionKind> {
+        match self.decision() {
+            BrowserPilotPermissionDecision::Allowed { .. } => Vec::new(),
+            BrowserPilotPermissionDecision::Blocked { .. } => all_browser_action_kinds(),
+        }
+    }
+}
+
+pub fn all_browser_action_kinds() -> Vec<ActionKind> {
+    vec![
+        browser_open_url_action_kind(),
+        browser_extract_content_action_kind(),
+        browser_summarize_page_action_kind(),
+        browser_compare_pages_action_kind(),
+        browser_capture_snapshot_action_kind(),
+        browser_click_element_action_kind(),
+        browser_type_text_action_kind(),
+        browser_fill_form_action_kind(),
+        browser_select_option_action_kind(),
+        browser_scroll_page_action_kind(),
+        browser_press_key_action_kind(),
+        browser_execute_js_action_kind(),
+        browser_wait_for_element_action_kind(),
+        browser_get_page_screenshot_action_kind(),
+        browser_upload_file_action_kind(),
+        browser_download_file_action_kind(),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // FakeBrowserExecutor
 // ---------------------------------------------------------------------------
@@ -1960,6 +2072,75 @@ mod tests {
                 .unwrap()
                 .side_effect,
             SideEffectKind::FileSystemMutation
+        );
+    }
+
+    #[test]
+    fn browser_pilot_profile_blocks_broad_exposure_by_default() {
+        let profile = BrowserPilotPermissionProfile::first_commercial_pilot_default();
+
+        assert_eq!(profile.exposure, BrowserPilotExposure::Disabled);
+        assert_eq!(
+            profile.decision(),
+            BrowserPilotPermissionDecision::Blocked {
+                reason: "browser broad exposure disabled for first commercial pilot".to_string(),
+            }
+        );
+        assert!(profile.allowed_action_kinds().is_empty());
+        assert!(
+            profile
+                .blocked_action_kinds()
+                .contains(&browser_open_url_action_kind())
+        );
+        assert!(
+            profile
+                .blocked_action_kinds()
+                .contains(&browser_upload_file_action_kind())
+        );
+        assert!(
+            profile
+                .blocked_action_kinds()
+                .contains(&browser_download_file_action_kind())
+        );
+    }
+
+    #[test]
+    fn browser_pilot_profile_requires_all_product_gate_evidence_to_enable() {
+        let incomplete =
+            BrowserPilotPermissionProfile::host_opt_in(BrowserProductPermissionUxEvidence {
+                product_permission_ux_ready: true,
+                irreversible_side_effect_mapping_ready: false,
+                real_cdp_irreversible_evidence_ready: false,
+                host_risk_acceptance_recorded: true,
+            });
+        assert!(matches!(
+            incomplete.decision(),
+            BrowserPilotPermissionDecision::Blocked { .. }
+        ));
+
+        let enabled =
+            BrowserPilotPermissionProfile::host_opt_in(BrowserProductPermissionUxEvidence {
+                product_permission_ux_ready: true,
+                irreversible_side_effect_mapping_ready: true,
+                real_cdp_irreversible_evidence_ready: true,
+                host_risk_acceptance_recorded: true,
+            });
+        assert_eq!(
+            enabled.decision(),
+            BrowserPilotPermissionDecision::Allowed {
+                reason: "browser broad exposure enabled by explicit host opt-in evidence"
+                    .to_string(),
+            }
+        );
+        assert!(
+            enabled
+                .allowed_action_kinds()
+                .contains(&browser_open_url_action_kind())
+        );
+        assert!(
+            enabled
+                .allowed_action_kinds()
+                .contains(&browser_download_file_action_kind())
         );
     }
 
