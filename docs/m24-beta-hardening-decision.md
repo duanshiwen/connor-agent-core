@@ -43,7 +43,7 @@ See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-po
 | --- | --- | --- | --- | --- |
 | External connector threat reviews and irreversible side-effect tests | Accepted risk for read-only/demo connectors; write connectors blocked | Must be closed for each enabled connector | Connector owner | Per-connector review completed and referenced from high-risk PR |
 | Browser automation product-level permission UX | Accepted only behind explicit host opt-in; broad end-user exposure blocked | Must be closed for each enabled browser capability | Host product owner | Browser exposure review completed; permission UX documented |
-| Credential storage integration and rotation guidance | Must be documented before beta release candidate | Must be operationally rehearsed | Host/security owner | Credential runbook exists and is linked from security checklist |
+| Credential storage integration and rotation guidance | Documented and code-level rehearsal recorded | Must be operationally rehearsed by pilot host | Host/security owner | Credential runbook and rehearsal evidence exist; host-level backend rehearsal remains |
 | Production telemetry export/retention policy | Must be documented before beta release candidate | Must be enforced by pilot host | Host/security owner | Observability policy exists and names allowed sinks/redaction/retention |
 | Storage and journal compatibility fixtures | Accepted with beta fixture policy | Must be frozen or explicitly deferred | Kernel owner | Fixture lifecycle policy exists and release gate remains green |
 | Release packaging, changelog, rollback runbooks | Must be documented before beta release candidate | Must be exercised for pilot release | Release owner | Release operations runbook exists and is linked from README |
@@ -62,7 +62,7 @@ See [storage-journal-fixture-freeze-policy.md](storage-journal-fixture-freeze-po
 Commercial pilot remains blocked until:
 
 - Connector/browser reviews are complete for every enabled commercial capability.
-- Credential runbook is rehearsed by the pilot host.
+- Credential runbook is rehearsed by the pilot host using the selected production backend; code-level rehearsal evidence exists in [credential-operations-rehearsal.md](credential-operations-rehearsal.md).
 - Production observability export and retention policy is enforced by the pilot host.
 - Release rollback and incident escalation runbooks are exercised.
 - Storage/journal fixture freeze is accepted as a commercial-pilot compatibility contract.

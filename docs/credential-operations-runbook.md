@@ -2,6 +2,8 @@
 
 This runbook defines beta/commercial-pilot operating expectations for credential storage, rotation, revocation, and offboarding.
 
+Rehearsal evidence: [credential-operations-rehearsal.md](credential-operations-rehearsal.md)
+
 Security checklist sections: Credential
 
 ## Storage Ownership Decision

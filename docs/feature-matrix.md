@@ -15,6 +15,7 @@ Controlled beta is governed by:
 
 - [m24-beta-hardening-decision.md](m24-beta-hardening-decision.md)
 - [credential-operations-runbook.md](credential-operations-runbook.md)
+- [credential-operations-rehearsal.md](credential-operations-rehearsal.md)
 - [production-observability-policy.md](production-observability-policy.md)
 - [release-operations-runbook.md](release-operations-runbook.md)
 - [connector-browser-risk-review-templates.md](connector-browser-risk-review-templates.md)
