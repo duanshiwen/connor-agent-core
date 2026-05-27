@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use action_core::ActionRegistry;
+use action_core::{ActionExecutor, ActionRegistry};
+use action_runtime::ArtifactResolver;
 use agentos_storage::AgentOsStorage;
 use audit_log::AuditLog;
 use capability_policy::CapabilityPolicy;
@@ -10,8 +11,8 @@ use enterprise_permission_core::PermissionStore;
 use model_adapter::ModelAdapter;
 
 use crate::{
-    KernelError, KernelResult, KernelRuntime, KernelServices, PolicyProviderRegistry,
-    StorageProviderRegistry,
+    KernelActionRuntime, KernelError, KernelResult, KernelRuntime, KernelServices,
+    PolicyProviderRegistry, StorageProviderRegistry,
 };
 
 #[derive(Default)]
@@ -21,6 +22,8 @@ pub struct KernelRuntimeBuilder {
     action_registry: Option<Arc<ActionRegistry>>,
     capability_policy: Option<Arc<CapabilityPolicy>>,
     audit_log: Option<Arc<dyn AuditLog>>,
+    action_executor: Option<Arc<dyn ActionExecutor>>,
+    artifact_resolver: Option<Arc<dyn ArtifactResolver>>,
     permission_store: Option<Arc<Mutex<PermissionStore>>>,
     storage: Option<Arc<AgentOsStorage>>,
     storage_provider_registry: Option<Arc<StorageProviderRegistry>>,
@@ -54,6 +57,16 @@ impl KernelRuntimeBuilder {
 
     pub fn audit_log(mut self, audit_log: Arc<dyn AuditLog>) -> Self {
         self.audit_log = Some(audit_log);
+        self
+    }
+
+    pub fn action_executor(mut self, executor: Arc<dyn ActionExecutor>) -> Self {
+        self.action_executor = Some(executor);
+        self
+    }
+
+    pub fn artifact_resolver(mut self, resolver: Arc<dyn ArtifactResolver>) -> Self {
+        self.artifact_resolver = Some(resolver);
         self
     }
 
@@ -108,12 +121,25 @@ impl KernelRuntimeBuilder {
             service: "audit_log",
         })?;
 
+        let conversation_kernel = Arc::new(ConversationKernel::new(conversation_journal));
+        let action_runtime = self.action_executor.map(|executor| {
+            Arc::new(KernelActionRuntime::new(
+                Arc::clone(&conversation_kernel),
+                Arc::clone(&action_registry),
+                Arc::clone(&capability_policy),
+                executor,
+                Arc::clone(&audit_log),
+                self.artifact_resolver,
+            ))
+        });
+
         let services = KernelServices {
-            conversation_kernel: Arc::new(ConversationKernel::new(conversation_journal)),
+            conversation_kernel,
             model_adapter,
             action_registry,
             capability_policy,
             audit_log,
+            action_runtime,
             permission_store: self.permission_store,
             storage: self.storage,
             storage_provider_registry: self.storage_provider_registry,

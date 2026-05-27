@@ -20,8 +20,9 @@ pub use diagnostics::{
 pub use error::{KernelError, KernelErrorCategory, KernelResult};
 pub use host_api::{
     HostActionDecisionRequest, HostActorContext, HostApiError, HostApiErrorResponse, HostApiResult,
-    HostPendingApproval, HostPermissionResource, HostRunStatus, HostRunStatusResponse,
-    KernelHostApi, StartAgentRunRequest, StartAgentRunResponse, SubmitUserMessageRequest,
+    HostExecuteApprovedActionRequest, HostPendingApproval, HostPermissionResource,
+    HostProcessActionRequest, HostRunStatus, HostRunStatusResponse, KernelHostApi,
+    StartAgentRunRequest, StartAgentRunResponse, SubmitUserMessageRequest,
     SubmitUserMessageResponse,
 };
 pub use registries::{
@@ -30,4 +31,4 @@ pub use registries::{
     StorageProviderRegistry, StorageProviderService,
 };
 pub use runtime::{KernelHealthReport, KernelRuntime, KernelRuntimeState};
-pub use services::KernelServices;
+pub use services::{KernelActionRuntime, KernelServices};

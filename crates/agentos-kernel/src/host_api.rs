@@ -1,4 +1,5 @@
-use action_core::ActionId;
+use action_core::{ActionId, ActionRequest};
+use action_runtime::{ActionRuntimeOutcome, ExecuteApprovedActionRequest, ProcessActionRequest};
 use chrono::Utc;
 use conversation_core::{
     AgentRunStatus, ConversationActionStatus, ConversationId, MessageContent, MessageId,
@@ -29,6 +30,9 @@ pub enum HostApiError {
     #[error("permission store unavailable for permission-aware host request")]
     PermissionStoreUnavailable,
 
+    #[error("action runtime unavailable; configure KernelRuntimeBuilder::action_executor")]
+    ActionRuntimeUnavailable,
+
     #[error("permission denied: {actor} cannot {action} {resource_type}:{resource_id}")]
     PermissionDenied {
         actor: String,
@@ -44,6 +48,7 @@ impl HostApiError {
             Self::KernelOperationFailed { .. } => KernelErrorCategory::External,
             Self::RunNotFound { .. } => KernelErrorCategory::UserActionable,
             Self::PermissionStoreUnavailable => KernelErrorCategory::Bug,
+            Self::ActionRuntimeUnavailable => KernelErrorCategory::Bug,
             Self::PermissionDenied { .. } => KernelErrorCategory::UserActionable,
         }
     }
@@ -53,6 +58,7 @@ impl HostApiError {
             Self::KernelOperationFailed { .. } => "kernel_operation_failed",
             Self::RunNotFound { .. } => "run_not_found",
             Self::PermissionStoreUnavailable => "permission_store_unavailable",
+            Self::ActionRuntimeUnavailable => "action_runtime_unavailable",
             Self::PermissionDenied { .. } => "permission_denied",
         }
     }
@@ -169,6 +175,63 @@ impl KernelHostApi {
             run_id,
             status: HostRunStatus::Running,
         })
+    }
+
+    pub async fn process_action(
+        &self,
+        request: HostProcessActionRequest,
+    ) -> HostApiResult<ActionRuntimeOutcome> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Write,
+        )?;
+
+        let action_runtime = self
+            .runtime
+            .services()
+            .action_runtime
+            .as_ref()
+            .ok_or(HostApiError::ActionRuntimeUnavailable)?;
+
+        action_runtime
+            .process(ProcessActionRequest {
+                conversation_id: &request.conversation_id,
+                action_request: request.action_request,
+                requested_by: request.requested_by,
+                runtime_actor: request.runtime_actor,
+            })
+            .await
+            .map_err(HostApiError::from)
+    }
+
+    pub async fn execute_approved_action(
+        &self,
+        request: HostExecuteApprovedActionRequest,
+    ) -> HostApiResult<ActionRuntimeOutcome> {
+        self.require_permission(
+            request.actor_context.as_ref(),
+            ResourceType::Conversation,
+            ResourceId(request.conversation_id.0.clone()),
+            PermissionAction::Write,
+        )?;
+
+        let action_runtime = self
+            .runtime
+            .services()
+            .action_runtime
+            .as_ref()
+            .ok_or(HostApiError::ActionRuntimeUnavailable)?;
+
+        action_runtime
+            .execute_approved(ExecuteApprovedActionRequest {
+                conversation_id: &request.conversation_id,
+                action_id: &request.action_id,
+                runtime_actor: request.runtime_actor,
+            })
+            .await
+            .map_err(HostApiError::from)
     }
 
     pub async fn get_run_status(
@@ -405,6 +468,25 @@ pub struct HostActionDecisionRequest {
     pub action_id: ActionId,
     pub decided_by: ParticipantId,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_context: Option<HostActorContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostProcessActionRequest {
+    pub conversation_id: ConversationId,
+    pub action_request: ActionRequest,
+    pub requested_by: Option<ParticipantId>,
+    pub runtime_actor: Option<ParticipantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_context: Option<HostActorContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostExecuteApprovedActionRequest {
+    pub conversation_id: ConversationId,
+    pub action_id: ActionId,
+    pub runtime_actor: Option<ParticipantId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_context: Option<HostActorContext>,
 }
