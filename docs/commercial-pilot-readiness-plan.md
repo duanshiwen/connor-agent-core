@@ -503,6 +503,33 @@ The plan below assumes the target is commercial pilot, not only controlled beta.
 - ✅ `cargo test -p agentos-kernel --test release_gate_docs pilot_release_rollback_incident_exercise_records_pr212_evidence` passes.
 - ✅ `./scripts/release-gate.sh` passes on the release commit.
 
+### PR213: First Pilot Candidate Evidence Bundle ✅ Completed
+
+**Goal:** Assemble PR200-PR212 readiness evidence into one reviewable first-pilot candidate bundle before go/no-go.
+
+**Already available:**
+
+- PR200-PR212 commercial-pilot readiness evidence.
+- Lean first pilot scope recommendation: Gmail read-only included, browser broad exposure disabled.
+- Release/rollback/incident exercise evidence.
+
+**Deliverables:**
+
+- ✅ First pilot candidate bundle: [first-pilot-candidate-evidence-bundle.md](first-pilot-candidate-evidence-bundle.md).
+- ✅ Candidate identity: `v0.1.0-pilot.0-candidate-bundle`, commit `9ec2677a9f08b7494685fa4cb2dc3983bbdeee49`, no real tag/push.
+- ✅ Lean first pilot scope: kernel host API, durable run/action/approval, audit, local storage/journal, credential backend, OAuth revocation/offboarding, Gmail read-only, observability, host examples, release/rollback/incident exercise.
+- ✅ Evidence matrix linking PR200 through PR212.
+- ✅ Excluded/deferred capabilities: browser broad automation, mail write/send, multi-device P2P sync, people intelligence, scheduler daemon, unreviewed connectors, unapproved remote telemetry vendor export.
+- ✅ Open host-product integration items and pilot go/no-go prerequisites.
+
+**Acceptance:**
+
+- ✅ First pilot candidate evidence is assembled without creating a real release tag or pushing artifacts.
+- ✅ Gmail read-only inclusion and browser broad exposure disabled decision are explicit.
+- ✅ PR200-PR212 evidence is linked in one reviewable matrix.
+- ✅ `cargo test -p agentos-kernel --test release_gate_docs first_pilot_candidate_bundle_records_pr213_evidence` passes.
+- ✅ `./scripts/release-gate.sh` passes.
+
 ## Recommended Sequencing
 
 Recommended execution order:

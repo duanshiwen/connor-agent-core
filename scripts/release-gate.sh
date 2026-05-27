@@ -41,6 +41,9 @@ test -f docs/pilot-release-rollback-incident-exercise.md
 grep -q "## Pilot Release Candidate Exercise" docs/pilot-release-rollback-incident-exercise.md
 grep -q "## Pilot Rollback Exercise" docs/pilot-release-rollback-incident-exercise.md
 grep -q "## Pilot Incident Exercise" docs/pilot-release-rollback-incident-exercise.md
+test -f docs/first-pilot-candidate-evidence-bundle.md
+grep -q "# First Pilot Candidate Evidence Bundle" docs/first-pilot-candidate-evidence-bundle.md
+grep -q "## Pilot Go/No-Go Prerequisites" docs/first-pilot-candidate-evidence-bundle.md
 test -f docs/connector-browser-risk-review-templates.md
 grep -q "## Per-Connector Threat Review Template" docs/connector-browser-risk-review-templates.md
 test -f docs/connector-browser-commercial-review-evidence.md

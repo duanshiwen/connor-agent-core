@@ -65,6 +65,12 @@ fn release_gate_script_documents_and_runs_required_checks() {
         "release gate must include PR212 pilot release/rollback/incident exercise checks"
     );
     assert!(
+        script.contains("docs/first-pilot-candidate-evidence-bundle.md")
+            && script.contains("First Pilot Candidate Evidence Bundle")
+            && script.contains("Pilot Go/No-Go Prerequisites"),
+        "release gate must include PR213 first pilot candidate evidence bundle checks"
+    );
+    assert!(
         script.contains("Commercial-Pilot Fixture Freeze Acceptance")
             && script.contains("Long-Lived Fixture Support Policy")
             && script.contains("Migration Release Note Template"),
@@ -374,5 +380,39 @@ fn pilot_release_rollback_incident_exercise_records_pr212_evidence() {
     assert!(
         plan.contains("PR212: Pilot Release, Rollback, and Incident Exercise ✅ Completed"),
         "commercial pilot readiness plan must mark PR212 complete"
+    );
+}
+
+#[test]
+fn first_pilot_candidate_bundle_records_pr213_evidence() {
+    let root = workspace_root();
+    let bundle = fs::read_to_string(root.join("docs/first-pilot-candidate-evidence-bundle.md"))
+        .expect("first pilot candidate evidence bundle should exist");
+    let plan = fs::read_to_string(root.join("docs/commercial-pilot-readiness-plan.md"))
+        .expect("commercial pilot readiness plan should exist");
+
+    for required in [
+        "# First Pilot Candidate Evidence Bundle",
+        "## Candidate Identity",
+        "## Lean First Pilot Scope",
+        "## Evidence Matrix",
+        "## Excluded or Deferred Capabilities",
+        "## Open Host-Product Integration Items",
+        "## Pilot Go/No-Go Prerequisites",
+        "v0.1.0-pilot.0-candidate-bundle",
+        "Gmail read-only connector",
+        "browser broad exposure disabled",
+        "PR200",
+        "PR212",
+    ] {
+        assert!(
+            bundle.contains(required),
+            "PR213 first pilot candidate evidence bundle must contain {required}"
+        );
+    }
+
+    assert!(
+        plan.contains("PR213: First Pilot Candidate Evidence Bundle ✅ Completed"),
+        "commercial pilot readiness plan must mark PR213 complete"
     );
 }
