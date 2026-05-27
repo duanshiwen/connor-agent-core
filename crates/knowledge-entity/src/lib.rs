@@ -2189,6 +2189,14 @@ impl<I: KnowledgeIndex> PermissionAwareKnowledgeSearch<I> {
         query: &KnowledgeFullTextQuery,
         user_id: &EnterpriseUserId,
     ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeIndexError> {
+        if !self
+            .permission_store
+            .get_user_lifecycle(user_id)
+            .is_active()
+        {
+            return Ok(Vec::new());
+        }
+
         let results = self.inner.query(query).await?;
         let filtered = results
             .into_iter()
@@ -4810,6 +4818,59 @@ mod tests {
         let results = search.query_with_permissions(&query, &user).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.id.0, "secret-entry");
+    }
+
+    #[tokio::test]
+    async fn permission_aware_knowledge_denies_offboarded_user() {
+        use enterprise_permission_core::{
+            EnterpriseRole, EnterpriseUserLifecycle, EnterpriseUserStatus, PermissionGrant,
+            ResourceId,
+        };
+
+        let mut index = MemoryFullTextKnowledgeIndex::default();
+        index
+            .upsert(KnowledgeIndexDocument {
+                entry: KnowledgeEntryRef {
+                    id: KnowledgeEntryId::from("kb-1"),
+                    title: "Offboarded knowledge".to_string(),
+                    source_uri: None,
+                    artifact_id: None,
+                    asset_id: None,
+                    created_at: ts(),
+                },
+                body_markdown: "knowledge body".to_string(),
+                tags: vec![],
+                frontmatter: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let mut store = PermissionStore::new();
+        store.add_grant(PermissionGrant {
+            grant_id: "grant-1".to_string(),
+            user_id: EnterpriseUserId::from("user-1"),
+            role: EnterpriseRole::User,
+            resource_type: ResourceType::KnowledgeBase,
+            resource_id: ResourceId::from("kb-1"),
+            actions: vec![PermissionAction::Read],
+            granted_at: Utc::now(),
+            expires_at: None,
+            revoked: false,
+        });
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: EnterpriseUserId::from("user-1"),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: Utc::now(),
+            reason: None,
+        });
+
+        let search = PermissionAwareKnowledgeSearch::new(index, store);
+        let query = KnowledgeFullTextQuery::new("knowledge");
+        let results = search
+            .query_with_permissions(&query, &EnterpriseUserId::from("user-1"))
+            .await
+            .unwrap();
+        assert!(results.is_empty());
     }
 
     #[tokio::test]

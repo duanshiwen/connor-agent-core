@@ -17,8 +17,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use enterprise_permission_core::{
-    CacheStatus, CachedPermissionDecision, EnterpriseUserId, PermissionAction, PermissionDecision,
-    PermissionStore, ResourceId, ResourceType, ServerBackedPermissionStore,
+    CacheStatus, CachedPermissionDecision, EnterpriseUserId, EnterpriseUserLifecycle,
+    PermissionAction, PermissionDecision, PermissionStore, ResourceId, ResourceType,
+    ServerBackedPermissionStore,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -202,6 +203,8 @@ pub trait EnterpriseSearchBackend: Send + Sync + fmt::Debug {
 
 /// Permission source used by enterprise search filtering.
 pub trait EnterpriseSearchPermissionSource {
+    fn user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle;
+
     fn check_search_permission(
         &self,
         user_id: &EnterpriseUserId,
@@ -212,6 +215,10 @@ pub trait EnterpriseSearchPermissionSource {
 }
 
 impl EnterpriseSearchPermissionSource for PermissionStore {
+    fn user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle {
+        self.get_user_lifecycle(user_id)
+    }
+
     fn check_search_permission(
         &self,
         user_id: &EnterpriseUserId,
@@ -237,6 +244,10 @@ impl<P> EnterpriseSearchPermissionSource for ServerBackedPermissionStore<P>
 where
     P: enterprise_permission_core::RemotePermissionProvider,
 {
+    fn user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle {
+        self.get_user_lifecycle(user_id)
+    }
+
     fn check_search_permission(
         &self,
         user_id: &EnterpriseUserId,
@@ -287,6 +298,21 @@ where
         request: &EnterpriseSearchRequest,
         now: DateTime<Utc>,
     ) -> Result<EnterpriseSearchResponse, SearchError> {
+        let lifecycle = self.permission_source.user_lifecycle(&request.user_id);
+        if !lifecycle.is_active() {
+            return Ok(EnterpriseSearchResponse {
+                results: Vec::new(),
+                total_found: 0,
+                filtered_count: 0,
+                query: request.query.clone(),
+                cache_status: Some(CacheStatus::Fresh),
+                policy_warnings: vec![format!(
+                    "user lifecycle is {}; enterprise search denied",
+                    lifecycle
+                )],
+            });
+        }
+
         let backend_response = self.backend.search_enterprise(request).await?;
         let backend_total_found = backend_response.backend_total_found;
         let mut results = Vec::new();
@@ -742,6 +768,40 @@ mod tests {
         assert_eq!(response.filtered_count, 1);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].id, "r1");
+    }
+
+    #[tokio::test]
+    async fn enterprise_search_returns_empty_for_offboarded_user() {
+        let backend = FakeEnterpriseSearchBackend {
+            results: vec![make_result("r1", "kb-1")],
+        };
+        let mut store = setup_permission_store();
+        store.set_user_lifecycle(enterprise_permission_core::EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: enterprise_permission_core::EnterpriseUserLifecycle::Offboarded,
+            changed_at: ts(),
+            reason: Some("left company".to_string()),
+        });
+        let executor =
+            EnterpriseSearchExecutor::new(backend, store, EnterpriseSearchPolicy::default());
+        let request = EnterpriseSearchRequest {
+            query: "secret".to_string(),
+            user_id: user_a(),
+            organization_id: Some("org-1".to_string()),
+            limit: None,
+            resource_types: None,
+        };
+
+        let response = executor.search_at(&request, ts()).await.unwrap();
+
+        assert!(response.results.is_empty());
+        assert_eq!(response.total_found, 0);
+        assert!(
+            response
+                .policy_warnings
+                .iter()
+                .any(|warning| warning.contains("user lifecycle is offboarded"))
+        );
     }
 
     #[tokio::test]

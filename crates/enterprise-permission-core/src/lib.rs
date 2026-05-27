@@ -16,7 +16,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 // ---------------------------------------------------------------------------
 // Enterprise Identity
@@ -41,6 +41,130 @@ impl From<String> for EnterpriseUserId {
 impl From<&str> for EnterpriseUserId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Enterprise User Lifecycle / Offboarding
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnterpriseUserLifecycle {
+    Active,
+    Suspended,
+    Disabled,
+    Offboarded,
+}
+
+impl fmt::Display for EnterpriseUserLifecycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Suspended => write!(f, "suspended"),
+            Self::Disabled => write!(f, "disabled"),
+            Self::Offboarded => write!(f, "offboarded"),
+        }
+    }
+}
+
+impl EnterpriseUserLifecycle {
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnterpriseUserStatus {
+    pub user_id: EnterpriseUserId,
+    pub lifecycle: EnterpriseUserLifecycle,
+    pub changed_at: DateTime<Utc>,
+    pub reason: Option<String>,
+}
+
+impl EnterpriseUserStatus {
+    pub fn active(user_id: EnterpriseUserId, changed_at: DateTime<Utc>) -> Self {
+        Self {
+            user_id,
+            lifecycle: EnterpriseUserLifecycle::Active,
+            changed_at,
+            reason: None,
+        }
+    }
+
+    pub fn can_transition_to(&self, next: EnterpriseUserLifecycle) -> bool {
+        !matches!(self.lifecycle, EnterpriseUserLifecycle::Offboarded)
+            || matches!(next, EnterpriseUserLifecycle::Offboarded)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OffboardingEventKind {
+    UserRemoved,
+    AccountDisabled,
+    MembershipRevoked,
+    AllMembershipsRevoked,
+}
+
+impl fmt::Display for OffboardingEventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UserRemoved => write!(f, "user_removed"),
+            Self::AccountDisabled => write!(f, "account_disabled"),
+            Self::MembershipRevoked => write!(f, "membership_revoked"),
+            Self::AllMembershipsRevoked => write!(f, "all_memberships_revoked"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OffboardingEvent {
+    pub event_id: String,
+    pub user_id: EnterpriseUserId,
+    pub organization_id: OrganizationId,
+    pub event_kind: OffboardingEventKind,
+    pub triggered_by: EnterpriseUserId,
+    pub reason: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+pub trait OffboardingEventStore {
+    fn record(&mut self, event: OffboardingEvent);
+    fn list_by_user(&self, user_id: &EnterpriseUserId) -> Vec<OffboardingEvent>;
+    fn list_by_org(&self, organization_id: &OrganizationId) -> Vec<OffboardingEvent>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryOffboardingEventStore {
+    events: Vec<OffboardingEvent>,
+}
+
+impl MemoryOffboardingEventStore {
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+}
+
+impl OffboardingEventStore for MemoryOffboardingEventStore {
+    fn record(&mut self, event: OffboardingEvent) {
+        self.events.push(event);
+    }
+
+    fn list_by_user(&self, user_id: &EnterpriseUserId) -> Vec<OffboardingEvent> {
+        self.events
+            .iter()
+            .filter(|event| event.user_id == *user_id)
+            .cloned()
+            .collect()
+    }
+
+    fn list_by_org(&self, organization_id: &OrganizationId) -> Vec<OffboardingEvent> {
+        self.events
+            .iter()
+            .filter(|event| event.organization_id == *organization_id)
+            .cloned()
+            .collect()
     }
 }
 
@@ -250,11 +374,15 @@ impl EnterpriseAssetPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct PermissionStore {
     grants: Vec<PermissionGrant>,
+    user_lifecycles: HashMap<EnterpriseUserId, EnterpriseUserStatus>,
 }
 
 impl PermissionStore {
     pub fn new() -> Self {
-        Self { grants: Vec::new() }
+        Self {
+            grants: Vec::new(),
+            user_lifecycles: HashMap::new(),
+        }
     }
 
     /// Add a grant to the store.
@@ -272,6 +400,40 @@ impl PermissionStore {
         }
     }
 
+    pub fn revoke_all_grants_for_user(&mut self, user_id: &EnterpriseUserId) -> usize {
+        let mut revoked = 0;
+        for grant in self
+            .grants
+            .iter_mut()
+            .filter(|g| g.user_id == *user_id && !g.revoked)
+        {
+            grant.revoked = true;
+            revoked += 1;
+        }
+        revoked
+    }
+
+    pub fn set_user_lifecycle(&mut self, status: EnterpriseUserStatus) -> bool {
+        if let Some(existing) = self.user_lifecycles.get(&status.user_id)
+            && !existing.can_transition_to(status.lifecycle)
+        {
+            return false;
+        }
+        self.user_lifecycles.insert(status.user_id.clone(), status);
+        true
+    }
+
+    pub fn get_user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle {
+        self.user_lifecycles
+            .get(user_id)
+            .map(|status| status.lifecycle)
+            .unwrap_or(EnterpriseUserLifecycle::Active)
+    }
+
+    pub fn is_user_active(&self, user_id: &EnterpriseUserId) -> bool {
+        self.get_user_lifecycle(user_id).is_active()
+    }
+
     /// Check permission for a user on a resource.
     pub fn check(
         &self,
@@ -281,6 +443,10 @@ impl PermissionStore {
         action: &PermissionAction,
         now: DateTime<Utc>,
     ) -> PermissionDecision {
+        if !self.is_user_active(user_id) {
+            return PermissionDecision::Deny;
+        }
+
         // Find matching active grants
         let matching: Vec<&PermissionGrant> = self
             .grants
@@ -313,6 +479,10 @@ impl PermissionStore {
         action: &PermissionAction,
         now: DateTime<Utc>,
     ) -> PermissionDecision {
+        if !self.is_user_active(user_id) {
+            return PermissionDecision::Deny;
+        }
+
         // SuperAdmin bypasses all checks
         if role == EnterpriseRole::SuperAdmin {
             return PermissionDecision::Allow;
@@ -545,12 +715,35 @@ impl OrganizationalPermissionStore {
         self.inner.add_grant(grant);
     }
 
+    pub fn set_user_lifecycle(&mut self, status: EnterpriseUserStatus) -> bool {
+        self.inner.set_user_lifecycle(status)
+    }
+
+    pub fn get_user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle {
+        self.inner.get_user_lifecycle(user_id)
+    }
+
+    pub fn revoke_all_grants_for_user(&mut self, user_id: &EnterpriseUserId) -> usize {
+        self.inner.revoke_all_grants_for_user(user_id)
+    }
+
+    pub fn remove_all_memberships_for_user(&mut self, user_id: &EnterpriseUserId) -> usize {
+        let before = self.memberships.len();
+        self.memberships
+            .retain(|membership| membership.user_id != *user_id);
+        before - self.memberships.len()
+    }
+
     /// Get all inherited grants for a user.
     pub fn get_inherited_grants(
         &self,
         user_id: &EnterpriseUserId,
         now: DateTime<Utc>,
     ) -> Vec<InheritedGrant> {
+        if !self.inner.is_user_active(user_id) {
+            return Vec::new();
+        }
+
         let mut result = Vec::new();
 
         // Direct grants
@@ -629,6 +822,10 @@ impl OrganizationalPermissionStore {
         action: &PermissionAction,
         now: DateTime<Utc>,
     ) -> PermissionDecision {
+        if !self.inner.is_user_active(user_id) {
+            return PermissionDecision::Deny;
+        }
+
         let inherited_grants = self.get_inherited_grants(user_id, now);
 
         for inherited in &inherited_grants {
@@ -827,6 +1024,28 @@ impl<P: RemotePermissionProvider> ServerBackedPermissionStore<P> {
 
     pub fn cached_snapshot_id(&self) -> Option<&str> {
         self.cached_snapshot_id.as_deref()
+    }
+
+    pub fn set_user_lifecycle(&mut self, status: EnterpriseUserStatus) -> bool {
+        self.cached_store
+            .get_or_insert_with(OrganizationalPermissionStore::new)
+            .set_user_lifecycle(status)
+    }
+
+    pub fn get_user_lifecycle(&self, user_id: &EnterpriseUserId) -> EnterpriseUserLifecycle {
+        self.cached_store
+            .as_ref()
+            .map(|store| store.get_user_lifecycle(user_id))
+            .unwrap_or(EnterpriseUserLifecycle::Active)
+    }
+
+    pub fn invalidate_user(&mut self, user_id: &EnterpriseUserId) -> bool {
+        let Some(store) = self.cached_store.as_mut() else {
+            return false;
+        };
+        let revoked = store.revoke_all_grants_for_user(user_id);
+        let removed = store.remove_all_memberships_for_user(user_id);
+        revoked > 0 || removed > 0
     }
 
     pub fn refresh(&mut self, now: DateTime<Utc>) -> Result<CacheRefreshReport, PermissionError> {
@@ -1691,5 +1910,396 @@ mod tests {
 
         assert_eq!(decision.decision, PermissionDecision::Deny);
         assert_eq!(store.cached_snapshot_id(), Some("snap-2"));
+    }
+
+    #[test]
+    fn enterprise_user_lifecycle_display() {
+        assert_eq!(EnterpriseUserLifecycle::Active.to_string(), "active");
+        assert_eq!(EnterpriseUserLifecycle::Suspended.to_string(), "suspended");
+        assert_eq!(EnterpriseUserLifecycle::Disabled.to_string(), "disabled");
+        assert_eq!(
+            EnterpriseUserLifecycle::Offboarded.to_string(),
+            "offboarded"
+        );
+    }
+
+    #[test]
+    fn enterprise_user_lifecycle_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EnterpriseUserLifecycle::Offboarded).unwrap(),
+            "\"offboarded\""
+        );
+    }
+
+    #[test]
+    fn enterprise_user_status_roundtrip() {
+        let status = EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Suspended,
+            changed_at: ts(),
+            reason: Some("security review".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: EnterpriseUserStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, status);
+    }
+
+    #[test]
+    fn enterprise_user_status_rejects_offboarded_to_active_transition() {
+        let status = EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: ts(),
+            reason: Some("left company".to_string()),
+        };
+        assert!(!status.can_transition_to(EnterpriseUserLifecycle::Active));
+    }
+
+    #[test]
+    fn enterprise_user_status_allows_active_to_offboarded_transition() {
+        let status = EnterpriseUserStatus::active(user_a(), ts());
+        assert!(status.can_transition_to(EnterpriseUserLifecycle::Offboarded));
+    }
+
+    #[test]
+    fn enterprise_user_status_allows_suspended_to_active_transition() {
+        let status = EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Suspended,
+            changed_at: ts(),
+            reason: None,
+        };
+        assert!(status.can_transition_to(EnterpriseUserLifecycle::Active));
+    }
+
+    #[test]
+    fn offboarding_event_roundtrip() {
+        let event = OffboardingEvent {
+            event_id: "evt-1".to_string(),
+            user_id: user_a(),
+            organization_id: OrganizationId::from("org-1"),
+            event_kind: OffboardingEventKind::UserRemoved,
+            triggered_by: EnterpriseUserId::from("admin-1"),
+            reason: Some("employee departure".to_string()),
+            occurred_at: ts(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: OffboardingEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn offboarding_event_kind_display() {
+        assert_eq!(
+            OffboardingEventKind::UserRemoved.to_string(),
+            "user_removed"
+        );
+        assert_eq!(
+            OffboardingEventKind::AccountDisabled.to_string(),
+            "account_disabled"
+        );
+        assert_eq!(
+            OffboardingEventKind::MembershipRevoked.to_string(),
+            "membership_revoked"
+        );
+        assert_eq!(
+            OffboardingEventKind::AllMembershipsRevoked.to_string(),
+            "all_memberships_revoked"
+        );
+    }
+
+    #[test]
+    fn memory_offboarding_event_store_records_and_lists_by_user() {
+        let mut store = MemoryOffboardingEventStore::new();
+        let event = OffboardingEvent {
+            event_id: "evt-1".to_string(),
+            user_id: user_a(),
+            organization_id: OrganizationId::from("org-1"),
+            event_kind: OffboardingEventKind::UserRemoved,
+            triggered_by: EnterpriseUserId::from("admin-1"),
+            reason: None,
+            occurred_at: ts(),
+        };
+        store.record(event.clone());
+        assert_eq!(store.list_by_user(&user_a()), vec![event]);
+    }
+
+    #[test]
+    fn memory_offboarding_event_store_lists_by_org() {
+        let mut store = MemoryOffboardingEventStore::new();
+        store.record(OffboardingEvent {
+            event_id: "evt-1".to_string(),
+            user_id: user_a(),
+            organization_id: OrganizationId::from("org-1"),
+            event_kind: OffboardingEventKind::AllMembershipsRevoked,
+            triggered_by: EnterpriseUserId::from("admin-1"),
+            reason: None,
+            occurred_at: ts(),
+        });
+        assert_eq!(store.list_by_org(&OrganizationId::from("org-1")).len(), 1);
+    }
+
+    #[test]
+    fn permission_store_revoke_all_grants_for_user() {
+        let mut store = PermissionStore::new();
+        store.add_grant(make_grant("g-1", false));
+        store.add_grant(make_grant("g-2", false));
+        assert_eq!(store.revoke_all_grants_for_user(&user_a()), 2);
+        assert_eq!(
+            store.check(
+                &user_a(),
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from("kb-main"),
+                &PermissionAction::Read,
+                ts()
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn permission_store_set_and_get_user_lifecycle() {
+        let mut store = PermissionStore::new();
+        assert_eq!(
+            store.get_user_lifecycle(&user_a()),
+            EnterpriseUserLifecycle::Active
+        );
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Disabled,
+            changed_at: ts(),
+            reason: Some("admin disabled".to_string()),
+        });
+        assert_eq!(
+            store.get_user_lifecycle(&user_a()),
+            EnterpriseUserLifecycle::Disabled
+        );
+    }
+
+    #[test]
+    fn permission_store_denies_offboarded_user_even_with_active_grant() {
+        let mut store = PermissionStore::new();
+        store.add_grant(make_grant("g-1", false));
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: ts(),
+            reason: Some("left company".to_string()),
+        });
+        assert_eq!(
+            store.check_with_role(
+                &user_a(),
+                EnterpriseRole::SuperAdmin,
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from("kb-main"),
+                &PermissionAction::Read,
+                ts()
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn permission_store_denies_disabled_user() {
+        let mut store = PermissionStore::new();
+        store.add_grant(make_grant("g-1", false));
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Disabled,
+            changed_at: ts(),
+            reason: None,
+        });
+        assert_eq!(
+            store.check(
+                &user_a(),
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from("kb-main"),
+                &PermissionAction::Read,
+                ts()
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn permission_store_allows_suspended_user_after_reactivation() {
+        let mut store = PermissionStore::new();
+        store.add_grant(make_grant("g-1", false));
+        assert!(store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Suspended,
+            changed_at: ts(),
+            reason: None
+        }));
+        assert!(store.set_user_lifecycle(EnterpriseUserStatus::active(
+            user_a(),
+            ts() + chrono::Duration::minutes(1)
+        )));
+        assert_eq!(
+            store.check(
+                &user_a(),
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from("kb-main"),
+                &PermissionAction::Read,
+                ts()
+            ),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn permission_store_remove_all_memberships_for_user() {
+        let mut store = OrganizationalPermissionStore::new();
+        store.add_membership(Membership {
+            membership_id: "m-1".to_string(),
+            user_id: user_a(),
+            membership_type: MembershipType::Organization,
+            org_id: Some(OrganizationId::from("org-1")),
+            team_id: None,
+            group_id: None,
+            role: EnterpriseRole::User,
+            joined_at: ts(),
+            expires_at: None,
+        });
+        assert_eq!(store.remove_all_memberships_for_user(&user_a()), 1);
+        assert!(store.get_inherited_grants(&user_a(), ts()).is_empty());
+    }
+
+    #[test]
+    fn organizational_store_denies_offboarded_user_with_inheritance() {
+        let mut store = OrganizationalPermissionStore::new();
+        store.add_membership(Membership {
+            membership_id: "m-1".to_string(),
+            user_id: user_a(),
+            membership_type: MembershipType::Organization,
+            org_id: Some(OrganizationId::from("org-1")),
+            team_id: None,
+            group_id: None,
+            role: EnterpriseRole::User,
+            joined_at: ts(),
+            expires_at: None,
+        });
+        store.add_org_grant(OrganizationId::from("org-1"), make_grant("g-1", false));
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: ts(),
+            reason: None,
+        });
+        assert_eq!(
+            store.check_with_inheritance(
+                &user_a(),
+                &ResourceType::KnowledgeBase,
+                &ResourceId::from("kb-main"),
+                &PermissionAction::Read,
+                ts()
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn server_backed_store_invalidates_user_cache() {
+        let now = ts();
+        let provider = MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+            snapshot_id: "snap-1".to_string(),
+            fetched_at: now,
+            direct_grants: vec![make_grant("g-1", false)],
+            memberships: vec![],
+            org_grants: vec![],
+            team_grants: vec![],
+            group_grants: vec![],
+        });
+        let mut store = ServerBackedPermissionStore::new(provider, CachePolicy::default());
+        store.refresh(now).unwrap();
+        assert!(store.invalidate_user(&user_a()));
+        assert_eq!(
+            store
+                .check_with_inheritance(
+                    &user_a(),
+                    &ResourceType::KnowledgeBase,
+                    &ResourceId::from("kb-main"),
+                    &PermissionAction::Read,
+                    now
+                )
+                .decision,
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn server_backed_store_denies_offboarded_user() {
+        let now = ts();
+        let provider = MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+            snapshot_id: "snap-1".to_string(),
+            fetched_at: now,
+            direct_grants: vec![make_grant("g-1", false)],
+            memberships: vec![],
+            org_grants: vec![],
+            team_grants: vec![],
+            group_grants: vec![],
+        });
+        let mut store = ServerBackedPermissionStore::new(provider, CachePolicy::default());
+        store.refresh(now).unwrap();
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: now,
+            reason: None,
+        });
+        assert_eq!(
+            store
+                .check_with_inheritance(
+                    &user_a(),
+                    &ResourceType::KnowledgeBase,
+                    &ResourceId::from("kb-main"),
+                    &PermissionAction::Read,
+                    now
+                )
+                .decision,
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn offboarded_user_cannot_access_enterprise_resources_with_stale_grant() {
+        let now = ts();
+        let stale_time = now + chrono::Duration::minutes(10);
+        let mut provider =
+            MemoryRemotePermissionProvider::with_snapshot(ServerPermissionSnapshot {
+                snapshot_id: "snap-1".to_string(),
+                fetched_at: now,
+                direct_grants: vec![make_grant("g-1", false)],
+                memberships: vec![],
+                org_grants: vec![],
+                team_grants: vec![],
+                group_grants: vec![],
+            });
+        let mut store = ServerBackedPermissionStore::new(
+            provider.clone(),
+            CachePolicy {
+                fresh_for: chrono::Duration::minutes(5),
+                stale_for: chrono::Duration::minutes(30),
+            },
+        );
+        store.refresh(now).unwrap();
+        provider.set_available(false);
+        store.set_provider(provider);
+        store.refresh(stale_time).unwrap();
+        store.set_user_lifecycle(EnterpriseUserStatus {
+            user_id: user_a(),
+            lifecycle: EnterpriseUserLifecycle::Offboarded,
+            changed_at: stale_time,
+            reason: None,
+        });
+        let decision = store.check_with_inheritance(
+            &user_a(),
+            &ResourceType::KnowledgeBase,
+            &ResourceId::from("kb-main"),
+            &PermissionAction::Read,
+            stale_time,
+        );
+        assert_eq!(decision.cache_status, CacheStatus::Stale);
+        assert_eq!(decision.decision, PermissionDecision::Deny);
     }
 }
