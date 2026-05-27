@@ -241,6 +241,23 @@ cargo fmt --all
 cargo clippy --workspace -- -D warnings
 ```
 
+
+## Release Checklist
+
+Run the one-command release gate from the repository root before cutting a release candidate:
+
+```bash
+./scripts/release-gate.sh
+```
+
+The release gate performs the minimum M24 checklist in order:
+
+1. Docs check: verifies this README documents the release checklist command.
+2. Feature matrix check: verifies [docs/feature-matrix.md](docs/feature-matrix.md) exists and covers the stable public API boundary crates.
+3. Formatting: `cargo fmt --all --check`.
+4. Linting: `cargo clippy --workspace -- -D warnings`.
+5. Tests: `cargo test --workspace`.
+
 ## 最小示例
 
 ```rust
