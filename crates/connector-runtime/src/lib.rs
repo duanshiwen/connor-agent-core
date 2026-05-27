@@ -7,7 +7,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use identity_core::{AgentOsId, DeviceId, FakeCryptoProvider, IdentityStore, PublicIdentity};
+use identity_core::{
+    AgentOsId, CredentialStore, DeviceId, FakeCryptoProvider, IdentityStore, OAuthCredentialRef,
+    OAuthTokenRefreshError, OAuthTokenRefresher, OAuthTokenSet, PublicIdentity, SecretValue,
+    refresh_oauth_credential,
+};
 use serde::{Deserialize, Serialize};
 use server_account_core::{
     AccountBindingAuditEvent, AccountBindingAuditOutcome, BindingApproval, ConnectionPolicy,
@@ -345,6 +349,34 @@ impl ExternalServiceCredentials {
             None => false,
         }
     }
+
+    pub fn needs_refresh(&self, now: DateTime<Utc>, refresh_skew_secs: i64) -> bool {
+        self.expires_at.is_some_and(|expires_at| {
+            expires_at <= now + chrono::Duration::seconds(refresh_skew_secs.max(0))
+        })
+    }
+
+    pub fn to_oauth_token_set(&self) -> OAuthTokenSet {
+        OAuthTokenSet::new(
+            SecretValue::new(self.access_token.clone()),
+            self.refresh_token.clone().map(SecretValue::new),
+            self.token_type.clone(),
+            self.expires_at,
+            self.scopes.clone(),
+        )
+    }
+
+    pub fn from_oauth_token_set(token_set: OAuthTokenSet) -> Self {
+        Self {
+            access_token: token_set.access_token.expose_secret().to_string(),
+            refresh_token: token_set
+                .refresh_token
+                .map(|secret| secret.expose_secret().to_string()),
+            expires_at: token_set.expires_at,
+            scopes: token_set.scopes,
+            token_type: token_set.token_type,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +469,56 @@ pub struct ExternalResourceList {
     pub resources: Vec<ExternalResourceMetadata>,
     pub next_page_token: Option<String>,
     pub total_count: Option<u64>,
+}
+
+/// Provider that refreshes OAuth credentials through the shared credential store.
+pub struct ConnectorOAuthTokenRefreshProvider {
+    credential_store: Arc<dyn CredentialStore>,
+    token_refresher: Arc<dyn OAuthTokenRefresher>,
+    refresh_skew_secs: i64,
+}
+
+impl ConnectorOAuthTokenRefreshProvider {
+    pub fn new(
+        credential_store: Arc<dyn CredentialStore>,
+        token_refresher: Arc<dyn OAuthTokenRefresher>,
+    ) -> Self {
+        Self {
+            credential_store,
+            token_refresher,
+            refresh_skew_secs: 300,
+        }
+    }
+
+    pub fn with_refresh_skew_secs(mut self, refresh_skew_secs: i64) -> Self {
+        self.refresh_skew_secs = refresh_skew_secs.max(0);
+        self
+    }
+
+    pub async fn refresh_if_needed(
+        &self,
+        credential_ref: &OAuthCredentialRef,
+        now: DateTime<Utc>,
+    ) -> Result<ExternalServiceCredentials, ExternalConnectorError> {
+        let refreshed = refresh_oauth_credential(
+            self.credential_store.as_ref(),
+            self.token_refresher.as_ref(),
+            credential_ref,
+            now,
+            self.refresh_skew_secs,
+        )
+        .await
+        .map_err(ExternalConnectorError::OAuthRefresh)?;
+        Ok(ExternalServiceCredentials::from_oauth_token_set(refreshed))
+    }
+}
+
+impl fmt::Debug for ConnectorOAuthTokenRefreshProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectorOAuthTokenRefreshProvider")
+            .field("refresh_skew_secs", &self.refresh_skew_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Trait for external service connectors.
@@ -616,6 +698,8 @@ pub enum ExternalConnectorError {
     TokenExpired,
     #[error("token refresh not supported")]
     TokenRefreshNotSupported,
+    #[error("oauth refresh error: {0}")]
+    OAuthRefresh(#[from] OAuthTokenRefreshError),
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
     #[error("rate limited, retry after {0}s")]
@@ -697,6 +781,8 @@ pub struct GmailConnector {
     credentials: ExternalServiceCredentials,
     config: GmailConnectorConfig,
     last_synced_at: Option<DateTime<Utc>>,
+    credential_ref: Option<OAuthCredentialRef>,
+    token_refresh_provider: Option<Arc<ConnectorOAuthTokenRefreshProvider>>,
 }
 
 #[allow(dead_code)]
@@ -706,11 +792,23 @@ impl GmailConnector {
             credentials,
             config,
             last_synced_at: None,
+            credential_ref: None,
+            token_refresh_provider: None,
         }
     }
 
     pub fn with_credentials(credentials: ExternalServiceCredentials) -> Self {
         Self::new(credentials, GmailConnectorConfig::default())
+    }
+
+    pub fn with_token_refresh_provider(
+        mut self,
+        credential_ref: OAuthCredentialRef,
+        provider: Arc<ConnectorOAuthTokenRefreshProvider>,
+    ) -> Self {
+        self.credential_ref = Some(credential_ref);
+        self.token_refresh_provider = Some(provider);
+        self
     }
 
     pub fn last_synced_at(&self) -> Option<DateTime<Utc>> {
@@ -822,9 +920,19 @@ impl ExternalConnector for GmailConnector {
     }
 
     async fn refresh_token(&mut self) -> Result<(), ExternalConnectorError> {
-        // In a real implementation, this would call the OAuth token refresh endpoint
-        // For now, return not supported
-        Err(ExternalConnectorError::TokenRefreshNotSupported)
+        let credential_ref = self
+            .credential_ref
+            .as_ref()
+            .ok_or(ExternalConnectorError::TokenRefreshNotSupported)?;
+        let provider = self
+            .token_refresh_provider
+            .as_ref()
+            .ok_or(ExternalConnectorError::TokenRefreshNotSupported)?;
+
+        self.credentials = provider
+            .refresh_if_needed(credential_ref, Utc::now())
+            .await?;
+        Ok(())
     }
 }
 
@@ -1559,6 +1667,131 @@ mod tests {
 
         let creds = ExternalServiceCredentials::new("token");
         assert!(!creds.is_expired());
+    }
+
+    #[test]
+    fn external_credentials_roundtrip_through_oauth_token_set() {
+        let expires_at = Utc::now() + chrono::Duration::minutes(30);
+        let creds = ExternalServiceCredentials::new("access-token")
+            .with_refresh_token("refresh-token")
+            .with_expiry(expires_at)
+            .with_scopes(vec!["gmail.readonly".to_string(), "email".to_string()]);
+
+        let roundtripped =
+            ExternalServiceCredentials::from_oauth_token_set(creds.to_oauth_token_set());
+
+        assert_eq!(roundtripped.access_token, "access-token");
+        assert_eq!(roundtripped.refresh_token.as_deref(), Some("refresh-token"));
+        assert_eq!(roundtripped.expires_at, Some(expires_at));
+        assert_eq!(roundtripped.scopes, vec!["email", "gmail.readonly"]);
+        assert_eq!(roundtripped.token_type, "Bearer");
+    }
+
+    #[tokio::test]
+    async fn connector_oauth_refresh_provider_refreshes_store_backed_token() {
+        let now = Utc::now();
+        let store = Arc::new(identity_core::MemoryCredentialStore::new());
+        let credential_ref = OAuthCredentialRef::new(
+            identity_core::CredentialId::from("gmail-oauth"),
+            "gmail",
+            Some("user@example.com".to_string()),
+            vec!["gmail.readonly".to_string()],
+        );
+        let initial = OAuthTokenSet::new(
+            SecretValue::new("expired-access"),
+            Some(SecretValue::new("refresh-token")),
+            "Bearer",
+            Some(now - chrono::Duration::minutes(1)),
+            vec!["gmail.readonly".to_string()],
+        );
+        store
+            .write(
+                initial
+                    .to_credential_record(&credential_ref, credential_ref.metadata_label(), now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refresher = Arc::new(identity_core::FakeOAuthTokenRefresher::new("gmail-access"));
+        let provider = ConnectorOAuthTokenRefreshProvider::new(store.clone(), refresher.clone())
+            .with_refresh_skew_secs(300);
+
+        let refreshed = provider
+            .refresh_if_needed(&credential_ref, now)
+            .await
+            .unwrap();
+        let persisted = store.read(&credential_ref.credential_id).await.unwrap();
+        let persisted_token = OAuthTokenSet::from_credential_record(&persisted).unwrap();
+
+        assert_eq!(refresher.refresh_count(), 1);
+        assert_eq!(refreshed.access_token, "gmail-access-1");
+        assert_eq!(
+            persisted_token.access_token.expose_secret(),
+            "gmail-access-1"
+        );
+        assert_eq!(
+            persisted_token.refresh_token.unwrap().expose_secret(),
+            "refresh-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_refresh_token_updates_credentials_from_provider() {
+        let now = Utc::now();
+        let store = Arc::new(identity_core::MemoryCredentialStore::new());
+        let credential_ref = OAuthCredentialRef::new(
+            identity_core::CredentialId::from("gmail-oauth"),
+            "gmail",
+            Some("user@example.com".to_string()),
+            vec!["gmail.readonly".to_string()],
+        );
+        let initial = OAuthTokenSet::new(
+            SecretValue::new("expired-access"),
+            Some(SecretValue::new("refresh-token")),
+            "Bearer",
+            Some(now - chrono::Duration::minutes(1)),
+            vec!["gmail.readonly".to_string()],
+        );
+        store
+            .write(
+                initial
+                    .to_credential_record(&credential_ref, credential_ref.metadata_label(), now)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let provider = Arc::new(ConnectorOAuthTokenRefreshProvider::new(
+            store,
+            Arc::new(identity_core::FakeOAuthTokenRefresher::new("gmail-access")),
+        ));
+        let credentials = ExternalServiceCredentials::new("expired-access")
+            .with_refresh_token("refresh-token")
+            .with_expiry(now - chrono::Duration::minutes(1));
+        let mut connector = GmailConnector::with_credentials(credentials)
+            .with_token_refresh_provider(credential_ref, provider);
+
+        connector.refresh_token().await.unwrap();
+
+        assert_eq!(
+            connector.credentials().unwrap().access_token,
+            "gmail-access-1"
+        );
+        assert!(connector.credentials().unwrap().expires_at.unwrap() > now);
+    }
+
+    #[tokio::test]
+    async fn gmail_connector_refresh_token_requires_provider() {
+        let mut connector = GmailConnector::with_credentials(
+            ExternalServiceCredentials::new("expired-access")
+                .with_expiry(Utc::now() - chrono::Duration::minutes(1)),
+        );
+
+        let result = connector.refresh_token().await;
+
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::TokenRefreshNotSupported)
+        ));
     }
 
     #[test]
