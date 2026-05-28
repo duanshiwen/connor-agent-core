@@ -26,18 +26,24 @@ fn workspace_declares_minimal_kernel_host_examples() {
 }
 
 #[test]
-fn minimal_kernel_host_examples_are_documented_and_intentionally_thin() {
+fn minimal_kernel_host_examples_are_declared_as_release_evidence() {
     let root = workspace_root();
-    let readme = fs::read_to_string(root.join("examples/README.md"))
-        .expect("examples README should document host examples");
+    let contract = fs::read_to_string(root.join("schemas/release-contract.toml"))
+        .expect("release contract should declare host examples");
 
     for (example, file_name) in [
         ("minimal CLI host", "minimal_cli_host.rs"),
         ("minimal server host", "minimal_server_host.rs"),
         ("minimal desktop host boundary", "minimal_desktop_host.rs"),
     ] {
-        assert!(readme.contains(example), "README must mention {example}");
-        assert!(readme.contains(file_name), "README must link {file_name}");
+        assert!(
+            contract.contains(example),
+            "release contract must mention {example}"
+        );
+        assert!(
+            contract.contains(file_name),
+            "release contract must link {file_name}"
+        );
         assert!(
             root.join("examples").join(file_name).exists(),
             "{file_name} should exist"
@@ -45,12 +51,12 @@ fn minimal_kernel_host_examples_are_documented_and_intentionally_thin() {
     }
 
     assert!(
-        readme.contains("do not implement product behavior"),
-        "examples must state that they only prove API integration"
+        contract.contains("do not implement product behavior"),
+        "release contract must state that examples only prove API integration"
     );
     assert!(
-        readme.contains("PR201 commercial pilot host integration evidence"),
-        "README must identify the PR201 host integration evidence scope"
+        contract.contains("PR201 commercial pilot host integration evidence"),
+        "release contract must identify the PR201 host integration evidence scope"
     );
 }
 

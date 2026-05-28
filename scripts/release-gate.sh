@@ -4,9 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "==> README release checklist check"
-grep -q "## Release Checklist" README.md
-grep -q "./scripts/release-gate.sh" README.md
+echo "==> release contract check"
+test -f schemas/release-contract.toml
+grep -q "gate_script = \"./scripts/release-gate.sh\"" schemas/release-contract.toml
+grep -q "stable_crates" schemas/release-contract.toml
 
 echo "==> cargo check host examples"
 cargo check -p agentos-kernel --example minimal-cli-host

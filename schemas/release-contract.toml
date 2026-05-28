@@ -1,0 +1,71 @@
+# Machine-readable release and public API contract for Connor Agent Core.
+# This file is intentionally checked by release/API gates so README.md can stay user-facing.
+
+[release]
+gate_script = "./scripts/release-gate.sh"
+required_checks = [
+  "host_examples_compile",
+  "client_substrate_targets_compile",
+  "api_compat_gate",
+  "client_substrate_gate",
+  "bridge_gate",
+  "security_smoke_gate",
+  "cargo_fmt_check",
+  "cargo_clippy_workspace_all_targets",
+  "cargo_test_workspace",
+  "perf_smoke_gate",
+]
+
+[release.host_examples]
+evidence_scope = "PR201 commercial pilot host integration evidence"
+intent = "minimal API integration examples; do not implement product behavior"
+examples = [
+  { name = "minimal CLI host", file = "minimal_cli_host.rs", cargo_example = "minimal-cli-host" },
+  { name = "minimal server host", file = "minimal_server_host.rs", cargo_example = "minimal-server-host" },
+  { name = "minimal desktop host boundary", file = "minimal_desktop_host.rs", cargo_example = "minimal-desktop-host" },
+]
+
+[public_api]
+version_line = "0.1.x"
+stability_boundary = "host/application integration boundary"
+stable_crates = [
+  "client-substrate",
+  "agentos-client-bridge",
+  "agentos-kernel",
+  "agent-runtime",
+  "action-core",
+  "action-runtime",
+  "capability-policy",
+  "audit-log",
+  "agentos-storage",
+  "agentos-observability",
+  "identity-core",
+  "enterprise-permission-core",
+]
+compatibility_sensitive_surfaces = [
+  "bridge_json_payload",
+  "kernel_event",
+  "client_projection",
+  "storage_manifest_migration",
+  "diagnostics_bundle",
+  "approval_receipt",
+  "policy_decision",
+]
+
+[public_api.policy]
+additive_growth_allowed = true
+breaking_changes_require_migration = true
+breaking_serialized_changes_require_version_bump = true
+security_privacy_fixes_may_remove_compatibility = true
+minimum_deprecation_window = "until after the next roadmap PR"
+
+[public_api.unstable]
+items = [
+  "crate internal module layout",
+  "test-only fixtures and helper constructors",
+  "experimental domain crates and connector implementations",
+  "provider-specific connector behavior heuristics",
+  "audit export filtering heuristics",
+  "browser evidence extraction heuristics",
+  "diagnostics enrichment heuristics",
+]
