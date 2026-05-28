@@ -381,19 +381,19 @@ impl AgentOsConfig {
             ));
         }
 
-        if !matches!(self.identity.crypto_provider.as_str(), "fake" | "ed25519") {
+        if !matches!(self.identity.crypto_provider.as_str(), "test" | "ed25519") {
             diagnostics.push(ConfigDiagnostic::error(
                 ConfigDiagnosticCode::IdentityCryptoProviderInvalid,
                 "identity.crypto_provider",
-                "identity.crypto_provider must be one of: fake, ed25519",
+                "identity.crypto_provider must be one of: test-only, ed25519",
             ));
         }
 
-        if self.identity.mode == "production" && self.identity.crypto_provider == "fake" {
+        if self.identity.mode == "production" && self.identity.crypto_provider == "test" {
             diagnostics.push(ConfigDiagnostic::error(
-                ConfigDiagnosticCode::FakeCryptoForbiddenInProduction,
+                ConfigDiagnosticCode::TestCryptoForbiddenInProduction,
                 "identity.crypto_provider",
-                "fake crypto is forbidden when identity.mode is production",
+                "test crypto is forbidden when identity.mode is production",
             ));
         }
 
@@ -503,8 +503,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default_provider: "fake".to_string(),
-            default_model: "fake/default".to_string(),
+            default_provider: "test".to_string(),
+            default_model: "test/default".to_string(),
             providers: BTreeMap::new(),
         }
     }
@@ -601,7 +601,7 @@ impl Default for IdentityConfig {
     fn default() -> Self {
         Self {
             mode: "development".to_string(),
-            crypto_provider: "fake".to_string(),
+            crypto_provider: "test".to_string(),
         }
     }
 }
@@ -1019,7 +1019,7 @@ pub enum ConfigDiagnosticCode {
     PolicyModeInvalid,
     IdentityModeInvalid,
     IdentityCryptoProviderInvalid,
-    FakeCryptoForbiddenInProduction,
+    TestCryptoForbiddenInProduction,
     ActionDefaultPolicyModeInvalid,
     ActionKindEmpty,
     ActionPolicyModeInvalid,

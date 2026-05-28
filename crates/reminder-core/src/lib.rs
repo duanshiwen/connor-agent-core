@@ -1,6 +1,6 @@
 //! # Reminder Core
 //!
-//! Domain types, events, action schemas, and fake executor for AgentOS Reminders.
+//! Domain types, events, action schemas, and static executor for AgentOS Reminders.
 //!
 //! The Reminder Entity enables the assistant to create, complete, cancel, and snooze
 //! reminders. It integrates with the scheduler and notification subsystems.

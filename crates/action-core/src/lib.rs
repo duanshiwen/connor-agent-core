@@ -270,13 +270,13 @@ pub enum ActionExecutorError {
 // Fake Action Executor (for tests)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Deterministic fake executor for testing.
+/// Deterministic static executor for testing.
 #[derive(Debug, Clone)]
-pub struct FakeActionExecutor {
+pub struct StaticActionExecutor {
     response_text: String,
 }
 
-impl Default for FakeActionExecutor {
+impl Default for StaticActionExecutor {
     fn default() -> Self {
         Self {
             response_text: "Action executed successfully".to_string(),
@@ -284,7 +284,7 @@ impl Default for FakeActionExecutor {
     }
 }
 
-impl FakeActionExecutor {
+impl StaticActionExecutor {
     pub fn new(response_text: impl Into<String>) -> Self {
         Self {
             response_text: response_text.into(),
@@ -293,7 +293,7 @@ impl FakeActionExecutor {
 }
 
 #[async_trait]
-impl ActionExecutor for FakeActionExecutor {
+impl ActionExecutor for StaticActionExecutor {
     async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
         Ok(ActionResult {
             status: ActionStatus::Completed,
@@ -504,8 +504,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_executor_returns_success() {
-        let executor = FakeActionExecutor::new("Search complete");
+    async fn static_executor_returns_success() {
+        let executor = StaticActionExecutor::new("Search complete");
         let request = ActionRequest {
             action_id: ActionId::from("action-001"),
             action_kind: ActionKind::from("knowledge.search"),

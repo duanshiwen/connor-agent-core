@@ -9,7 +9,7 @@ use audit_log::{AuditEvent, AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
 use chrono::Utc;
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn runtime() -> KernelRuntime {
     runtime_with_storage(None)
@@ -17,7 +17,7 @@ fn runtime() -> KernelRuntime {
 
 fn runtime_with_storage(storage: Option<Arc<AgentOsStorage>>) -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     let mut builder = KernelRuntimeBuilder::new()

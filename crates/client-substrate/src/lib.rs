@@ -23,7 +23,7 @@ use conversation_core::{
 };
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use conversation_kernel::CreateConversationCommand;
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -34,7 +34,7 @@ use thiserror::Error;
 pub const CLIENT_SUBSTRATE_API_VERSION: u32 = 1;
 
 /// Runtime mode selected by the host. Production mode enforces explicit durable
-/// dependencies and rejects fake/in-memory component declarations.
+/// dependencies and rejects test/in-memory component declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientRuntimeMode {
@@ -571,7 +571,7 @@ pub struct ClientTelemetryConsent {
 #[serde(rename_all = "snake_case")]
 pub enum ClientDependencyKind {
     InMemoryTest,
-    FakeTest,
+    TestOnly,
     DurableLocal,
     SystemService,
     BackendService,
@@ -580,7 +580,7 @@ pub enum ClientDependencyKind {
 
 impl ClientDependencyKind {
     fn is_test_only(self) -> bool {
-        matches!(self, Self::InMemoryTest | Self::FakeTest)
+        matches!(self, Self::InMemoryTest | Self::TestOnly)
     }
 }
 
@@ -662,13 +662,13 @@ impl ClientProductionDependencies {
             blockers.push("production conversation journal must be durable".to_string());
         }
         if self.component_kinds.model_adapter.is_test_only() {
-            blockers.push("production model adapter must not be fake".to_string());
+            blockers.push("production model adapter must not be test-only".to_string());
         }
         if self.component_kinds.audit_log.is_test_only() {
             blockers.push("production audit log must be durable or managed".to_string());
         }
         if self.component_kinds.identity_crypto.is_test_only() {
-            blockers.push("production identity crypto must not be fake".to_string());
+            blockers.push("production identity crypto must not be test-only".to_string());
         }
         if self.component_kinds.credential_backend == SystemCredentialBackendKind::InMemoryTest {
             blockers.push("production credential backend must not be in-memory".to_string());
@@ -818,7 +818,7 @@ impl ClientSubstrateBuilder {
         Self::default()
     }
 
-    pub fn for_tests() -> Self {
+    pub fn for_local_development() -> Self {
         Self::default()
     }
 
@@ -903,7 +903,7 @@ impl ClientSubstrateBuilder {
             }
             ClientRuntimeMode::Test | ClientRuntimeMode::Development => KernelRuntimeBuilder::new()
                 .conversation_journal(Arc::new(MemoryConversationJournal::new()))
-                .model_adapter(Arc::new(FakeModelAdapter::default()))
+                .model_adapter(Arc::new(StaticModelAdapter::default()))
                 .action_registry(Arc::clone(&action_registry))
                 .capability_policy(Arc::new(self.safety_profile.to_capability_policy()))
                 .audit_log(Arc::new(MemoryAuditSink::new()))

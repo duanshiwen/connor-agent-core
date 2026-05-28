@@ -8,9 +8,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use identity_core::{
-    AgentOsId, CredentialStore, DeviceId, FakeCryptoProvider, IdentityStore, OAuthCredentialRef,
-    OAuthTokenRefreshError, OAuthTokenRefresher, OAuthTokenSet, PublicIdentity, SecretValue,
-    refresh_oauth_credential,
+    AgentOsId, CredentialStore, DeterministicCryptoProvider, DeviceId, IdentityStore,
+    OAuthCredentialRef, OAuthTokenRefreshError, OAuthTokenRefresher, OAuthTokenSet, PublicIdentity,
+    SecretValue, refresh_oauth_credential,
 };
 use serde::{Deserialize, Serialize};
 use server_account_core::{
@@ -33,7 +33,7 @@ pub struct ConnectorRuntime {
     identity_store: Arc<dyn IdentityStore>,
     server_registry: Arc<dyn ServerRegistry>,
     account_store: Arc<dyn ServerAccountStore>,
-    crypto: FakeCryptoProvider,
+    crypto: DeterministicCryptoProvider,
     binding_audit_events: Arc<Mutex<Vec<AccountBindingAuditEvent>>>,
 }
 
@@ -47,7 +47,7 @@ impl ConnectorRuntime {
             identity_store,
             server_registry,
             account_store,
-            crypto: FakeCryptoProvider,
+            crypto: DeterministicCryptoProvider,
             binding_audit_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -196,7 +196,7 @@ impl ConnectorRuntime {
         Ok(())
     }
 
-    /// Verify a server challenge using fake crypto.
+    /// Verify a server challenge using test crypto.
     pub fn verify_challenge(&self, challenge: &str, signature: &str) -> bool {
         self.crypto.verify(challenge, signature)
     }
@@ -1499,7 +1499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_challenge_with_fake_crypto() {
+    async fn verify_challenge_with_test_crypto() {
         let runtime = ConnectorRuntime::with_memory_stores();
         assert!(runtime.verify_challenge("nonce-123", "signed:nonce-123"));
         assert!(!runtime.verify_challenge("nonce-123", "wrong"));
@@ -2025,7 +2025,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let refresher = Arc::new(identity_core::FakeOAuthTokenRefresher::new("gmail-access"));
+        let refresher = Arc::new(identity_core::ScriptedOAuthTokenRefresher::new(
+            "gmail-access",
+        ));
         let provider = ConnectorOAuthTokenRefreshProvider::new(store.clone(), refresher.clone())
             .with_refresh_skew_secs(300);
 
@@ -2075,7 +2077,9 @@ mod tests {
             .unwrap();
         let provider = Arc::new(ConnectorOAuthTokenRefreshProvider::new(
             store,
-            Arc::new(identity_core::FakeOAuthTokenRefresher::new("gmail-access")),
+            Arc::new(identity_core::ScriptedOAuthTokenRefresher::new(
+                "gmail-access",
+            )),
         ));
         let credentials = ExternalServiceCredentials::new("expired-access")
             .with_refresh_token("refresh-token")

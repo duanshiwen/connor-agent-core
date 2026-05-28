@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use action_core::{
-    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, FakeActionExecutor,
-    SideEffectKind,
+    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, SideEffectKind,
+    StaticActionExecutor,
 };
 use action_runtime::ActionRuntimeOutcome;
 use agentos_kernel::{
@@ -21,7 +21,7 @@ use conversation_kernel::CreateConversationCommand;
 use enterprise_permission_core::{
     EnterpriseRole, EnterpriseUserId, PermissionAction, PermissionStore, ResourceId, ResourceType,
 };
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn registry() -> Arc<ActionRegistry> {
     let mut registry = ActionRegistry::new();
@@ -50,7 +50,7 @@ fn registry() -> Arc<ActionRegistry> {
 
 fn runtime(permission_store: Option<PermissionStore>) -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
     let mut builder = KernelRuntimeBuilder::new()
         .conversation_journal(journal)
@@ -58,7 +58,7 @@ fn runtime(permission_store: Option<PermissionStore>) -> KernelRuntime {
         .action_registry(registry())
         .capability_policy(Arc::new(CapabilityPolicy::default_safe()))
         .audit_log(audit_log)
-        .action_executor(Arc::new(FakeActionExecutor::new("host api integration")));
+        .action_executor(Arc::new(StaticActionExecutor::new("host api integration")));
 
     if let Some(permission_store) = permission_store {
         builder = builder.permission_store(Arc::new(Mutex::new(permission_store)));

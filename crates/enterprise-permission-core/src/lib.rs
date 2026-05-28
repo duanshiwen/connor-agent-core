@@ -955,7 +955,7 @@ pub enum PermissionProviderError {
     InvalidSnapshot(String),
 }
 
-/// In-memory remote permission provider used by tests and host fakes.
+/// In-memory remote permission provider used by tests and host test doubles.
 #[derive(Debug, Clone)]
 pub struct MemoryRemotePermissionProvider {
     snapshot: ServerPermissionSnapshot,

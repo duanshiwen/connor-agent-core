@@ -433,25 +433,25 @@ pub trait AssetProcessor: Send + Sync {
     ) -> Result<AssetExtractionResult, AssetExtractionError>;
 }
 
-/// Deterministic fake processor for tests and early pipeline wiring.
+/// Deterministic test-only processor for tests and early pipeline wiring.
 #[derive(Debug, Clone, Default)]
-pub struct FakeAssetProcessor;
+pub struct DeterministicAssetProcessor;
 
-impl FakeAssetProcessor {
+impl DeterministicAssetProcessor {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl AssetProcessor for FakeAssetProcessor {
+impl AssetProcessor for DeterministicAssetProcessor {
     async fn extract(
         &self,
         request: AssetExtractionRequest,
     ) -> Result<AssetExtractionResult, AssetExtractionError> {
         let extraction_kind = AssetExtractionKind::from_asset_kind(&request.asset_kind)?;
         let metadata = serde_json::json!({
-            "processor": "fake",
+            "processor": "deterministic",
             "asset_kind": request.asset_kind,
             "extraction_kind": extraction_kind.as_str(),
             "source_uri": request.source_uri,
@@ -786,8 +786,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_asset_processor_extracts_pdf_docx_ocr_spreadsheet_slide_and_video_metadata() {
-        let processor = FakeAssetProcessor::new();
+    async fn deterministic_asset_processor_extracts_pdf_docx_ocr_spreadsheet_slide_and_video_metadata()
+     {
+        let processor = DeterministicAssetProcessor::new();
         let assets = vec![
             ("asset-pdf", AssetKind::Pdf, AssetExtractionKind::Pdf),
             ("asset-docx", AssetKind::Document, AssetExtractionKind::Docx),
@@ -829,13 +830,13 @@ mod tests {
             assert_eq!(result.extraction_kind, extraction_kind);
             assert_eq!(result.status, AssetProcessingStatus::Processed);
             assert!(result.extracted_text.as_ref().unwrap().contains(id));
-            assert_eq!(result.metadata["processor"], "fake");
+            assert_eq!(result.metadata["processor"], "deterministic");
         }
     }
 
     #[tokio::test]
-    async fn fake_asset_processor_rejects_unsupported_unknown_assets() {
-        let processor = FakeAssetProcessor::new();
+    async fn deterministic_asset_processor_rejects_unsupported_unknown_assets() {
+        let processor = DeterministicAssetProcessor::new();
         let metadata = AssetMetadata::new(
             "asset-unknown",
             AssetKind::Unknown,
@@ -857,8 +858,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_asset_processor_records_processed_at_and_metadata() {
-        let processor = FakeAssetProcessor::new();
+    async fn deterministic_asset_processor_records_processed_at_and_metadata() {
+        let processor = DeterministicAssetProcessor::new();
         let metadata = AssetMetadata::new(
             "asset-video",
             AssetKind::VideoReference,

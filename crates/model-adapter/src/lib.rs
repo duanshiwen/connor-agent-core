@@ -3,7 +3,7 @@
 //! Text-only model adapter abstractions for AgentOS.
 //!
 //! This crate provides deterministic request/response types, a typed async
-//! executor trait, a small model registry, and a fake executor for tests and
+//! executor trait, a small model registry, and a static executor for tests and
 //! early runtime work. The [`openai`] module supplies a concrete adapter for
 //! any OpenAI-compatible Chat Completions endpoint (DeepSeek, Qwen, vLLM, etc.).
 
@@ -49,7 +49,7 @@ pub enum ModelProvider {
     Anthropic,
     Google,
     Local,
-    Fake,
+    Test,
     Custom(String),
 }
 
@@ -133,12 +133,12 @@ impl ModelProfile {
         }
     }
 
-    pub fn fake(id: impl Into<ModelId>) -> Self {
+    pub fn test_profile(id: impl Into<ModelId>) -> Self {
         let id = id.into();
         Self {
             display_name: id.to_string(),
             id,
-            provider: ModelProvider::Fake,
+            provider: ModelProvider::Test,
             capabilities: ModelCapabilities::text_only(),
         }
     }
@@ -1418,21 +1418,21 @@ where
     }
 }
 
-/// Deterministic fake adapter for tests and early runtime integration.
+/// Deterministic static adapter for tests and early runtime integration.
 #[derive(Debug, Clone)]
-pub struct FakeModelAdapter {
+pub struct StaticModelAdapter {
     response_prefix: String,
 }
 
-impl Default for FakeModelAdapter {
+impl Default for StaticModelAdapter {
     fn default() -> Self {
         Self {
-            response_prefix: "Fake model response".to_string(),
+            response_prefix: "Static model response".to_string(),
         }
     }
 }
 
-impl FakeModelAdapter {
+impl StaticModelAdapter {
     pub fn new(response_prefix: impl Into<String>) -> Self {
         Self {
             response_prefix: response_prefix.into(),
@@ -1441,7 +1441,7 @@ impl FakeModelAdapter {
 }
 
 #[async_trait]
-impl ModelAdapter for FakeModelAdapter {
+impl ModelAdapter for StaticModelAdapter {
     async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
         if request.messages.is_empty() {
             return Err(ModelAdapterError::EmptyRequest);
@@ -1475,29 +1475,29 @@ impl ModelAdapter for FakeModelAdapter {
     }
 }
 
-/// Deterministic fake streaming adapter for tests and early runtime work.
+/// Deterministic test-only streaming adapter for tests and early runtime work.
 #[derive(Debug, Clone, Default)]
-pub struct FakeStreamingModelAdapter {
-    inner: FakeModelAdapter,
+pub struct StaticStreamingModelAdapter {
+    inner: StaticModelAdapter,
 }
 
-impl FakeStreamingModelAdapter {
+impl StaticStreamingModelAdapter {
     pub fn new(response_prefix: impl Into<String>) -> Self {
         Self {
-            inner: FakeModelAdapter::new(response_prefix),
+            inner: StaticModelAdapter::new(response_prefix),
         }
     }
 }
 
 #[async_trait]
-impl ModelAdapter for FakeStreamingModelAdapter {
+impl ModelAdapter for StaticStreamingModelAdapter {
     async fn complete(&self, request: ModelRequest) -> Result<ModelOutput, ModelAdapterError> {
         self.inner.complete(request).await
     }
 }
 
 #[async_trait]
-impl StreamingModelAdapter for FakeStreamingModelAdapter {
+impl StreamingModelAdapter for StaticStreamingModelAdapter {
     async fn stream(
         &self,
         request: ModelRequest,
@@ -1837,8 +1837,8 @@ mod tests {
     #[tokio::test]
     async fn observed_adapter_records_success_trace_with_usage_and_redacted_metadata() {
         let sink = Arc::new(MemoryModelTraceSink::new());
-        let adapter = ObservedModelAdapter::new(FakeModelAdapter::default(), sink.clone());
-        let mut request = ModelRequest::new("fake/default", vec![ModelMessage::user("hello")]);
+        let adapter = ObservedModelAdapter::new(StaticModelAdapter::default(), sink.clone());
+        let mut request = ModelRequest::new("test/default", vec![ModelMessage::user("hello")]);
         request
             .metadata
             .insert("request_id".to_string(), "req-123".to_string());
@@ -1853,7 +1853,7 @@ mod tests {
         assert_eq!(traces.len(), 1);
         let trace = &traces[0];
         assert_eq!(trace.operation, ModelCallOperation::Complete);
-        assert_eq!(trace.model_id, ModelId::from("fake/default"));
+        assert_eq!(trace.model_id, ModelId::from("test/default"));
         assert_eq!(trace.outcome, ModelTraceOutcome::Success);
         assert!(trace.usage.is_some());
         assert_eq!(trace.metadata["request_id"], "req-123");
@@ -1863,9 +1863,9 @@ mod tests {
     #[tokio::test]
     async fn observed_adapter_records_error_trace_with_error_class() {
         let sink = Arc::new(MemoryModelTraceSink::new());
-        let adapter = ObservedModelAdapter::new(FakeModelAdapter::default(), sink.clone());
+        let adapter = ObservedModelAdapter::new(StaticModelAdapter::default(), sink.clone());
         let error = adapter
-            .complete(ModelRequest::new("fake/default", vec![]))
+            .complete(ModelRequest::new("test/default", vec![]))
             .await
             .unwrap_err();
 
@@ -1881,9 +1881,10 @@ mod tests {
     #[tokio::test]
     async fn observed_streaming_adapter_records_usage_without_prompt_text() {
         let sink = Arc::new(MemoryModelTraceSink::new());
-        let adapter = ObservedModelAdapter::new(FakeStreamingModelAdapter::default(), sink.clone());
+        let adapter =
+            ObservedModelAdapter::new(StaticStreamingModelAdapter::default(), sink.clone());
         let mut request =
-            ModelRequest::new("fake/default", vec![ModelMessage::user("secret prompt")]);
+            ModelRequest::new("test/default", vec![ModelMessage::user("secret prompt")]);
         request
             .metadata
             .insert("auth_token".to_string(), "token-secret".to_string());
@@ -2052,7 +2053,7 @@ mod tests {
             },
         );
         let adapter = CircuitBreakingModelAdapter::new(inner, breaker);
-        let request = ModelRequest::new("fake/default", vec![ModelMessage::user("hi")]);
+        let request = ModelRequest::new("test/default", vec![ModelMessage::user("hi")]);
 
         assert_eq!(
             adapter.complete(request.clone()).await.unwrap_err(),
@@ -2078,7 +2079,7 @@ mod tests {
 
         let output = adapter
             .complete(ModelRequest::new(
-                "fake/default",
+                "test/default",
                 vec![ModelMessage::user("hi")],
             ))
             .await
@@ -2100,7 +2101,7 @@ mod tests {
 
         let err = adapter
             .complete(ModelRequest::new(
-                "fake/default",
+                "test/default",
                 vec![ModelMessage::user("hi")],
             ))
             .await
@@ -2125,7 +2126,7 @@ mod tests {
 
         let err = adapter
             .complete(ModelRequest::new(
-                "fake/default",
+                "test/default",
                 vec![ModelMessage::user("hi")],
             ))
             .await
@@ -2175,10 +2176,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_streaming_adapter_emits_started_text_usage_finished() {
-        let adapter = FakeStreamingModelAdapter::default();
+    async fn static_streaming_adapter_emits_started_text_usage_finished() {
+        let adapter = StaticStreamingModelAdapter::default();
         let request = ModelRequest::new(
-            "fake/default",
+            "test/default",
             vec![ModelMessage::user("Summarize this text")],
         );
 
@@ -2186,7 +2187,7 @@ mod tests {
 
         assert!(matches!(
             events.first(),
-            Some(ModelStreamEvent::Started { model_id }) if model_id == &ModelId::from("fake/default")
+            Some(ModelStreamEvent::Started { model_id }) if model_id == &ModelId::from("test/default")
         ));
         assert!(
             events
@@ -2207,9 +2208,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_streaming_adapter_rejects_empty_request() {
-        let adapter = FakeStreamingModelAdapter::default();
-        let request = ModelRequest::new("fake/default", vec![]);
+    async fn static_streaming_adapter_rejects_empty_request() {
+        let adapter = StaticStreamingModelAdapter::default();
+        let request = ModelRequest::new("test/default", vec![]);
 
         let error = adapter.stream(request).await.unwrap_err();
 
@@ -2220,7 +2221,7 @@ mod tests {
     fn stream_accumulator_collects_text_and_usage() {
         let events = vec![
             ModelStreamEvent::Started {
-                model_id: ModelId::from("fake/default"),
+                model_id: ModelId::from("test/default"),
             },
             ModelStreamEvent::TextDelta {
                 delta: "hello ".to_string(),
@@ -2249,9 +2250,9 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_adapter_complete_matches_accumulated_text() {
-        let adapter = FakeStreamingModelAdapter::new("Streaming fake response");
+        let adapter = StaticStreamingModelAdapter::new("Streaming test-only response");
         let request = ModelRequest::new(
-            "fake/default",
+            "test/default",
             vec![ModelMessage::user("Summarize this text")],
         );
 
@@ -2265,8 +2266,8 @@ mod tests {
 
     #[test]
     fn model_id_display_and_serde_roundtrip() {
-        let id = ModelId::from("fake/default");
-        assert_eq!(id.to_string(), "fake/default");
+        let id = ModelId::from("test/default");
+        assert_eq!(id.to_string(), "test/default");
 
         let json = serde_json::to_string(&id).unwrap();
         let decoded: ModelId = serde_json::from_str(&json).unwrap();
@@ -2282,7 +2283,7 @@ mod tests {
     #[test]
     fn model_request_serializes_messages_in_order() {
         let request = ModelRequest::new(
-            "fake/default",
+            "test/default",
             vec![
                 ModelMessage::system("You are concise."),
                 ModelMessage::user("Hello"),
@@ -2301,10 +2302,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_adapter_returns_deterministic_response() {
-        let adapter = FakeModelAdapter::default();
+    async fn static_adapter_returns_deterministic_response() {
+        let adapter = StaticModelAdapter::default();
         let request = ModelRequest::new(
-            "fake/default",
+            "test/default",
             vec![
                 ModelMessage::system("You are concise."),
                 ModelMessage::user("Summarize this text"),
@@ -2317,7 +2318,7 @@ mod tests {
             ModelOutput::Text { text, usage } => {
                 assert_eq!(
                     text,
-                    "Fake model response for fake/default with 2 message(s): Summarize this text"
+                    "Static model response for test/default with 2 message(s): Summarize this text"
                 );
                 assert!(usage.is_some());
             }
@@ -2326,9 +2327,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_adapter_rejects_empty_request() {
-        let adapter = FakeModelAdapter::default();
-        let request = ModelRequest::new("fake/default", vec![]);
+    async fn static_adapter_rejects_empty_request() {
+        let adapter = StaticModelAdapter::default();
+        let request = ModelRequest::new("test/default", vec![]);
 
         let error = adapter.complete(request).await.unwrap_err();
 
@@ -2349,30 +2350,30 @@ mod tests {
     fn model_registry_registers_and_resolves_default_model() {
         let mut registry = ModelRegistry::new();
         registry
-            .register(ModelProfile::fake("fake/default"))
+            .register(ModelProfile::test_profile("test/default"))
             .unwrap();
-        registry.set_default("fake/default").unwrap();
+        registry.set_default("test/default").unwrap();
 
         let default = registry.default_model().unwrap();
 
-        assert_eq!(default.id, ModelId::from("fake/default"));
-        assert_eq!(default.provider, ModelProvider::Fake);
+        assert_eq!(default.id, ModelId::from("test/default"));
+        assert_eq!(default.provider, ModelProvider::Test);
     }
 
     #[test]
     fn model_registry_rejects_duplicate_model_id() {
         let mut registry = ModelRegistry::new();
         registry
-            .register(ModelProfile::fake("fake/default"))
+            .register(ModelProfile::test_profile("test/default"))
             .unwrap();
 
         let error = registry
-            .register(ModelProfile::fake("fake/default"))
+            .register(ModelProfile::test_profile("test/default"))
             .unwrap_err();
 
         assert_eq!(
             error,
-            ModelAdapterError::DuplicateModelId(ModelId::from("fake/default"))
+            ModelAdapterError::DuplicateModelId(ModelId::from("test/default"))
         );
     }
 
@@ -2399,12 +2400,12 @@ mod tests {
     fn model_registry_requires_capability_before_tool_use() {
         let mut registry = ModelRegistry::new();
         registry
-            .register(ModelProfile::fake("fake/text-only"))
+            .register(ModelProfile::test_profile("fake/text-only"))
             .unwrap();
         registry
             .register(ModelProfile::new(
                 "fake/tools",
-                ModelProvider::Fake,
+                ModelProvider::Test,
                 "Fake Tools",
                 ModelCapabilities::tool_calling(),
             ))
@@ -2427,7 +2428,7 @@ mod tests {
     async fn capability_gated_tool_adapter_blocks_unsupported_model() {
         let mut registry = ModelRegistry::new();
         registry
-            .register(ModelProfile::fake("fake/text-only"))
+            .register(ModelProfile::test_profile("fake/text-only"))
             .unwrap();
         let adapter = CapabilityGatedToolAdapter::new(EchoToolAdapter, Arc::new(registry));
         let err = adapter
@@ -2458,7 +2459,7 @@ mod tests {
         registry
             .register(ModelProfile::new(
                 "fake/tools",
-                ModelProvider::Fake,
+                ModelProvider::Test,
                 "Fake Tools",
                 ModelCapabilities::tool_calling(),
             ))
@@ -2484,7 +2485,7 @@ mod tests {
     fn model_registry_rejects_missing_default_model() {
         let mut registry = ModelRegistry::new();
         registry
-            .register(ModelProfile::fake("fake/default"))
+            .register(ModelProfile::test_profile("test/default"))
             .unwrap();
 
         let error = registry.set_default("missing").unwrap_err();

@@ -540,10 +540,10 @@ root = ".agentos"
 }
 
 #[test]
-fn production_identity_rejects_fake_crypto() {
+fn production_identity_rejects_test_crypto() {
     let mut config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
     config.identity.mode = "production".to_string();
-    config.identity.crypto_provider = "fake".to_string();
+    config.identity.crypto_provider = "test".to_string();
 
     let report = config.validate();
 
@@ -551,12 +551,12 @@ fn production_identity_rejects_fake_crypto() {
         report
             .diagnostics
             .iter()
-            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+            .any(|d| d.code == ConfigDiagnosticCode::TestCryptoForbiddenInProduction)
     );
 }
 
 #[test]
-fn enterprise_production_profile_rejects_fake_crypto() {
+fn enterprise_production_profile_rejects_test_crypto() {
     let document = AgentOsConfigDocument::from_toml_str(
         r#"
 [kernel]
@@ -576,7 +576,7 @@ model = "gpt-4o-mini"
 
 [profiles.enterprise.identity]
 mode = "production"
-crypto_provider = "fake"
+crypto_provider = "test"
 "#,
     )
     .unwrap();
@@ -588,12 +588,12 @@ crypto_provider = "fake"
         report
             .diagnostics
             .iter()
-            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+            .any(|d| d.code == ConfigDiagnosticCode::TestCryptoForbiddenInProduction)
     );
 }
 
 #[test]
-fn local_production_profile_rejects_fake_crypto() {
+fn local_production_profile_rejects_test_crypto() {
     let document = AgentOsConfigDocument::from_toml_str(
         r#"
 [kernel]
@@ -613,7 +613,7 @@ model = "gpt-4o-mini"
 
 [profiles.local.identity]
 mode = "production"
-crypto_provider = "fake"
+crypto_provider = "test"
 "#,
     )
     .unwrap();
@@ -625,7 +625,7 @@ crypto_provider = "fake"
         report
             .diagnostics
             .iter()
-            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+            .any(|d| d.code == ConfigDiagnosticCode::TestCryptoForbiddenInProduction)
     );
 }
 
@@ -641,23 +641,23 @@ fn production_identity_allows_ed25519() {
         !report
             .diagnostics
             .iter()
-            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+            .any(|d| d.code == ConfigDiagnosticCode::TestCryptoForbiddenInProduction)
     );
 }
 
 #[test]
-fn development_identity_allows_fake_crypto() {
+fn development_identity_allows_test_crypto() {
     let config = AgentOsConfig::from_toml_str(sample_config()).unwrap();
 
     let report = config.validate();
 
     assert_eq!(config.identity.mode, "development");
-    assert_eq!(config.identity.crypto_provider, "fake");
+    assert_eq!(config.identity.crypto_provider, "test");
     assert!(
         !report
             .diagnostics
             .iter()
-            .any(|d| d.code == ConfigDiagnosticCode::FakeCryptoForbiddenInProduction)
+            .any(|d| d.code == ConfigDiagnosticCode::TestCryptoForbiddenInProduction)
     );
 }
 

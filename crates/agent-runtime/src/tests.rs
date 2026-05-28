@@ -312,7 +312,7 @@ async fn prompt_renderer_no_system_prompt() {
 #[tokio::test]
 async fn e2e_user_message_to_assistant_response() {
     let kernel = test_kernel();
-    let adapter = FakeModelAdapter::new("Assistant reply");
+    let adapter = StaticModelAdapter::new("Assistant reply");
 
     // Create conversation.
     let conv_id = kernel
@@ -400,7 +400,7 @@ async fn e2e_user_message_to_assistant_response() {
 async fn e2e_model_failure_records_failed_run() {
     let kernel = test_kernel();
     // Use an adapter that rejects empty requests.
-    let _adapter = FakeModelAdapter::default();
+    let _adapter = StaticModelAdapter::default();
 
     let conv_id = kernel
         .create_conversation(conversation_kernel::CreateConversationCommand {
@@ -489,7 +489,7 @@ async fn e2e_model_failure_records_failed_run() {
 #[tokio::test]
 async fn e2e_agent_runtime_high_level_entry() {
     let kernel = test_kernel();
-    let adapter = FakeModelAdapter::new("High-level reply");
+    let adapter = StaticModelAdapter::new("High-level reply");
     let config = AgentRuntimeConfig {
         system_prompt: Some("You are a concise assistant.".to_string()),
         ..Default::default()
@@ -702,7 +702,7 @@ async fn process_static_action_response(
     String,
     audit_log::MemoryAuditSink,
 ) {
-    let executor = action_core::FakeActionExecutor::new("from agent runtime");
+    let executor = action_core::StaticActionExecutor::new("from agent runtime");
     let detector = KeywordActionProposalDetector;
     process_static_action_response_with_executor(response_text, &executor, &detector).await
 }
@@ -773,7 +773,7 @@ async fn process_static_knowledge_action_response(
 }
 
 #[tokio::test]
-async fn agent_runtime_executes_read_only_action_from_fake_proposal() {
+async fn agent_runtime_executes_read_only_action_from_static_proposal() {
     let (outcome, kernel, conv_id, run_id, audit) = process_static_action_response(
         "I will search. ACTION knowledge.search {\"query\":\"agent os\"}",
     )
@@ -990,7 +990,7 @@ async fn agent_runtime_noop_detector_preserves_text_only_outcome() {
     let config = AgentRuntimeConfig::default();
     let registry = action_registry();
     let policy = capability_policy::CapabilityPolicy::default_safe();
-    let executor = action_core::FakeActionExecutor::default();
+    let executor = action_core::StaticActionExecutor::default();
     let audit = audit_log::MemoryAuditSink::new();
     let action_runtime = action_runtime::ActionRuntime {
         kernel: &kernel,
@@ -1136,7 +1136,7 @@ async fn registry_detector_preserves_text_only_outcome_for_unknown_action() {
     let config = AgentRuntimeConfig::default();
     let registry = action_registry();
     let policy = capability_policy::CapabilityPolicy::default_safe();
-    let executor = action_core::FakeActionExecutor::default();
+    let executor = action_core::StaticActionExecutor::default();
     let audit = audit_log::MemoryAuditSink::new();
     let action_runtime = action_runtime::ActionRuntime {
         kernel: &kernel,
@@ -1240,7 +1240,7 @@ async fn process_static_browser_action_response(
     let mut registry = action_core::ActionRegistry::new();
     browser_entity::register_browser_action_schemas(&mut registry).unwrap();
     let policy = capability_policy::CapabilityPolicy::default_safe();
-    let executor = browser_entity::FakeBrowserExecutor::new(chrono::Utc::now());
+    let executor = browser_entity::StaticBrowserExecutor::new(chrono::Utc::now());
     let audit = audit_log::MemoryAuditSink::new();
     let action_runtime = action_runtime::ActionRuntime {
         kernel: &kernel,
@@ -1374,12 +1374,12 @@ async fn agent_runtime_reports_browser_capture_snapshot_approval_required() {
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-struct FakeToolAdapter {
+struct ScriptedToolAdapter {
     responses: tokio::sync::Mutex<Vec<ModelOutput>>,
     call_count: AtomicU32,
 }
 
-impl FakeToolAdapter {
+impl ScriptedToolAdapter {
     fn new(responses: Vec<ModelOutput>) -> Self {
         Self {
             responses: tokio::sync::Mutex::new(responses),
@@ -1389,7 +1389,7 @@ impl FakeToolAdapter {
 }
 
 #[async_trait]
-impl ModelAdapter for FakeToolAdapter {
+impl ModelAdapter for ScriptedToolAdapter {
     async fn complete(
         &self,
         _request: ModelRequest,
@@ -1404,7 +1404,7 @@ impl ModelAdapter for FakeToolAdapter {
 }
 
 #[async_trait]
-impl ToolCallingModelAdapter for FakeToolAdapter {
+impl ToolCallingModelAdapter for ScriptedToolAdapter {
     async fn complete_with_tools(
         &self,
         _request: ModelRequest,
@@ -1444,7 +1444,7 @@ macro_rules! with_tool_runtime {
     ($k:ident, $rt:ident, $body:block) => {{
         let $k = test_kernel();
         let registry = action_registry();
-        let executor = action_core::FakeActionExecutor::new("ok");
+        let executor = action_core::StaticActionExecutor::new("ok");
         let audit = audit_log::MemoryAuditSink::new();
         let policy = capability_policy::CapabilityPolicy::default_safe();
         let $rt = ActionRuntime {
@@ -1461,7 +1461,7 @@ macro_rules! with_tool_runtime {
 
 #[tokio::test]
 async fn tool_loop_text_only_completes() {
-    let adapter = FakeToolAdapter::new(vec![ModelOutput::Text {
+    let adapter = ScriptedToolAdapter::new(vec![ModelOutput::Text {
         text: "Hello!".to_string(),
         usage: Some(ModelUsage {
             input_tokens: 10,
@@ -1490,7 +1490,7 @@ async fn tool_loop_text_only_completes() {
 
 #[tokio::test]
 async fn tool_loop_executes_and_returns_text() {
-    let adapter = FakeToolAdapter::new(vec![
+    let adapter = ScriptedToolAdapter::new(vec![
         ModelOutput::ToolCalls {
             content: None,
             tool_calls: vec![ToolCall {
@@ -1538,7 +1538,7 @@ async fn tool_loop_executes_and_returns_text() {
 
 #[tokio::test]
 async fn tool_loop_records_observability_for_model_and_action_path() {
-    let adapter = FakeToolAdapter::new(vec![
+    let adapter = ScriptedToolAdapter::new(vec![
         ModelOutput::ToolCalls {
             content: None,
             tool_calls: vec![ToolCall {
@@ -1621,7 +1621,7 @@ async fn tool_loop_checkpoint_resume_skips_completed_read_only_tool_result() {
         ))
         .await
         .unwrap();
-    let adapter = FakeToolAdapter::new(vec![
+    let adapter = ScriptedToolAdapter::new(vec![
         ModelOutput::ToolCalls {
             content: None,
             tool_calls: vec![ToolCall {
@@ -1665,7 +1665,7 @@ async fn tool_loop_cancelled_run_does_not_execute_followup_tool() {
     let controls =
         ToolLoopExecutionControls::new().with_cancellation_token(RunCancellationToken::new());
     controls.cancel();
-    let adapter = FakeToolAdapter::new(vec![ModelOutput::ToolCalls {
+    let adapter = ScriptedToolAdapter::new(vec![ModelOutput::ToolCalls {
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_cancelled".into(),
@@ -1758,7 +1758,7 @@ async fn tool_loop_model_timeout_returns_typed_outcome() {
 
 #[tokio::test]
 async fn tool_loop_respects_max_turns() {
-    let adapter = FakeToolAdapter::new(vec![
+    let adapter = ScriptedToolAdapter::new(vec![
         ModelOutput::ToolCalls {
             content: None,
             tool_calls: vec![ToolCall {
@@ -1803,7 +1803,7 @@ async fn tool_loop_respects_max_turns() {
 
 #[tokio::test]
 async fn tool_loop_handles_model_error() {
-    let adapter = FakeToolAdapter::new(vec![]);
+    let adapter = ScriptedToolAdapter::new(vec![]);
     with_tool_runtime!(_k, rt, {
         let outcome = AgentToolLoop::run(ToolLoopRequest {
             adapter: &adapter,

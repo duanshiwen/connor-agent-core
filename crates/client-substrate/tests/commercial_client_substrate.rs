@@ -5,7 +5,7 @@ use audit_log::MemoryAuditSink;
 use client_substrate::*;
 use conversation_core::{MessageId, ParticipantId};
 use conversation_journal::MemoryConversationJournal;
-use model_adapter::FakeModelAdapter;
+use model_adapter::StaticModelAdapter;
 
 fn user() -> ParticipantId {
     ParticipantId::from("user-1")
@@ -48,15 +48,15 @@ fn production_builder_rejects_test_only_components() {
     let storage = Arc::new(AgentOsStorage::init(temp.path()).unwrap());
     let deps = ClientProductionDependencies {
         conversation_journal: Arc::new(MemoryConversationJournal::new()),
-        model_adapter: Arc::new(FakeModelAdapter::default()),
+        model_adapter: Arc::new(StaticModelAdapter::default()),
         audit_log: Arc::new(MemoryAuditSink::new()),
         storage,
         component_kinds: ClientProductionComponentKinds {
             conversation_journal: ClientDependencyKind::InMemoryTest,
-            model_adapter: ClientDependencyKind::FakeTest,
+            model_adapter: ClientDependencyKind::TestOnly,
             audit_log: ClientDependencyKind::InMemoryTest,
             credential_backend: SystemCredentialBackendKind::InMemoryTest,
-            identity_crypto: ClientDependencyKind::FakeTest,
+            identity_crypto: ClientDependencyKind::TestOnly,
         },
     };
 
@@ -85,7 +85,7 @@ fn production_bundle_rejects_invalid_runtime_config_before_wiring() {
     let storage = Arc::new(AgentOsStorage::init(temp.path()).unwrap());
     let deps = ClientProductionDependencies {
         conversation_journal: Arc::new(MemoryConversationJournal::new()),
-        model_adapter: Arc::new(FakeModelAdapter::default()),
+        model_adapter: Arc::new(StaticModelAdapter::default()),
         audit_log: Arc::new(MemoryAuditSink::new()),
         storage,
         component_kinds: ClientProductionComponentKinds::local_durable_defaults(

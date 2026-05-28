@@ -1,6 +1,6 @@
 //! # Identity Core
 //!
-//! Domain model for AgentOS identity — local sovereignty, device IDs, and fake crypto.
+//! Domain model for AgentOS identity — local sovereignty, device IDs, and test crypto.
 //!
 //! The identity model supports client-side sovereignty: the agentos_id is generated
 //! locally and is not bound to any single server. The same identity can bind to
@@ -168,14 +168,14 @@ impl Default for IdentityRuntimePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityRuntimePolicyError {
-    #[error("fake crypto is forbidden in production identity mode")]
-    FakeCryptoForbiddenInProduction,
+    #[error("test crypto is forbidden in production identity mode")]
+    TestCryptoForbiddenInProduction,
 }
 
 impl IdentityRuntimePolicy {
     pub fn validate(&self) -> Result<(), IdentityRuntimePolicyError> {
-        if self.is_production() && self.uses_fake_crypto() {
-            return Err(IdentityRuntimePolicyError::FakeCryptoForbiddenInProduction);
+        if self.is_production() && self.uses_test_crypto() {
+            return Err(IdentityRuntimePolicyError::TestCryptoForbiddenInProduction);
         }
         Ok(())
     }
@@ -184,7 +184,7 @@ impl IdentityRuntimePolicy {
         self.mode == IdentityRuntimeMode::Production
     }
 
-    pub fn uses_fake_crypto(&self) -> bool {
+    pub fn uses_test_crypto(&self) -> bool {
         self.crypto_provider == IdentityCryptoProviderKind::Fake
     }
 }
@@ -920,14 +920,14 @@ pub enum OAuthTokenRefreshError {
     Credential(#[from] CredentialError),
 }
 
-pub struct FakeOAuthTokenRefresher {
+pub struct ScriptedOAuthTokenRefresher {
     access_token_prefix: String,
     failure: Option<String>,
     refresh_count: Mutex<u64>,
     expires_in_secs: i64,
 }
 
-impl FakeOAuthTokenRefresher {
+impl ScriptedOAuthTokenRefresher {
     pub fn new(access_token_prefix: impl Into<String>) -> Self {
         Self {
             access_token_prefix: access_token_prefix.into(),
@@ -951,9 +951,9 @@ impl FakeOAuthTokenRefresher {
     }
 }
 
-impl fmt::Debug for FakeOAuthTokenRefresher {
+impl fmt::Debug for ScriptedOAuthTokenRefresher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FakeOAuthTokenRefresher")
+        f.debug_struct("ScriptedOAuthTokenRefresher")
             .field("access_token_prefix", &self.access_token_prefix)
             .field("failure", &self.failure)
             .field("refresh_count", &self.refresh_count())
@@ -963,7 +963,7 @@ impl fmt::Debug for FakeOAuthTokenRefresher {
 }
 
 #[async_trait]
-impl OAuthTokenRefresher for FakeOAuthTokenRefresher {
+impl OAuthTokenRefresher for ScriptedOAuthTokenRefresher {
     async fn refresh(
         &self,
         _connector_id: &str,
@@ -1072,13 +1072,13 @@ pub trait OAuthTokenRevoker: Send + Sync {
     ) -> Result<OAuthTokenRevocationOutcome, OAuthTokenRevocationError>;
 }
 
-pub struct FakeOAuthTokenRevoker {
+pub struct ScriptedOAuthTokenRevoker {
     endpoint_config: OAuthProviderEndpointConfig,
     failure: Option<String>,
     revocation_count: Mutex<u64>,
 }
 
-impl FakeOAuthTokenRevoker {
+impl ScriptedOAuthTokenRevoker {
     pub fn new(endpoint_config: OAuthProviderEndpointConfig) -> Self {
         Self {
             endpoint_config,
@@ -1106,9 +1106,9 @@ impl FakeOAuthTokenRevoker {
     }
 }
 
-impl fmt::Debug for FakeOAuthTokenRevoker {
+impl fmt::Debug for ScriptedOAuthTokenRevoker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FakeOAuthTokenRevoker")
+        f.debug_struct("ScriptedOAuthTokenRevoker")
             .field("endpoint_config", &self.endpoint_config)
             .field("failure", &self.failure)
             .field("revocation_count", &self.revocation_count())
@@ -1117,7 +1117,7 @@ impl fmt::Debug for FakeOAuthTokenRevoker {
 }
 
 #[async_trait]
-impl OAuthTokenRevoker for FakeOAuthTokenRevoker {
+impl OAuthTokenRevoker for ScriptedOAuthTokenRevoker {
     fn endpoint_config(&self) -> &OAuthProviderEndpointConfig {
         &self.endpoint_config
     }
@@ -1604,13 +1604,13 @@ impl EncryptedCredentialFileEntry {
 }
 
 // ---------------------------------------------------------------------------
-// FakeCryptoProvider — fake signature/verify for testing
+// DeterministicCryptoProvider — test-only signature/verify for testing
 // ---------------------------------------------------------------------------
 
 /// Fake crypto provider for testing. Signatures are just "signed:{challenge}".
-pub struct FakeCryptoProvider;
+pub struct DeterministicCryptoProvider;
 
-impl FakeCryptoProvider {
+impl DeterministicCryptoProvider {
     pub fn sign(&self, challenge: &str, _key: &LocalMasterKeyRef) -> String {
         format!("signed:{}", challenge)
     }
@@ -1711,31 +1711,31 @@ mod tests {
         assert_eq!(decoded, challenge);
     }
 
-    // ---- FakeCrypto tests ----
+    // ---- TestCrypto tests ----
 
     #[test]
-    fn fake_sign_produces_expected_signature() {
-        let crypto = FakeCryptoProvider;
+    fn deterministic_sign_produces_expected_signature() {
+        let crypto = DeterministicCryptoProvider;
         let key = LocalMasterKeyRef::from("master-key-1");
         let sig = crypto.sign("challenge-1", &key);
         assert_eq!(sig, "signed:challenge-1");
     }
 
     #[test]
-    fn fake_verify_accepts_valid_signature() {
-        let crypto = FakeCryptoProvider;
+    fn deterministic_verify_accepts_valid_signature() {
+        let crypto = DeterministicCryptoProvider;
         assert!(crypto.verify("challenge-1", "signed:challenge-1"));
     }
 
     #[test]
-    fn fake_verify_rejects_invalid_signature() {
-        let crypto = FakeCryptoProvider;
+    fn deterministic_verify_rejects_invalid_signature() {
+        let crypto = DeterministicCryptoProvider;
         assert!(!crypto.verify("challenge-1", "wrong-signature"));
     }
 
     #[test]
-    fn fake_create_proof_and_verify() {
-        let crypto = FakeCryptoProvider;
+    fn deterministic_create_proof_and_verify() {
+        let crypto = DeterministicCryptoProvider;
         let key = LocalMasterKeyRef::from("master-key-1");
         let proof = crypto.create_proof(
             &AgentOsId::from("agent-1"),
@@ -1747,8 +1747,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_proof_with_tampered_challenge_fails() {
-        let crypto = FakeCryptoProvider;
+    fn deterministic_proof_with_tampered_challenge_fails() {
+        let crypto = DeterministicCryptoProvider;
         let key = LocalMasterKeyRef::from("master-key-1");
         let mut proof = crypto.create_proof(
             &AgentOsId::from("agent-1"),
@@ -2296,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn development_identity_allows_fake_crypto() {
+    fn development_identity_allows_test_crypto() {
         let policy = IdentityRuntimePolicy {
             mode: IdentityRuntimeMode::Development,
             crypto_provider: IdentityCryptoProviderKind::Fake,
@@ -2306,7 +2306,7 @@ mod tests {
     }
 
     #[test]
-    fn production_identity_rejects_fake_crypto() {
+    fn production_identity_rejects_test_crypto() {
         let policy = IdentityRuntimePolicy {
             mode: IdentityRuntimeMode::Production,
             crypto_provider: IdentityCryptoProviderKind::Fake,
@@ -2314,7 +2314,7 @@ mod tests {
 
         assert!(matches!(
             policy.validate(),
-            Err(IdentityRuntimePolicyError::FakeCryptoForbiddenInProduction)
+            Err(IdentityRuntimePolicyError::TestCryptoForbiddenInProduction)
         ));
     }
 
@@ -2336,7 +2336,7 @@ mod tests {
         };
 
         assert!(policy.is_production());
-        assert!(policy.uses_fake_crypto());
+        assert!(policy.uses_test_crypto());
     }
 
     fn sample_oauth_token(expires_at: DateTime<Utc>) -> OAuthTokenSet {
@@ -2589,8 +2589,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_oauth_refresher_rotates_access_token() {
-        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+    async fn scripted_oauth_refresher_rotates_access_token() {
+        let refresher = ScriptedOAuthTokenRefresher::new("rotated-access");
         let current = sample_oauth_token(ts());
 
         let refreshed = refresher.refresh("github", &current).await.unwrap();
@@ -2613,7 +2613,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+        let refresher = ScriptedOAuthTokenRefresher::new("rotated-access");
 
         let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60)
             .await
@@ -2637,7 +2637,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+        let refresher = ScriptedOAuthTokenRefresher::new("rotated-access");
 
         let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60)
             .await
@@ -2672,7 +2672,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refresher = FakeOAuthTokenRefresher::new("rotated-access");
+        let refresher = ScriptedOAuthTokenRefresher::new("rotated-access");
 
         let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60).await;
 
@@ -2696,7 +2696,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refresher = FakeOAuthTokenRefresher::failing("provider offline");
+        let refresher = ScriptedOAuthTokenRefresher::failing("provider offline");
 
         let result = refresh_oauth_credential(&store, &refresher, &credential_ref, now, 60).await;
 
@@ -2719,7 +2719,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let revoker = FakeOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
+        let revoker = ScriptedOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
             "github",
             "https://github.example/oauth/token",
             Some("https://github.example/oauth/revoke"),
@@ -2754,7 +2754,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let revoker = FakeOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
+        let revoker = ScriptedOAuthTokenRevoker::new(OAuthProviderEndpointConfig::new(
             "github",
             "https://github.example/oauth/token",
             Some("https://github.example/oauth/revoke"),
@@ -2766,7 +2766,7 @@ mod tests {
                 .unwrap();
         let refresh_after_offboarding = refresh_oauth_credential(
             &store,
-            &FakeOAuthTokenRefresher::new("rotated-access"),
+            &ScriptedOAuthTokenRefresher::new("rotated-access"),
             &credential_ref,
             now,
             60,

@@ -20,12 +20,12 @@ use enterprise_permission_core::{
     EnterpriseRole, EnterpriseUserId, PermissionAction, PermissionGrant, PermissionStore,
     ResourceId, ResourceType,
 };
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 use serde_json::json;
 
 fn runtime() -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     KernelRuntimeBuilder::new()
@@ -40,7 +40,7 @@ fn runtime() -> KernelRuntime {
 
 fn runtime_with_permission_store(permission_store: PermissionStore) -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     KernelRuntimeBuilder::new()

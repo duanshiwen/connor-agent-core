@@ -512,7 +512,7 @@ impl KnowledgeHybridReranker for NoopHybridReranker {
     fn rerank(&self, _results: &mut Vec<KnowledgeHybridSearchResult>) {}
 }
 
-/// Deterministic fake reranker used to prove the rerank seam can reorder results.
+/// Deterministic test-only reranker used to prove the rerank seam can reorder results.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReverseHybridReranker;
 
@@ -818,7 +818,7 @@ impl KnowledgeIndex for DeterministicFullTextKnowledgeBackend {
     }
 }
 
-/// Deterministic in-memory full-text index alias kept for the PR134 fake-index boundary.
+/// Deterministic in-memory full-text index alias kept for the PR134 test-index boundary.
 pub type MemoryFullTextKnowledgeIndex = DeterministicFullTextKnowledgeBackend;
 
 /// First embedding backend: deterministic, dependency-free, in-process cosine search.
@@ -963,7 +963,7 @@ impl KnowledgeEmbeddingIndex for DeterministicEmbeddingKnowledgeBackend {
     }
 }
 
-/// Deterministic in-memory semantic index alias kept for the PR136 fake-index boundary.
+/// Deterministic in-memory semantic index alias kept for the PR136 test-index boundary.
 pub type MemorySemanticKnowledgeIndex = DeterministicEmbeddingKnowledgeBackend;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

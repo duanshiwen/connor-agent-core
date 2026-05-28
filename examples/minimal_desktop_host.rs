@@ -15,7 +15,7 @@ use conversation_core::{
 };
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use conversation_kernel::CreateConversationCommand;
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -131,7 +131,7 @@ fn registry() -> Arc<ActionRegistry> {
 
 fn runtime(storage: Arc<AgentOsStorage>) -> anyhow::Result<agentos_kernel::KernelRuntime> {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::new("desktop host"));
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::new("desktop host"));
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     Ok(KernelRuntimeBuilder::new()

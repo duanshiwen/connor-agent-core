@@ -7,7 +7,7 @@ use agentos_kernel::{
     RepositoryService, StorageProviderRegistry, StorageProviderService,
 };
 use async_trait::async_trait;
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 #[derive(Debug)]
 struct DummyActionExecutor;
@@ -61,12 +61,12 @@ fn assert_service_not_found<T>(
 #[test]
 fn model_provider_registry_returns_registered_provider() {
     let mut registry = ModelProviderRegistry::new();
-    registry.register("fake", Arc::new(FakeModelAdapter::default()));
+    registry.register("test", Arc::new(StaticModelAdapter::default()));
 
-    let provider: Arc<dyn ModelAdapter> = registry.get("fake").unwrap();
+    let provider: Arc<dyn ModelAdapter> = registry.get("test").unwrap();
 
     assert!(Arc::strong_count(&provider) >= 2);
-    assert!(registry.contains("fake"));
+    assert!(registry.contains("test"));
     assert_eq!(registry.len(), 1);
 }
 

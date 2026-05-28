@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use action_core::{
-    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, FakeActionExecutor,
-    SideEffectKind,
+    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, SideEffectKind,
+    StaticActionExecutor,
 };
 use action_runtime::ActionRuntimeOutcome;
 use agentos_kernel::{
@@ -18,7 +18,7 @@ use conversation_core::{
 };
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use conversation_kernel::CreateConversationCommand;
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -197,7 +197,7 @@ fn registry() -> Arc<ActionRegistry> {
 
 fn runtime() -> anyhow::Result<agentos_kernel::KernelRuntime> {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     Ok(KernelRuntimeBuilder::new()
@@ -206,6 +206,6 @@ fn runtime() -> anyhow::Result<agentos_kernel::KernelRuntime> {
         .action_registry(registry())
         .capability_policy(Arc::new(CapabilityPolicy::default_safe()))
         .audit_log(audit_log)
-        .action_executor(Arc::new(FakeActionExecutor::new("server host fixture")))
+        .action_executor(Arc::new(StaticActionExecutor::new("server host fixture")))
         .build()?)
 }

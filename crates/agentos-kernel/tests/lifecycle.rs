@@ -5,11 +5,11 @@ use agentos_kernel::{KernelRuntime, KernelRuntimeBuilder, KernelRuntimeState};
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn runtime() -> KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     KernelRuntimeBuilder::new()

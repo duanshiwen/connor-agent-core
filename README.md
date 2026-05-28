@@ -12,7 +12,7 @@
 - **显式副作用边界**：外部副作用必须经过 `action-core` / `action-runtime`、策略检查和审计日志。
 - **生产集成由宿主负责**：凭证、遥测导出、发布产物、原生通知投递、模型/服务提供商账号、OAuth 应用、签名、更新和产品 UX 都由宿主应用拥有。
 - **不伪造生产成功**：测试适配器和需要宿主提供的集成，不应在生产路径中静默返回 placeholder 成功值。
-- **默认可测试**：内存存储和 fake provider 用于确定性测试与示例。
+- **默认可测试**：内存存储和 test provider 用于确定性测试与示例。
 - **稳定宿主 API 优先**：`client-substrate`、`agentos-client-bridge` 和 `agentos-kernel` 暴露主要的面向宿主组合边界。
 
 ## Workspace 地图
@@ -28,7 +28,7 @@
 - `agent-runtime`：当前 Agent run 处理器、上下文构建、工具/Action proposal 路由、重试/run/action 存储、approval queue 和 checkpoint。
 - `client-substrate`：商业客户端 facade，提供 typed commands/events、UI projections 和保守的安全默认值。
 - `agentos-client-bridge`：面向原生 binding 与宿主应用的 JSON-safe bridge 边界。
-- `model-adapter`：模型 provider 抽象，以及 OpenAI-compatible / Anthropic adapter、streaming/tool call 支持、token budgeting 和 fake adapter。
+- `model-adapter`：模型 provider 抽象，以及 OpenAI-compatible / Anthropic adapter、streaming/tool call 支持、token budgeting 和 static adapter。
 - `assistant-core`：assistant profile、能力、偏好和对话辅助能力。
 
 ### Action、策略与审计层
@@ -81,7 +81,7 @@ cargo run -p client-substrate --example minimal-commercial-client-host
 生产宿主必须为产品自有基础设施提供真实实现，而不是依赖 test-only 默认值：
 
 - 持久化 conversation journal 和 storage root。
-- 非 fake 的模型 provider 配置。
+- 非 test-only 的模型 provider 配置。
 - 持久化或托管式 audit log。
 - 系统 keychain、secure enclave 或后端 credential storage。
 - 真实 OAuth app registration 和 connector authorization flows。

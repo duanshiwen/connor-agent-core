@@ -1,6 +1,6 @@
 //! # Mail Entity
 //!
-//! Domain types, action schemas, and fake executor for AgentOS Mail Entity.
+//! Domain types, action schemas, and static executor for AgentOS Mail Entity.
 //!
 //! The Mail Entity enables the assistant to help users triage, read, draft,
 //! and send emails. It is accessed through the ActionRuntime as a linked
@@ -9,7 +9,7 @@
 //! This crate provides:
 //! - Core domain types (`MailAccountId`, `MailMessageId`, `MailMessageSummary`, etc.)
 //! - Mail action schemas registered with `ActionRegistry`
-//! - `FakeMailExecutor` for testing and early runtime flows
+//! - `StaticMailExecutor` for testing and early runtime flows
 //!
 //! Future work:
 //! - IMAP/SMTP integration
@@ -354,17 +354,17 @@ pub trait MailRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// FakeMailRepository
+// InMemoryMailRepository
 // ---------------------------------------------------------------------------
 
 /// Deterministic in-memory mail repository for tests.
 #[derive(Debug, Clone, Default)]
-pub struct FakeMailRepository {
+pub struct InMemoryMailRepository {
     messages: Vec<MailMessage>,
     summaries: Vec<MailMessageSummary>,
 }
 
-impl FakeMailRepository {
+impl InMemoryMailRepository {
     pub fn new() -> Self {
         Self::default()
     }
@@ -381,7 +381,7 @@ impl FakeMailRepository {
 }
 
 #[async_trait]
-impl MailRepository for FakeMailRepository {
+impl MailRepository for InMemoryMailRepository {
     async fn list_recent(
         &self,
         _account_id: &str,
@@ -422,23 +422,23 @@ impl MailRepository for FakeMailRepository {
 }
 
 // ---------------------------------------------------------------------------
-// FakeMailExecutor
+// StaticMailExecutor
 // ---------------------------------------------------------------------------
 
 /// Deterministic action executor for mail actions.
-pub struct FakeMailExecutor {
-    repository: FakeMailRepository,
+pub struct StaticMailExecutor {
+    repository: InMemoryMailRepository,
     now: DateTime<Utc>,
 }
 
-impl FakeMailExecutor {
-    pub fn new(repository: FakeMailRepository, now: DateTime<Utc>) -> Self {
+impl StaticMailExecutor {
+    pub fn new(repository: InMemoryMailRepository, now: DateTime<Utc>) -> Self {
         Self { repository, now }
     }
 }
 
 #[async_trait]
-impl ActionExecutor for FakeMailExecutor {
+impl ActionExecutor for StaticMailExecutor {
     async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
         let payload = match request.action_kind.0.as_str() {
             MAIL_LIST_RECENT_ACTION_KIND => {
@@ -512,7 +512,7 @@ impl ActionExecutor for FakeMailExecutor {
             }
             MAIL_SEND_ACTION_KIND => {
                 // In a real implementation, this would call SMTP/API.
-                // For fake, we just acknowledge the send.
+                // For test-only, we just acknowledge the send.
                 let _input: MailSendActionInput = serde_json::from_value(request.input.clone())
                     .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
                 ActionResultPayload::Json(
@@ -763,11 +763,11 @@ mod tests {
         );
     }
 
-    // ---- FakeMailRepository tests ----
+    // ---- InMemoryMailRepository tests ----
 
     #[tokio::test]
-    async fn fake_repo_lists_summaries() {
-        let repo = FakeMailRepository::new().with_summaries(vec![
+    async fn in_memory_repo_lists_summaries() {
+        let repo = InMemoryMailRepository::new().with_summaries(vec![
             test_summary("msg-1", "First", false),
             test_summary("msg-2", "Second", true),
         ]);
@@ -777,8 +777,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_repo_filters_unread_only() {
-        let repo = FakeMailRepository::new().with_summaries(vec![
+    async fn in_memory_repo_filters_unread_only() {
+        let repo = InMemoryMailRepository::new().with_summaries(vec![
             test_summary("msg-1", "Read", true),
             test_summary("msg-2", "Unread", false),
         ]);
@@ -789,25 +789,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_repo_truncates_results() {
+    async fn in_memory_repo_truncates_results() {
         let summaries: Vec<_> = (0..5)
             .map(|i| test_summary(&format!("msg-{}", i), &format!("Subject {}", i), false))
             .collect();
-        let repo = FakeMailRepository::new().with_summaries(summaries);
+        let repo = InMemoryMailRepository::new().with_summaries(summaries);
 
         let results = repo.list_recent("account-1", 3, false).await.unwrap();
         assert_eq!(results.len(), 3);
     }
 
     #[tokio::test]
-    async fn fake_repo_get_message_returns_none_for_missing() {
-        let repo = FakeMailRepository::new();
+    async fn in_memory_repo_get_message_returns_none_for_missing() {
+        let repo = InMemoryMailRepository::new();
         assert!(repo.get_message("missing").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn fake_repo_get_thread_messages() {
-        let repo = FakeMailRepository::new().with_messages(vec![
+    async fn in_memory_repo_get_thread_messages() {
+        let repo = InMemoryMailRepository::new().with_messages(vec![
             test_message("msg-1", "First", "a@example.com"),
             test_message("msg-2", "Second", "b@example.com"),
         ]);
@@ -816,16 +816,16 @@ mod tests {
         assert_eq!(msgs.len(), 2);
     }
 
-    // ---- FakeMailExecutor tests ----
+    // ---- StaticMailExecutor tests ----
 
     #[tokio::test]
     async fn executor_list_recent_returns_summaries() {
-        let repo = FakeMailRepository::new().with_summaries(vec![test_summary(
+        let repo = InMemoryMailRepository::new().with_summaries(vec![test_summary(
             "msg-1",
             "Important Email",
             false,
         )]);
-        let executor = FakeMailExecutor::new(repo, ts());
+        let executor = StaticMailExecutor::new(repo, ts());
 
         let result = executor
             .execute(&action_request(
@@ -846,12 +846,12 @@ mod tests {
 
     #[tokio::test]
     async fn executor_get_message_returns_full_message() {
-        let repo = FakeMailRepository::new().with_messages(vec![test_message(
+        let repo = InMemoryMailRepository::new().with_messages(vec![test_message(
             "msg-1",
             "Test",
             "a@example.com",
         )]);
-        let executor = FakeMailExecutor::new(repo, ts());
+        let executor = StaticMailExecutor::new(repo, ts());
 
         let result = executor
             .execute(&action_request(
@@ -872,12 +872,12 @@ mod tests {
 
     #[tokio::test]
     async fn executor_summarize_thread_returns_text() {
-        let repo = FakeMailRepository::new().with_messages(vec![test_message(
+        let repo = InMemoryMailRepository::new().with_messages(vec![test_message(
             "msg-1",
             "Thread Start",
             "a@example.com",
         )]);
-        let executor = FakeMailExecutor::new(repo, ts());
+        let executor = StaticMailExecutor::new(repo, ts());
 
         let result = executor
             .execute(&action_request(
@@ -897,12 +897,12 @@ mod tests {
 
     #[tokio::test]
     async fn executor_create_draft_reply_builds_draft() {
-        let repo = FakeMailRepository::new().with_messages(vec![test_message(
+        let repo = InMemoryMailRepository::new().with_messages(vec![test_message(
             "msg-1",
             "Original",
             "sender@example.com",
         )]);
-        let executor = FakeMailExecutor::new(repo, ts());
+        let executor = StaticMailExecutor::new(repo, ts());
 
         let result = executor
             .execute(&action_request(
@@ -924,8 +924,8 @@ mod tests {
 
     #[tokio::test]
     async fn executor_send_returns_sent_status() {
-        let repo = FakeMailRepository::new();
-        let executor = FakeMailExecutor::new(repo, ts());
+        let repo = InMemoryMailRepository::new();
+        let executor = StaticMailExecutor::new(repo, ts());
 
         let draft = MailDraft {
             reply_to: MailMessageId::from("msg-1"),
@@ -952,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn executor_rejects_unknown_action_kind() {
-        let executor = FakeMailExecutor::new(FakeMailRepository::new(), ts());
+        let executor = StaticMailExecutor::new(InMemoryMailRepository::new(), ts());
         let result = executor
             .execute(&action_request(
                 ActionKind::from("mail.unknown"),

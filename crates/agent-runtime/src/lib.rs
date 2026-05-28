@@ -88,7 +88,7 @@ pub struct AgentRuntimeConfig {
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
-            default_model_id: ModelId::from("fake/default"),
+            default_model_id: ModelId::from("test/default"),
             max_context_messages: 50,
             system_prompt: None,
         }
@@ -299,7 +299,7 @@ fn proposal_from_parts(run_id: &str, kind: &str, input: serde_json::Value) -> Ag
     }
 }
 
-/// Deterministic fake detector for tests and early action integration.
+/// Deterministic test-only detector for tests and early action integration.
 ///
 /// It recognizes response markers like:
 ///

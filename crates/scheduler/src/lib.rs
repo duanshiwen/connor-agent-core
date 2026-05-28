@@ -4,7 +4,7 @@
 //!
 //! The scheduler does not run as a background daemon. It provides a `poll_due_jobs()`
 //! method that the caller invokes at appropriate intervals. This makes it fully
-//! testable with fake clocks.
+//! testable with test-only clocks.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -88,11 +88,11 @@ impl Clock for RealClock {
 }
 
 /// Fake clock with manually controllable time.
-pub struct FakeClock {
+pub struct ManualClock {
     now: Mutex<DateTime<Utc>>,
 }
 
-impl FakeClock {
+impl ManualClock {
     pub fn new(initial: DateTime<Utc>) -> Self {
         Self {
             now: Mutex::new(initial),
@@ -226,7 +226,7 @@ impl FsJsonlSchedulerStore {
     }
 }
 
-impl Clock for FakeClock {
+impl Clock for ManualClock {
     fn now(&self) -> DateTime<Utc> {
         *self.now.lock().unwrap()
     }
@@ -493,24 +493,24 @@ mod tests {
         }
     }
 
-    // ---- FakeClock tests ----
+    // ---- ManualClock tests ----
 
     #[test]
-    fn fake_clock_starts_at_initial_time() {
-        let clock = FakeClock::new(ts());
+    fn manual_clock_starts_at_initial_time() {
+        let clock = ManualClock::new(ts());
         assert_eq!(clock.now(), ts());
     }
 
     #[test]
-    fn fake_clock_advances() {
-        let clock = FakeClock::new(ts());
+    fn manual_clock_advances() {
+        let clock = ManualClock::new(ts());
         clock.advance(chrono::Duration::hours(1));
         assert_eq!(clock.now(), ts() + chrono::Duration::hours(1));
     }
 
     #[test]
-    fn fake_clock_set() {
-        let clock = FakeClock::new(ts());
+    fn manual_clock_set() {
+        let clock = ManualClock::new(ts());
         let new_time = ts() + chrono::Duration::days(1);
         clock.set(new_time);
         assert_eq!(clock.now(), new_time);
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn scheduler_fires_due_job() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn scheduler_ignores_future_jobs() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn scheduler_ignores_already_fired_jobs() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn scheduler_ignores_cancelled_jobs() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn scheduler_fires_multiple_due_jobs() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn scheduler_fires_job_after_clock_advances() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
 
         scheduler
@@ -660,9 +660,9 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_due_reminder_generates_notification() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
-        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let sink = std::sync::Arc::new(notification_core::CapturingNotificationSink::new());
         let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
         let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
 
@@ -689,9 +689,9 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_completed_reminder_does_not_generate_notification() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
-        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let sink = std::sync::Arc::new(notification_core::CapturingNotificationSink::new());
         let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
         let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
 
@@ -717,9 +717,9 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_cancelled_reminder_does_not_fire() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
-        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let sink = std::sync::Arc::new(notification_core::CapturingNotificationSink::new());
         let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
         let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
 
@@ -744,9 +744,9 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_snoozed_reminder_fires_after_duration() {
-        let clock = std::sync::Arc::new(FakeClock::new(ts()));
+        let clock = std::sync::Arc::new(ManualClock::new(ts()));
         let scheduler = Scheduler::new(clock.clone());
-        let sink = std::sync::Arc::new(notification_core::FakeNotificationSink::new());
+        let sink = std::sync::Arc::new(notification_core::CapturingNotificationSink::new());
         let store = std::sync::Arc::new(notification_core::MemoryNotificationStore::new());
         let bridge = ReminderNotificationBridge::new(scheduler, sink.clone(), store.clone());
 

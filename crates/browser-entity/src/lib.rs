@@ -1,6 +1,6 @@
 //! # Browser Entity
 //!
-//! Domain types, action schemas, and fake executor for AgentOS Browser Entity.
+//! Domain types, action schemas, and static executor for AgentOS Browser Entity.
 //!
 //! The Browser Entity enables the assistant to help users read web pages, extract
 //! content, summarize, and compare pages. It is accessed through the ActionRuntime
@@ -9,7 +9,7 @@
 //! This crate provides:
 //! - Core domain types (`BrowsingSessionId`, `WebPageUrl`, `WebPageSnapshot`, etc.)
 //! - Browser action schemas registered with `ActionRegistry`
-//! - `FakeBrowserExecutor` for testing and early runtime flows
+//! - `StaticBrowserExecutor` for testing and early runtime flows
 //!
 //! Future work:
 //! - `StaticHtmlBrowserExecutor` (HTTP fetch + HTML parse)
@@ -652,29 +652,29 @@ pub fn all_browser_action_kinds() -> Vec<ActionKind> {
 }
 
 // ---------------------------------------------------------------------------
-// FakeBrowserExecutor
+// StaticBrowserExecutor
 // ---------------------------------------------------------------------------
 
-/// Deterministic fake browser executor for testing and early runtime flows.
+/// Deterministic test-only browser executor for testing and early runtime flows.
 ///
-/// Returns static fake content for all browser actions.
-pub struct FakeBrowserExecutor {
+/// Returns static test-only content for all browser actions.
+pub struct StaticBrowserExecutor {
     now: DateTime<Utc>,
 }
 
-impl FakeBrowserExecutor {
+impl StaticBrowserExecutor {
     pub fn new(now: DateTime<Utc>) -> Self {
         Self { now }
     }
 
-    fn fake_snapshot(&self, url: &str, include_html: bool) -> WebPageSnapshot {
+    fn static_snapshot(&self, url: &str, include_html: bool) -> WebPageSnapshot {
         WebPageSnapshot {
             url: WebPageUrl::new(url).unwrap_or_else(|_| WebPageUrl("about:blank".to_string())),
-            title: format!("Fake Page: {}", url),
-            content: format!("This is fake extracted content from {}.", url),
+            title: format!("Static Page: {}", url),
+            content: format!("This is static extracted content from {}.", url),
             html_source: if include_html {
                 Some(format!(
-                    "<html><head><title>Fake Page: {}</title></head><body>Fake content.</body></html>",
+                    "<html><head><title>Static Page: {}</title></head><body>Static content.</body></html>",
                     url
                 ))
             } else {
@@ -685,25 +685,25 @@ impl FakeBrowserExecutor {
         }
     }
 
-    fn fake_extracted_content(&self, url: &str) -> WebExtractedContent {
+    fn static_extracted_content(&self, url: &str) -> WebExtractedContent {
         WebExtractedContent {
             source_url: WebPageUrl::new(url)
                 .unwrap_or_else(|_| WebPageUrl("about:blank".to_string())),
-            text: format!("This is fake extracted content from {}.", url),
+            text: format!("This is static extracted content from {}.", url),
             links: vec![format!("{}/link1", url), format!("{}/link2", url)],
             images: vec![format!("{}/image.png", url)],
             extracted_at: self.now,
         }
     }
 
-    fn fake_summary(&self, url: &str) -> String {
+    fn static_summary(&self, url: &str) -> String {
         format!(
-            "This is a fake summary of {}. The page discusses important topics related to the URL.",
+            "This is a static summary of {}. The page discusses important topics related to the URL.",
             url
         )
     }
 
-    fn fake_comparison(&self, url_a: &str, url_b: &str) -> String {
+    fn static_comparison(&self, url_a: &str, url_b: &str) -> String {
         format!(
             "Comparison between {} and {}:\n\
              - Both pages discuss similar topics.\n\
@@ -715,14 +715,14 @@ impl FakeBrowserExecutor {
 }
 
 #[async_trait]
-impl ActionExecutor for FakeBrowserExecutor {
+impl ActionExecutor for StaticBrowserExecutor {
     async fn execute(&self, request: &ActionRequest) -> Result<ActionResult, ActionExecutorError> {
         let payload = match request.action_kind.0.as_str() {
             BROWSER_OPEN_URL_ACTION_KIND => {
                 let input: BrowserOpenUrlActionInput =
                     serde_json::from_value(request.input.clone())
                         .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
-                let snapshot = self.fake_snapshot(&input.url, false);
+                let snapshot = self.static_snapshot(&input.url, false);
                 ActionResultPayload::Json(
                     serde_json::to_value(snapshot)
                         .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
@@ -732,7 +732,7 @@ impl ActionExecutor for FakeBrowserExecutor {
                 let input: BrowserExtractContentActionInput =
                     serde_json::from_value(request.input.clone())
                         .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
-                let content = self.fake_extracted_content(&input.url);
+                let content = self.static_extracted_content(&input.url);
                 ActionResultPayload::Json(
                     serde_json::to_value(content)
                         .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
@@ -742,21 +742,21 @@ impl ActionExecutor for FakeBrowserExecutor {
                 let input: BrowserSummarizePageActionInput =
                     serde_json::from_value(request.input.clone())
                         .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
-                let summary = self.fake_summary(&input.url);
+                let summary = self.static_summary(&input.url);
                 ActionResultPayload::Text(summary)
             }
             BROWSER_COMPARE_PAGES_ACTION_KIND => {
                 let input: BrowserComparePagesActionInput =
                     serde_json::from_value(request.input.clone())
                         .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
-                let comparison = self.fake_comparison(&input.url_a, &input.url_b);
+                let comparison = self.static_comparison(&input.url_a, &input.url_b);
                 ActionResultPayload::Text(comparison)
             }
             BROWSER_CAPTURE_SNAPSHOT_ACTION_KIND => {
                 let input: BrowserCaptureSnapshotActionInput =
                     serde_json::from_value(request.input.clone())
                         .map_err(|e| ActionExecutorError::InvalidInput(e.to_string()))?;
-                let snapshot = self.fake_snapshot(&input.url, input.include_html);
+                let snapshot = self.static_snapshot(&input.url, input.include_html);
                 ActionResultPayload::Json(
                     serde_json::to_value(snapshot)
                         .map_err(|e| ActionExecutorError::ExecutionFailed(e.to_string()))?,
@@ -1893,8 +1893,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_browser_executor_returns_interaction_result_for_click() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_interaction_result_for_click() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -1922,8 +1922,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_browser_executor_returns_interaction_result_for_type_text() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_interaction_result_for_type_text() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -2172,7 +2172,7 @@ mod tests {
         ));
     }
 
-    // ---- FakeBrowserExecutor tests ----
+    // ---- StaticBrowserExecutor tests ----
 
     #[test]
     fn browser_click_element_action_input_roundtrips() {
@@ -2225,8 +2225,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_browser_executor_returns_snapshot_for_open_url() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_snapshot_for_open_url() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -2244,12 +2244,12 @@ mod tests {
         };
         let snapshot: WebPageSnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(snapshot.url.as_str(), "https://example.com");
-        assert!(snapshot.title.contains("Fake Page"));
+        assert!(snapshot.title.contains("Static Page"));
     }
 
     #[test]
-    fn fake_browser_executor_returns_extracted_content() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_extracted_content() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -2271,8 +2271,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_browser_executor_returns_text_summary() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_text_summary() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -2286,15 +2286,15 @@ mod tests {
 
         assert_eq!(result.status, ActionStatus::Completed);
         if let ActionResultPayload::Text(text) = &result.payload {
-            assert!(text.contains("fake summary"));
+            assert!(text.contains("static summary"));
         } else {
             panic!("expected text payload");
         }
     }
 
     #[test]
-    fn fake_browser_executor_returns_text_comparison() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_returns_text_comparison() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor
@@ -2317,8 +2317,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_browser_executor_rejects_unknown_action_kind() {
-        let executor = FakeBrowserExecutor::new(ts());
+    fn static_browser_executor_rejects_unknown_action_kind() {
+        let executor = StaticBrowserExecutor::new(ts());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             executor

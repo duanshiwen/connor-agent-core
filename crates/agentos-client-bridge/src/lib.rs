@@ -57,7 +57,7 @@ impl AgentOsClientBridge {
     /// Construct a deterministic test/development bridge. Production hosts
     /// should construct `ClientSubstrate` with production dependencies and pass
     /// it through `from_substrate`.
-    pub fn for_tests() -> Result<Self, AgentOsClientBridgeError> {
+    pub fn for_local_development() -> Result<Self, AgentOsClientBridgeError> {
         let substrate = ClientSubstrate::builder().build()?;
         Ok(Self { substrate })
     }
@@ -130,13 +130,13 @@ mod tests {
 
     #[test]
     fn bridge_exposes_api_version() {
-        let bridge = AgentOsClientBridge::for_tests().unwrap();
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
         assert_eq!(bridge.api_version(), 1);
     }
 
     #[test]
     fn bridge_returns_json_projection() {
-        let bridge = AgentOsClientBridge::for_tests().unwrap();
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
         let response = bridge.conversation_list_projection_json().unwrap();
         assert!(response.ok);
         assert!(response.json.contains("conversations"));
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn bridge_rejects_invalid_cursor_json() {
-        let bridge = AgentOsClientBridge::for_tests().unwrap();
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
         let err = bridge.events_after_json("not-json").unwrap_err();
         assert!(matches!(
             err,
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn bridge_exposes_health_and_knowledge_asset_projections() {
-        let bridge = AgentOsClientBridge::for_tests().unwrap();
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
         assert!(
             bridge
                 .storage_health_report_json()

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Domain model for reminders — types, events, action schemas, and fake executor."
+description = "Domain model for reminders — types, events, action schemas, and static executor."
 
 [dependencies]
 action-core = { path = "../action-core" }

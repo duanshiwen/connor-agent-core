@@ -90,14 +90,14 @@ pub trait NotificationSink: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// FakeNotificationSink — collects notifications for testing
+// CapturingNotificationSink — collects notifications for testing
 // ---------------------------------------------------------------------------
 
-pub struct FakeNotificationSink {
+pub struct CapturingNotificationSink {
     emitted: Mutex<Vec<Notification>>,
 }
 
-impl FakeNotificationSink {
+impl CapturingNotificationSink {
     pub fn new() -> Self {
         Self {
             emitted: Mutex::new(Vec::new()),
@@ -115,14 +115,14 @@ impl FakeNotificationSink {
     }
 }
 
-impl Default for FakeNotificationSink {
+impl Default for CapturingNotificationSink {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl NotificationSink for FakeNotificationSink {
+impl NotificationSink for CapturingNotificationSink {
     async fn emit(&self, notification: &Notification) -> Result<(), NotificationError> {
         self.emitted.lock().unwrap().push(notification.clone());
         Ok(())
@@ -376,11 +376,11 @@ mod tests {
         }
     }
 
-    // ---- FakeNotificationSink tests ----
+    // ---- CapturingNotificationSink tests ----
 
     #[tokio::test]
-    async fn fake_sink_collects_emitted_notifications() {
-        let sink = FakeNotificationSink::new();
+    async fn capturing_sink_collects_emitted_notifications() {
+        let sink = CapturingNotificationSink::new();
         let n1 = sample_notification("n-1");
         let n2 = sample_notification("n-2");
         sink.emit(&n1).await.unwrap();
@@ -391,8 +391,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_sink_starts_empty() {
-        let sink = FakeNotificationSink::new();
+    async fn capturing_sink_starts_empty() {
+        let sink = CapturingNotificationSink::new();
         assert_eq!(sink.count(), 0);
         assert!(sink.emitted().is_empty());
     }

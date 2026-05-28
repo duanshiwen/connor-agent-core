@@ -5,11 +5,11 @@ use agentos_storage::{
     StorageMigration, StorageMigrationRegistry, StorageResult,
 };
 
-struct FakeV1ToV2Migration;
+struct ScriptedV1ToV2Migration;
 
-impl StorageMigration for FakeV1ToV2Migration {
+impl StorageMigration for ScriptedV1ToV2Migration {
     fn name(&self) -> &str {
-        "fake-v1-to-v2"
+        "scripted-v1-to-v2"
     }
 
     fn from_version(&self) -> u32 {
@@ -57,7 +57,7 @@ fn read_manifest(path: &Path) -> StorageManifest {
 #[test]
 fn registry_plans_v1_to_v2_migration() {
     let mut registry = StorageMigrationRegistry::new();
-    registry.register(FakeV1ToV2Migration).unwrap();
+    registry.register(ScriptedV1ToV2Migration).unwrap();
 
     let plan = registry.plan(1, 2).unwrap();
 
@@ -66,7 +66,7 @@ fn registry_plans_v1_to_v2_migration() {
     assert_eq!(plan.steps.len(), 1);
     assert_eq!(plan.steps[0].from_version, 1);
     assert_eq!(plan.steps[0].to_version, 2);
-    assert_eq!(plan.steps[0].name, "fake-v1-to-v2");
+    assert_eq!(plan.steps[0].name, "scripted-v1-to-v2");
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn dry_run_does_not_modify_manifest_or_write_backup() {
     AgentOsStorage::init(dir.path()).unwrap();
     let original_manifest = read_manifest(dir.path());
     let mut registry = StorageMigrationRegistry::new();
-    registry.register(FakeV1ToV2Migration).unwrap();
+    registry.register(ScriptedV1ToV2Migration).unwrap();
 
     let report = registry
         .migrate(dir.path(), 2, MigrationMode::DryRun)
@@ -92,11 +92,11 @@ fn dry_run_does_not_modify_manifest_or_write_backup() {
 }
 
 #[test]
-fn apply_fake_v1_to_v2_updates_manifest_and_writes_backup() {
+fn apply_scripted_v1_to_v2_updates_manifest_and_writes_backup() {
     let dir = tempfile::tempdir().unwrap();
     AgentOsStorage::init(dir.path()).unwrap();
     let mut registry = StorageMigrationRegistry::new();
-    registry.register(FakeV1ToV2Migration).unwrap();
+    registry.register(ScriptedV1ToV2Migration).unwrap();
 
     let report = registry
         .migrate(dir.path(), 2, MigrationMode::Apply)
@@ -140,9 +140,9 @@ fn failed_migration_does_not_modify_original_manifest() {
 #[test]
 fn duplicate_migration_is_rejected() {
     let mut registry = StorageMigrationRegistry::new();
-    registry.register(FakeV1ToV2Migration).unwrap();
+    registry.register(ScriptedV1ToV2Migration).unwrap();
 
-    let result = registry.register(FakeV1ToV2Migration);
+    let result = registry.register(ScriptedV1ToV2Migration);
 
     assert!(matches!(
         result.unwrap_err(),

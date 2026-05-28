@@ -7,7 +7,7 @@ fn response_json(response: agentos_client_bridge::BridgeResponse) -> Value {
 
 #[test]
 fn bridge_health_projection_schema_contains_required_fields() {
-    let bridge = AgentOsClientBridge::for_tests().unwrap();
+    let bridge = AgentOsClientBridge::for_local_development().unwrap();
     let value = response_json(bridge.storage_health_report_json().unwrap());
     assert!(value.get("profile_id").is_some());
     assert!(value.get("workspace_id").is_some());
@@ -18,7 +18,7 @@ fn bridge_health_projection_schema_contains_required_fields() {
 
 #[test]
 fn bridge_knowledge_and_asset_schema_contains_required_fields() {
-    let bridge = AgentOsClientBridge::for_tests().unwrap();
+    let bridge = AgentOsClientBridge::for_local_development().unwrap();
     let knowledge = response_json(bridge.knowledge_projection_json().unwrap());
     let assets = response_json(bridge.asset_projection_json().unwrap());
     assert!(knowledge.get("last_query").is_some());

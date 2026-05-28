@@ -10,7 +10,7 @@ use artifact_core::{ArtifactId, ArtifactKind, ArtifactStore, MemoryArtifactStore
 use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
 use browser_entity::{
-    BrowserExtractContentActionInput, BrowserOpenUrlActionInput, FakeBrowserExecutor,
+    BrowserExtractContentActionInput, BrowserOpenUrlActionInput, StaticBrowserExecutor,
     WebExtractedContent, register_browser_action_schemas,
 };
 use capability_policy::CapabilityPolicy;
@@ -1393,7 +1393,7 @@ async fn browser_extract_content_auto_executes_through_action_runtime() {
     let kernel = test_kernel();
     let conversation_id = create_conversation(&kernel).await;
     let registry = browser_registry();
-    let executor = FakeBrowserExecutor::new(Utc::now());
+    let executor = StaticBrowserExecutor::new(Utc::now());
     let audit = MemoryAuditSink::new();
 
     let outcome = process_action_with_input(
@@ -1438,7 +1438,7 @@ async fn browser_open_url_requires_approval_through_action_runtime() {
     let kernel = test_kernel();
     let conversation_id = create_conversation(&kernel).await;
     let registry = browser_registry();
-    let executor = FakeBrowserExecutor::new(Utc::now());
+    let executor = StaticBrowserExecutor::new(Utc::now());
     let audit = MemoryAuditSink::new();
 
     let outcome = process_action_with_input(
@@ -1479,7 +1479,7 @@ async fn browser_summarize_auto_executes_through_action_runtime() {
     let kernel = test_kernel();
     let conversation_id = create_conversation(&kernel).await;
     let registry = browser_registry();
-    let executor = FakeBrowserExecutor::new(Utc::now());
+    let executor = StaticBrowserExecutor::new(Utc::now());
     let audit = MemoryAuditSink::new();
 
     let outcome = process_action_with_input(
@@ -1498,7 +1498,7 @@ async fn browser_summarize_auto_executes_through_action_runtime() {
         panic!("expected completed outcome");
     };
     if let ActionResultPayload::Text(text) = result.payload {
-        assert!(text.contains("fake summary"));
+        assert!(text.contains("static summary"));
     } else {
         panic!("expected text payload");
     }
@@ -1520,7 +1520,7 @@ async fn browser_capture_snapshot_requires_approval_through_action_runtime() {
     let kernel = test_kernel();
     let conversation_id = create_conversation(&kernel).await;
     let registry = browser_registry();
-    let executor = FakeBrowserExecutor::new(Utc::now());
+    let executor = StaticBrowserExecutor::new(Utc::now());
     let audit = MemoryAuditSink::new();
 
     let outcome = process_action_with_input(
@@ -1569,7 +1569,7 @@ async fn browser_click_and_type_require_approval_through_action_runtime() {
         let kernel = test_kernel();
         let conversation_id = create_conversation(&kernel).await;
         let registry = browser_registry();
-        let executor = FakeBrowserExecutor::new(Utc::now());
+        let executor = StaticBrowserExecutor::new(Utc::now());
         let audit = MemoryAuditSink::new();
 
         let outcome = process_action_with_input(
@@ -1624,7 +1624,7 @@ async fn browser_fill_upload_and_download_are_denied_by_default_safe_policy() {
         let kernel = test_kernel();
         let conversation_id = create_conversation(&kernel).await;
         let registry = browser_registry();
-        let executor = FakeBrowserExecutor::new(Utc::now());
+        let executor = StaticBrowserExecutor::new(Utc::now());
         let audit = MemoryAuditSink::new();
 
         let outcome = process_action_with_input(

@@ -529,18 +529,18 @@ mod tests {
     // ---- AuthorizedSearchExecutor tests ----
 
     #[derive(Debug)]
-    struct FakeSearchExecutor {
+    struct ScriptedSearchExecutor {
         results: Vec<SearchResult>,
     }
 
-    impl FakeSearchExecutor {
+    impl ScriptedSearchExecutor {
         fn new(results: Vec<SearchResult>) -> Self {
             Self { results }
         }
     }
 
     #[async_trait]
-    impl SearchExecutor for FakeSearchExecutor {
+    impl SearchExecutor for ScriptedSearchExecutor {
         async fn search_raw(
             &self,
             _request: &SearchRequest,
@@ -556,7 +556,7 @@ mod tests {
             make_result("r2", "kb-2"), // User A has no access to kb-2
         ];
 
-        let executor = FakeSearchExecutor::new(results);
+        let executor = ScriptedSearchExecutor::new(results);
         let store = setup_permission_store();
         let authorized = AuthorizedSearchExecutor::new(executor, store);
 
@@ -579,7 +579,7 @@ mod tests {
     async fn authorized_search_allows_authorized() {
         let results = vec![make_result("r1", "kb-1")];
 
-        let executor = FakeSearchExecutor::new(results);
+        let executor = ScriptedSearchExecutor::new(results);
         let store = setup_permission_store();
         let authorized = AuthorizedSearchExecutor::new(executor, store);
 
@@ -601,7 +601,7 @@ mod tests {
     async fn unauthorized_user_gets_no_results() {
         let results = vec![make_result("r1", "kb-1")];
 
-        let executor = FakeSearchExecutor::new(results);
+        let executor = ScriptedSearchExecutor::new(results);
         let store = setup_permission_store();
         let authorized = AuthorizedSearchExecutor::new(executor, store);
 
@@ -678,12 +678,12 @@ mod tests {
     // ---- Enterprise search backend boundary tests ----
 
     #[derive(Debug)]
-    struct FakeEnterpriseSearchBackend {
+    struct ScriptedEnterpriseSearchBackend {
         results: Vec<SearchResult>,
     }
 
     #[async_trait]
-    impl EnterpriseSearchBackend for FakeEnterpriseSearchBackend {
+    impl EnterpriseSearchBackend for ScriptedEnterpriseSearchBackend {
         async fn search_enterprise(
             &self,
             request: &EnterpriseSearchRequest,
@@ -700,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn enterprise_search_redacts_unauthorized_metadata() {
-        let backend = FakeEnterpriseSearchBackend {
+        let backend = ScriptedEnterpriseSearchBackend {
             results: vec![
                 make_result("r1", "kb-1"),
                 SearchResult {
@@ -746,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn enterprise_search_can_report_filtered_count_when_not_redacting() {
-        let backend = FakeEnterpriseSearchBackend {
+        let backend = ScriptedEnterpriseSearchBackend {
             results: vec![make_result("r1", "kb-1"), make_result("r2", "kb-2")],
         };
         let policy = EnterpriseSearchPolicy {
@@ -772,7 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn enterprise_search_returns_empty_for_offboarded_user() {
-        let backend = FakeEnterpriseSearchBackend {
+        let backend = ScriptedEnterpriseSearchBackend {
             results: vec![make_result("r1", "kb-1")],
         };
         let mut store = setup_permission_store();
@@ -806,7 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn enterprise_search_warns_when_permission_cache_is_stale() {
-        let backend = FakeEnterpriseSearchBackend {
+        let backend = ScriptedEnterpriseSearchBackend {
             results: vec![make_result("r1", "kb-1")],
         };
         let mut provider =

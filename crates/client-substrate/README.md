@@ -12,7 +12,7 @@ Breaking changes to command/event/projection semantics must bump `CLIENT_SUBSTRA
 
 - `Test`: deterministic memory/fake defaults.
 - `Development`: local development defaults.
-- `Production`: requires explicit `ClientProductionDependencies` and rejects declared fake/in-memory components.
+- `Production`: requires explicit `ClientProductionDependencies` and rejects declared test/in-memory components.
 
 ## UI Contract
 

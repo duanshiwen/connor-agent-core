@@ -8,14 +8,14 @@ use agentos_storage::AgentOsStorage;
 use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::CapabilityPolicy;
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn conversation_journal() -> Arc<dyn ConversationJournal> {
     Arc::new(MemoryConversationJournal::new())
 }
 
 fn model_adapter() -> Arc<dyn ModelAdapter> {
-    Arc::new(FakeModelAdapter::default())
+    Arc::new(StaticModelAdapter::default())
 }
 
 fn action_registry() -> Arc<ActionRegistry> {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use action_core::{
-    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, FakeActionExecutor,
-    SideEffectKind,
+    ActionId, ActionKind, ActionRegistry, ActionRequest, ActionSchema, SideEffectKind,
+    StaticActionExecutor,
 };
 use action_runtime::ActionRuntimeOutcome;
 use agentos_kernel::{HostProcessActionRequest, KernelHostApi, KernelRuntimeBuilder};
@@ -14,14 +14,14 @@ use conversation_core::{
 };
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use conversation_kernel::CreateConversationCommand;
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn conversation_journal() -> Arc<dyn ConversationJournal> {
     Arc::new(MemoryConversationJournal::new())
 }
 
 fn model_adapter() -> Arc<dyn ModelAdapter> {
-    Arc::new(FakeModelAdapter::default())
+    Arc::new(StaticModelAdapter::default())
 }
 
 fn audit_log() -> Arc<dyn AuditLog> {
@@ -50,7 +50,7 @@ fn runtime_with_action_service() -> agentos_kernel::KernelRuntime {
         .action_registry(registry_with_read_only_action())
         .capability_policy(Arc::new(CapabilityPolicy::default_safe()))
         .audit_log(audit_log())
-        .action_executor(Arc::new(FakeActionExecutor::new(
+        .action_executor(Arc::new(StaticActionExecutor::new(
             "from kernel action service",
         )))
         .build()

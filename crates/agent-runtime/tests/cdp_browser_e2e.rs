@@ -1,7 +1,7 @@
 //! PR 57: CdpBrowser AgentRuntime E2E
 //!
 //! End-to-end tests for CdpBrowser through AgentRunProcessor::process_with_actions().
-//! Uses FakeBrowserExecutor to test the full flow without real Chromium.
+//! Uses StaticBrowserExecutor to test the full flow without real Chromium.
 //!
 //! Tests cover:
 //! - agent_runtime_navigates_url_via_cdp_browser: open_url action
@@ -15,7 +15,7 @@ use agent_runtime::{
 };
 use async_trait::async_trait;
 use audit_log::{AuditLog, MemoryAuditSink};
-use browser_entity::{FakeBrowserExecutor, register_browser_action_schemas};
+use browser_entity::{StaticBrowserExecutor, register_browser_action_schemas};
 use capability_policy::CapabilityPolicy;
 use chrono::{DateTime, Utc};
 use conversation_core::*;
@@ -168,7 +168,7 @@ async fn process_browser_action(
     let config = AgentRuntimeConfig::default();
     let registry = action_registry();
     let policy = CapabilityPolicy::default_safe();
-    let executor = FakeBrowserExecutor::new(Utc::now());
+    let executor = StaticBrowserExecutor::new(Utc::now());
     let audit = MemoryAuditSink::new();
     let action_runtime = ActionRuntime {
         kernel: &kernel,

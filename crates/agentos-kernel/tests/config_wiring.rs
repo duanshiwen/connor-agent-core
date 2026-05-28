@@ -8,7 +8,7 @@ use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::PolicyDecision;
 use chrono::Utc;
 use conversation_journal::{ConversationJournal, MemoryConversationJournal};
-use model_adapter::{FakeModelAdapter, ModelAdapter};
+use model_adapter::{ModelAdapter, StaticModelAdapter};
 
 fn config() -> AgentOsConfig {
     AgentOsConfig::from_toml_str(
@@ -53,7 +53,7 @@ health_check_interval_secs = 300
 
 fn runtime_from_config(config: AgentOsConfig) -> agentos_kernel::KernelRuntime {
     let journal: Arc<dyn ConversationJournal> = Arc::new(MemoryConversationJournal::new());
-    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(FakeModelAdapter::default());
+    let model_adapter: Arc<dyn ModelAdapter> = Arc::new(StaticModelAdapter::default());
     let audit_log: Arc<dyn AuditLog> = Arc::new(MemoryAuditSink::new());
 
     KernelRuntimeBuilder::new()
