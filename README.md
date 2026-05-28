@@ -2,15 +2,18 @@
 
 `connor-agent-core` is the Rust workspace for AgentOS core runtime boundaries: conversation event sourcing, agent runs, action execution, audit, storage, identity, connectors, browser/kernel entities, and host-facing integration APIs.
 
+This repository is a kernel/runtime SDK, not a branded product UI. It provides durable contracts, orchestration boundaries, and host integration surfaces that macOS, desktop, server, or other AgentOS clients can embed.
+
 The workspace is intentionally layered. Domain crates define stable data and policy shapes; runtime crates orchestrate side effects through explicit boundaries; host-facing crates compose those pieces without hiding audit, permission, storage, or lifecycle decisions.
 
 ## Design Principles
 
 - **Append-only conversation history**: conversation state changes are represented as events and can be replayed deterministically.
 - **Explicit side-effect boundary**: external effects flow through `action-core` / `action-runtime`, policy checks, and audit logging.
-- **Host-owned production integration**: credentials, telemetry export, release artifacts, and product UX are represented by boundaries and examples, not hard-coded product infrastructure.
+- **Host-owned production integration**: credentials, telemetry export, release artifacts, native notification delivery, provider accounts, OAuth apps, signing, updates, and product UX stay with the host application.
+- **No fake production success**: test adapters and host-required integrations must not silently return placeholder success values in production-facing paths.
 - **Testable defaults**: in-memory stores and fake providers are available for deterministic tests and examples.
-- **Stable host API first**: `agentos-kernel` exposes the current host-facing composition boundary for backend/macOS integration.
+- **Stable host API first**: `client-substrate`, `agentos-client-bridge`, and `agentos-kernel` expose the primary host-facing composition boundaries.
 
 ## Workspace Map
 
@@ -24,6 +27,7 @@ The workspace is intentionally layered. Domain crates define stable data and pol
 
 - `agent-runtime` — current agent run processor, context building, tool/action proposal routing, retry/run/action stores, approval queues, checkpoints.
 - `client-substrate` — commercial client facade with typed commands/events, UI projections, and conservative safety defaults.
+- `agentos-client-bridge` — JSON-safe bridge boundary for native bindings and host applications.
 - `model-adapter` — model provider abstraction plus OpenAI-compatible and Anthropic adapters, streaming/tool call support, token budgeting, and fake adapters.
 - `assistant-core` — assistant profiles, capabilities, preferences, and conversation helpers.
 
@@ -31,7 +35,7 @@ The workspace is intentionally layered. Domain crates define stable data and pol
 
 - `action-core` — action IDs, schemas, requests, results, and registry primitives.
 - `action-runtime` — policy → executor → audit → conversation lifecycle orchestration.
-- `capability-policy` — allow/ask/deny policy evaluation and policy-file loading.
+- `capability-policy` — allow/ask/deny policy evaluation, approval receipts, payload hashing, and policy-file loading.
 - `audit-log` — memory/JSONL/enterprise audit sinks, audit queries, export, and integrity reporting.
 - `enterprise-permission-core` — enterprise users, roles, grants, lifecycle/offboarding, cached and server-backed permission stores.
 
@@ -40,7 +44,7 @@ The workspace is intentionally layered. Domain crates define stable data and pol
 - `agentos-kernel` — host-facing composition root, runtime builder, service registries, host API, diagnostics, and error taxonomy.
 - `agentos-config` — typed config parsing, overlays, validation, and redaction.
 - `agentos-storage` — durable storage layout, artifact store, migration, backup, locking, and repair primitives.
-- `agentos-observability` — structured telemetry, metrics, redaction, JSONL export, and pilot operations drill types.
+- `agentos-observability` — structured telemetry, metrics, redaction, JSONL export, diagnostics, and pilot operations drill types.
 
 ### Domain and Connector Layer
 
@@ -66,6 +70,34 @@ cargo run -p agentos-kernel --example minimal-server-host
 cargo run -p agentos-kernel --example minimal-desktop-host
 ```
 
+Run the commercial client example:
+
+```bash
+cargo run -p client-substrate --example minimal-commercial-client-host
+```
+
+## Production Host Responsibilities
+
+A production host must provide real implementations for product-owned infrastructure instead of relying on test-only defaults:
+
+- Durable conversation journal and storage root.
+- Non-fake model provider configuration.
+- Durable or managed audit log.
+- System keychain, secure enclave, or backend credential storage.
+- Real OAuth app registration and connector authorization flows.
+- Telemetry and crash-report consent, export, retention, and deletion policy.
+- Native notification, browser, update, signing, and notarization infrastructure where applicable.
+- Enterprise admin, offboarding, and remote revocation flows when enterprise mode is enabled.
+
+## Safety and Privacy Baseline
+
+- Production builders reject known test-only dependency declarations.
+- Action execution is mediated by side-effect classification, capability policy, approval receipts, and audit logging.
+- Diagnostics default to credential exclusion and redaction-aware export.
+- Telemetry and crash reporting are host-owned consented flows.
+- Connector paths that require host/provider integration should fail explicitly instead of returning placeholder success data.
+- Storage layout, migration, backup, repair, and lock primitives are compatibility-sensitive.
+
 ## Release Checklist
 
 Run the release gate from the repository root before cutting or reviewing a release candidate:
@@ -78,20 +110,21 @@ The release gate verifies:
 
 1. README release checklist remains discoverable.
 2. Host examples compile.
-3. Formatting passes: `cargo fmt --all --check`.
-4. Linting passes across normal, test, and example targets: `cargo clippy --workspace --all-targets -- -D warnings`.
-5. Tests pass: `cargo test --workspace`.
-6. Fast commercial-client substrate smoke passes: `./scripts/perf-smoke-gate.sh`.
+3. `client-substrate` targets and commercial client example compile.
+4. API compatibility, client-substrate, bridge, and security smoke gates pass.
+5. Formatting passes: `cargo fmt --all --check`.
+6. Linting passes across normal, test, and example targets: `cargo clippy --workspace --all-targets -- -D warnings`.
+7. Tests pass: `cargo test --workspace`.
+8. Fast commercial-client substrate smoke passes: `./scripts/perf-smoke-gate.sh`.
 
 For a stricter local preflight, run:
 
 ```bash
 cargo fmt --all -- --check
-cargo check -p client-substrate --all-targets
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
-./scripts/perf-smoke-gate.sh
+./scripts/release-gate.sh
 ```
 
 Real provider and connector smoke tests are optional because they require external accounts and secrets. Use these only in an environment configured for real integrations:
@@ -167,12 +200,26 @@ The current stable host/application integration boundary for the `0.1.x` line is
 
 Stable host-facing crates include:
 
+- `client-substrate`
+- `agentos-client-bridge`
 - `agentos-kernel`
+- `agent-runtime`
+- `action-core`
 - `action-runtime`
+- `capability-policy`
 - `audit-log`
+- `agentos-storage`
+- `agentos-observability`
+- `identity-core`
 - `enterprise-permission-core`
 
 These APIs may grow additively. Breaking signature or semantic changes require an intentional migration path, compatibility coverage, and a release note unless the change is needed for a security/privacy fix.
+
+Serialized compatibility-sensitive surfaces include bridge JSON payloads, kernel events, client projections, storage manifests/migrations, diagnostics bundles, approval receipts, and policy decisions. Incompatible serialized changes require a schema/API version bump and compatibility or migration coverage.
+
+### Semi-Internal API
+
+Domain crates such as `conversation-core`, `conversation-kernel`, connector/entity crates, people/relationship/search domains, and browser kernel domains may be used by advanced hosts, but product clients should prefer `client-substrate` and `agentos-client-bridge` unless they intentionally embed lower-level kernel behavior.
 
 ### Unstable API
 
@@ -181,7 +228,7 @@ The following remain unstable unless specifically documented otherwise:
 - Internal module layout inside crates.
 - Test-only fakes, fixtures, and helper constructors.
 - Experimental domain crates and connector implementations.
-- Concrete heuristics for audit export filtering, browser evidence extraction, or diagnostics enrichment.
+- Concrete heuristics for audit export filtering, browser evidence extraction, diagnostics enrichment, and provider-specific connector behavior.
 
 ### Deprecation Policy
 
@@ -197,6 +244,12 @@ The workspace uses layered tests:
 4. Runtime, policy, action, approval, and audit orchestration tests.
 5. Host API, diagnostics, release-gate, and example compile tests.
 6. Provider compatibility tests with deterministic mocks plus optional ignored real-provider smoke tests.
+
+## Documentation Policy
+
+Top-level project posture, API stability, security/privacy baseline, and release instructions live in this README. Avoid adding new top-level `docs/` files unless a topic is too large to keep maintainable here and has a clear owner, lifecycle, and release-gate reference.
+
+Schema-specific notes belong beside their schema under `schemas/`. Crate-specific notes belong in that crate's README or rustdoc.
 
 ## License
 
