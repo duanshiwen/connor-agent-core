@@ -1,0 +1,23 @@
+[package]
+name = "agentos-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AgentOS Rust sidecar exposing connor-agent-core capabilities over gRPC."
+
+[dependencies]
+identity-core = { path = "../identity-core" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[[bin]]
+name = "agentos-sidecar"
+path = "src/main.rs"

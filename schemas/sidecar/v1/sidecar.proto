@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package agentos.sidecar.v1;
+
+option go_package = "github.com/agent-os/backend/internal/sidecar/sidecarpb;sidecarpb";
+
+service SidecarHealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+service IdentityCoreService {
+  rpc VerifyEd25519Challenge(VerifyEd25519ChallengeRequest) returns (VerifyEd25519ChallengeResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string sdk_version = 2;
+  repeated string enabled_capabilities = 3;
+}
+
+message VerifyEd25519ChallengeRequest {
+  string challenge = 1;
+  string signature_hex = 2;
+  string public_key_hex = 3;
+}
+
+message VerifyEd25519ChallengeResponse {
+  bool valid = 1;
+  string error_code = 2;
+  string error_message = 3;
+}

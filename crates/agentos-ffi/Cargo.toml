@@ -1,0 +1,52 @@
+[package]
+name = "agentos-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+action-core = { path = "../action-core" }
+action-runtime = { path = "../action-runtime" }
+agent-runtime = { path = "../agent-runtime" }
+agentos-client-bridge = { path = "../agentos-client-bridge" }
+agentos-config = { path = "../agentos-config" }
+agentos-kernel = { path = "../agentos-kernel" }
+agentos-observability = { path = "../agentos-observability" }
+agentos-storage = { path = "../agentos-storage" }
+artifact-core = { path = "../artifact-core" }
+asset-core = { path = "../asset-core" }
+asset-index = { path = "../asset-index" }
+assistant-core = { path = "../assistant-core" }
+audit-log = { path = "../audit-log" }
+browser-entity = { path = "../browser-entity" }
+browser-kernel-core = { path = "../browser-kernel-core" }
+calendar-entity = { path = "../calendar-entity" }
+capability-policy = { path = "../capability-policy" }
+client-substrate = { path = "../client-substrate" }
+connector-runtime = { path = "../connector-runtime" }
+conversation-core = { path = "../conversation-core" }
+conversation-journal = { path = "../conversation-journal" }
+conversation-kernel = { path = "../conversation-kernel" }
+device-pairing-core = { path = "../device-pairing-core" }
+enterprise-permission-core = { path = "../enterprise-permission-core" }
+entity-core = { path = "../entity-core" }
+identity-core = { path = "../identity-core" }
+knowledge-entity = { path = "../knowledge-entity" }
+mail-entity = { path = "../mail-entity" }
+model-adapter = { path = "../model-adapter" }
+notification-core = { path = "../notification-core" }
+p2p-sync-runtime = { path = "../p2p-sync-runtime" }
+people-intelligence = { path = "../people-intelligence" }
+person-entity = { path = "../person-entity" }
+relationship-core = { path = "../relationship-core" }
+reminder-core = { path = "../reminder-core" }
+scheduler = { path = "../scheduler" }
+server-account-core = { path = "../server-account-core" }
+server-search-core = { path = "../server-search-core" }
+skill-core = { path = "../skill-core" }
+surface-core = { path = "../surface-core" }
+sync-runtime = { path = "../sync-runtime" }

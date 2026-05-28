@@ -574,8 +574,8 @@ impl KnowledgeRepository for MarkdownKnowledgeRepository {
         fm.last_updated = Some(Utc::now().format("%Y-%m-%d").to_string());
 
         // Serialize and write back.
-        let yaml = serde_yml::to_string(&fm)
-            .unwrap_or_else(|_| "---\ntitle: unknown\n---\n".to_string());
+        let yaml =
+            serde_yml::to_string(&fm).unwrap_or_else(|_| "---\ntitle: unknown\n---\n".to_string());
         let content = format!("---\n{}\n---\n\n{}", yaml.trim_end_matches('\n'), body);
 
         // Atomic write.

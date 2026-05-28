@@ -4652,7 +4652,10 @@ mod tests {
             .update_entry(&KnowledgeEntryId::from("nonexistent"), update)
             .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), KnowledgeRepositoryError::NotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            KnowledgeRepositoryError::NotFound(_)
+        ));
     }
 
     #[tokio::test]

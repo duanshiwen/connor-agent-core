@@ -41,6 +41,8 @@ members = [
     "crates/people-intelligence",
     "crates/enterprise-permission-core",
     "crates/server-search-core",
+    "crates/agentos-sidecar",
+    "crates/agentos-ffi",
 ]
 resolver = "2"
 
@@ -75,6 +77,7 @@ toml = "0.8"
 
 # Async
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
 
 # Browser automation
@@ -83,3 +86,9 @@ futures-util = "0.3"
 
 # Testing
 tempfile = "3"
+
+# gRPC / protobuf
+tonic = "0.12"
+tonic-build = "0.12"
+tonic-health = "0.12"
+prost = "0.13"
