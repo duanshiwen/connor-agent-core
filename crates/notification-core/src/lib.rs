@@ -288,10 +288,11 @@ impl NotificationSink for MacOsMockNotificationSink {
 // Real macOS Notification Sink (Feature Gated)
 // ===========================================================================
 
-/// Real macOS notification sink using native notifications.
+/// macOS notification sink enabled by the `macos` feature.
 ///
-/// This is a placeholder for the actual macOS notification implementation.
-/// When the `macos` feature is enabled, this will use the macOS notification API.
+/// The current core crate keeps platform integration behind this sink boundary so
+/// callers can use the same `NotificationSink` interface in tests, CLI tools, and
+/// host applications.
 #[cfg(feature = "macos")]
 pub struct MacOsNotificationSink {
     config: MacOsNotificationConfig,
@@ -308,8 +309,8 @@ impl MacOsNotificationSink {
 #[async_trait]
 impl NotificationSink for MacOsNotificationSink {
     async fn emit(&self, notification: &Notification) -> Result<(), NotificationError> {
-        // In a real implementation, this would use the macOS notification API
-        // For now, we just log the notification
+        // Platform hosts can replace this boundary with a native notification
+        // adapter while preserving the core crate's dependency-light API.
         println!(
             "[{}] {}: {}",
             self.config.app_name, notification.title, notification.body

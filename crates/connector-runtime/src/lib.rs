@@ -1199,15 +1199,9 @@ impl ExternalConnector for GmailConnector {
         }
 
         match resource_kind {
-            ExternalResourceKind::EmailThread => {
-                // In a real implementation, this would call the Gmail API
-                // For now, return empty list as a placeholder
-                Ok(ExternalResourceList {
-                    resources: vec![],
-                    next_page_token: None,
-                    total_count: Some(0),
-                })
-            }
+            ExternalResourceKind::EmailThread => Err(ExternalConnectorError::ServiceUnavailable(
+                "gmail resource listing requires a host-provided Gmail API adapter".to_string(),
+            )),
             _ => Err(ExternalConnectorError::InvalidRequest(format!(
                 "Gmail connector does not support resource kind: {}",
                 resource_kind
@@ -1226,18 +1220,10 @@ impl ExternalConnector for GmailConnector {
 
         match resource_kind {
             ExternalResourceKind::EmailThread => {
-                // In a real implementation, this would call the Gmail API
-                // For now, return a placeholder
-                Ok(ExternalResourceMetadata {
-                    resource_ref: ExternalResourceRef::new(
-                        ExternalServiceKind::Gmail,
-                        ExternalResourceKind::EmailThread,
-                        resource_id,
-                    ),
-                    synced_at: Utc::now(),
-                    etag: None,
-                    raw_size_bytes: None,
-                })
+                Err(ExternalConnectorError::ServiceUnavailable(format!(
+                    "gmail resource retrieval for '{}' requires a host-provided Gmail API adapter",
+                    resource_id
+                )))
             }
             _ => Err(ExternalConnectorError::InvalidRequest(format!(
                 "Gmail connector does not support resource kind: {}",
@@ -2382,20 +2368,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gmail_connector_get_resource_returns_metadata() {
+    async fn gmail_connector_get_resource_requires_host_adapter() {
         let creds = ExternalServiceCredentials::new("token");
         let connector = GmailConnector::with_credentials(creds);
 
         let result = connector
             .get_resource(&ExternalResourceKind::EmailThread, "thread-1")
-            .await
-            .unwrap();
-        assert_eq!(result.resource_ref.service, ExternalServiceKind::Gmail);
-        assert_eq!(
-            result.resource_ref.resource_kind,
-            ExternalResourceKind::EmailThread
-        );
-        assert_eq!(result.resource_ref.resource_id, "thread-1");
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::ServiceUnavailable(message))
+                if message.contains("host-provided Gmail API adapter")
+                    && message.contains("thread-1")
+        ));
     }
 
     #[test]
@@ -2562,8 +2548,7 @@ mod tests {
         );
         let result = connector
             .list_resources(&ExternalResourceKind::EmailThread, None, None)
-            .await
-            .unwrap();
+            .await;
         let completed = ConnectorOperationAuditEvent::result(
             connector.service_kind(),
             "gmail-connector-1",
@@ -2577,7 +2562,11 @@ mod tests {
             now,
         );
 
-        assert!(result.resources.is_empty());
+        assert!(matches!(
+            result,
+            Err(ExternalConnectorError::ServiceUnavailable(message))
+                if message.contains("host-provided Gmail API adapter")
+        ));
         assert_eq!(start.outcome, ConnectorOperationOutcome::Started);
         assert_eq!(completed.outcome, ConnectorOperationOutcome::Succeeded);
         assert_eq!(completed.resource_kind, ExternalResourceKind::EmailThread);
