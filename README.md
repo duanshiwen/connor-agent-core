@@ -70,6 +70,18 @@ cargo run -p client-substrate --example minimal-commercial-client-host
 - `capability-policy`
 - `audit-log`
 
+### Skill 是任务域能力包
+
+Skill 把某个任务域里的 instructions、action bindings、permission requirements、context requirements 和 runtime/model profile 组织成一个可校验的能力包。客户端可以用同一份 manifest 决定展示哪些技能、启用前需要哪些授权、当前设备是否可运行；服务端可以用它判断 tenant/user 是否可启用、run 允许调用哪些 action，以及是否需要更强的审计或企业权限。
+
+Skill 不是单个 Action，也不是 MCP source、connector、prompt 模板或 marketplace package。`skill-core` 只提供 manifest、registry 和 readiness/enablement validation contract，不处理安装 UI、远程分发、付费订阅或运行时注入。
+
+相关 crate：
+
+- `skill-core`
+- `action-core`
+- `model-adapter`
+
 ### 生产集成由宿主拥有
 
 SDK 不会假装产品基础设施已经存在。生产环境需要由宿主提供真实依赖：模型 provider、持久化存储、凭证存储、OAuth 应用、遥测导出、原生通知、浏览器自动化、签名、更新和产品 UX。
@@ -185,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
 - 持久化或托管式 audit log。
 - 系统 keychain、secure enclave 或后端 credential storage。
 - 真实 OAuth app registration 和 connector authorization flow。
+- Skill manifest 启用前的 action、permission、context、model profile 和 availability 校验。
 - Telemetry 与 crash report 的用户同意、导出、保留和删除策略。
 - 适用场景下的原生通知、浏览器、更新、签名和 notarization 基础设施。
 - 如果启用企业模式，需要 enterprise admin、offboarding 和 remote revocation flow。
