@@ -22,8 +22,8 @@
 //! ```
 
 use crate::{
-    KnowledgeEntryDraft, KnowledgeEntryId, KnowledgeEntryRef, KnowledgeRepository,
-    KnowledgeRepositoryError, KnowledgeSearchQuery, KnowledgeSearchResult,
+    KnowledgeEntryDraft, KnowledgeEntryId, KnowledgeEntryRef, KnowledgeEntryUpdate,
+    KnowledgeRepository, KnowledgeRepositoryError, KnowledgeSearchQuery, KnowledgeSearchResult,
 };
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
@@ -517,6 +517,104 @@ impl KnowledgeRepository for MarkdownKnowledgeRepository {
         entries.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(entries)
     }
+
+    async fn update_entry(
+        &self,
+        id: &KnowledgeEntryId,
+        update: KnowledgeEntryUpdate,
+    ) -> Result<KnowledgeEntryRef, KnowledgeRepositoryError> {
+        Self::validate_id(id).map_err(KnowledgeRepositoryError::from)?;
+        let path = self.entry_path(id);
+
+        // Check if entry exists.
+        if !path.exists() {
+            return Err(KnowledgeRepositoryError::NotFound(id.0.clone()));
+        }
+
+        // Read existing entry.
+        let (mut fm, mut body) = Self::parse_file(&path).await?;
+
+        // Apply updates.
+        if let Some(title) = update.title {
+            fm.title = title;
+        }
+        if let Some(content) = update.content_markdown {
+            body = content;
+        }
+        if let Some(tags) = update.tags {
+            fm.tags = tags;
+        }
+        if let Some(source_uri) = update.source_uri {
+            fm.source = source_uri;
+        }
+        if let Some(metadata) = update.metadata {
+            if let Some(summary) = metadata.get("summary").and_then(|v| v.as_str()) {
+                fm.summary = summary.to_string();
+            }
+            if let Some(industry) = metadata.get("industry").and_then(|v| v.as_str()) {
+                fm.industry = industry.to_string();
+            }
+            if let Some(author) = metadata.get("author").and_then(|v| v.as_str()) {
+                fm.author = author.to_string();
+            }
+            if let Some(related) = metadata.get("related").and_then(|v| v.as_array()) {
+                fm.related = related
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+            if let Some(applicable_to) = metadata.get("applicable_to").and_then(|v| v.as_array()) {
+                fm.applicable_to = applicable_to
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
+        // Update last_updated timestamp.
+        fm.last_updated = Some(Utc::now().format("%Y-%m-%d").to_string());
+
+        // Serialize and write back.
+        let yaml = serde_yml::to_string(&fm)
+            .unwrap_or_else(|_| "---\ntitle: unknown\n---\n".to_string());
+        let content = format!("---\n{}\n---\n\n{}", yaml.trim_end_matches('\n'), body);
+
+        // Atomic write.
+        let dir = path.parent().unwrap_or(&self.root_dir);
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)
+            .map_err(|e| MarkdownRepoError::Io(format!("failed to create temp file: {}", e)))?;
+        std::io::Write::write_all(&mut tmp, content.as_bytes())
+            .map_err(|e| MarkdownRepoError::Io(format!("failed to write temp file: {}", e)))?;
+        tmp.persist(&path)
+            .map_err(|e| MarkdownRepoError::Io(format!("failed to persist temp file: {}", e)))?;
+
+        // Return updated ref.
+        let created_at = fm
+            .last_updated
+            .as_deref()
+            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            .map(|d| {
+                d.and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_local_timezone(Utc)
+                    .unwrap()
+            })
+            .unwrap_or_else(Utc::now);
+
+        let source_uri = if fm.source.is_empty() {
+            None
+        } else {
+            Some(fm.source.clone())
+        };
+
+        Ok(KnowledgeEntryRef {
+            id: id.clone(),
+            title: fm.title,
+            source_uri,
+            artifact_id: None,
+            asset_id: None,
+            created_at,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -926,5 +1024,109 @@ no closing delimiter"#;
         assert_eq!(fm.source, "https://example.com/full");
         assert_eq!(fm.tags, vec!["full", "roundtrip"]);
         assert!(body.contains("# Full"));
+    }
+
+    // -----------------------------------------------------------------------
+    // update_entry tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn markdown_repo_update_entry_updates_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MarkdownKnowledgeRepository::new(dir.path());
+
+        let draft = make_draft("Original Title", "# Content", vec!["test"]);
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_title("New Title");
+        let updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        assert_eq!(updated.title, "New Title");
+        assert_eq!(updated.id, entry.id);
+
+        // Verify file was updated.
+        let (fm, _) = MarkdownKnowledgeRepository::parse_file(&repo.entry_path(&entry.id))
+            .await
+            .unwrap();
+        assert_eq!(fm.title, "New Title");
+    }
+
+    #[tokio::test]
+    async fn markdown_repo_update_entry_updates_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MarkdownKnowledgeRepository::new(dir.path());
+
+        let draft = make_draft("Title", "# Original", vec![]);
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_content("# Updated Content");
+        let _updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        // Verify content was updated.
+        let (_, body) = MarkdownKnowledgeRepository::parse_file(&repo.entry_path(&entry.id))
+            .await
+            .unwrap();
+        assert!(body.contains("# Updated Content"));
+    }
+
+    #[tokio::test]
+    async fn markdown_repo_update_entry_updates_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MarkdownKnowledgeRepository::new(dir.path());
+
+        let draft = make_draft("Title", "# Content", vec!["old-tag"]);
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_tags(vec!["new-tag".to_string()]);
+        let _updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        // Verify tags were updated.
+        let (fm, _) = MarkdownKnowledgeRepository::parse_file(&repo.entry_path(&entry.id))
+            .await
+            .unwrap();
+        assert_eq!(fm.tags, vec!["new-tag"]);
+    }
+
+    #[tokio::test]
+    async fn markdown_repo_update_entry_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MarkdownKnowledgeRepository::new(dir.path());
+
+        let update = KnowledgeEntryUpdate::new().with_title("New");
+        let result = repo
+            .update_entry(&KnowledgeEntryId::from("nonexistent"), update)
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KnowledgeRepositoryError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn markdown_repo_update_entry_preserves_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MarkdownKnowledgeRepository::new(dir.path());
+
+        let draft = make_draft("Title", "# Content", vec!["tag1"])
+            .with_source_uri("https://example.com/source");
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        // Only update title, other fields should be preserved.
+        let update = KnowledgeEntryUpdate::new().with_title("New Title");
+        let updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        assert_eq!(updated.title, "New Title");
+        assert_eq!(
+            updated.source_uri,
+            Some("https://example.com/source".to_string())
+        );
+
+        // Verify file preserves tags.
+        let (fm, _) = MarkdownKnowledgeRepository::parse_file(&repo.entry_path(&entry.id))
+            .await
+            .unwrap();
+        assert_eq!(fm.tags, vec!["tag1"]);
+        assert_eq!(fm.source, "https://example.com/source");
     }
 }

@@ -31,6 +31,7 @@ pub const KNOWLEDGE_SEARCH_ACTION_KIND: &str = "knowledge.search";
 pub const KNOWLEDGE_GET_ENTRY_ACTION_KIND: &str = "knowledge.get_entry";
 pub const KNOWLEDGE_CREATE_DRAFT_ACTION_KIND: &str = "knowledge.create_draft";
 pub const KNOWLEDGE_SAVE_ENTRY_ACTION_KIND: &str = "knowledge.save_entry";
+pub const KNOWLEDGE_UPDATE_ENTRY_ACTION_KIND: &str = "knowledge.update_entry";
 
 pub fn knowledge_search_action_kind() -> ActionKind {
     ActionKind::from(KNOWLEDGE_SEARCH_ACTION_KIND)
@@ -46,6 +47,10 @@ pub fn knowledge_create_draft_action_kind() -> ActionKind {
 
 pub fn knowledge_save_entry_action_kind() -> ActionKind {
     ActionKind::from(KNOWLEDGE_SAVE_ENTRY_ACTION_KIND)
+}
+
+pub fn knowledge_update_entry_action_kind() -> ActionKind {
+    ActionKind::from(KNOWLEDGE_UPDATE_ENTRY_ACTION_KIND)
 }
 
 /// Unique identifier for a knowledge entry.
@@ -139,6 +144,48 @@ impl KnowledgeEntryDraft {
 
     pub fn validate_for_write(&self) -> Result<(), KnowledgeValidationError> {
         validate_draft_fields(&self.title, &self.content_markdown)
+    }
+}
+
+/// Partial update for a knowledge entry.
+/// `None` fields保留原值，`Some` 字段更新为新值。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEntryUpdate {
+    pub title: Option<String>,
+    pub content_markdown: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub source_uri: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl KnowledgeEntryUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_content(mut self, content: impl Into<String>) -> Self {
+        self.content_markdown = Some(content.into());
+        self
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    pub fn with_source_uri(mut self, uri: impl Into<String>) -> Self {
+        self.source_uri = Some(uri.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 }
 
@@ -2319,6 +2366,13 @@ pub struct KnowledgeSaveEntryActionInput {
     pub draft: KnowledgeEntryDraft,
 }
 
+/// Input for `knowledge.update_entry`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeUpdateEntryActionInput {
+    pub id: KnowledgeEntryId,
+    pub update: KnowledgeEntryUpdate,
+}
+
 fn validate_draft_fields(
     title: &str,
     content_markdown: &str,
@@ -2384,6 +2438,8 @@ pub enum KnowledgeRepositoryError {
     EntryExists(String),
     #[error("invalid entry id: {0}")]
     InvalidId(String),
+    #[error("entry not found: {0}")]
+    NotFound(String),
 }
 
 /// Storage abstraction for knowledge entry metadata.
@@ -2405,6 +2461,12 @@ pub trait KnowledgeRepository: Send + Sync {
     ) -> Result<Vec<KnowledgeSearchResult>, KnowledgeRepositoryError>;
 
     async fn list_entries(&self) -> Result<Vec<KnowledgeEntryRef>, KnowledgeRepositoryError>;
+
+    async fn update_entry(
+        &self,
+        id: &KnowledgeEntryId,
+        update: KnowledgeEntryUpdate,
+    ) -> Result<KnowledgeEntryRef, KnowledgeRepositoryError>;
 }
 
 #[derive(Debug, Clone)]
@@ -2516,6 +2578,37 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
         entry_refs.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(entry_refs)
     }
+
+    async fn update_entry(
+        &self,
+        id: &KnowledgeEntryId,
+        update: KnowledgeEntryUpdate,
+    ) -> Result<KnowledgeEntryRef, KnowledgeRepositoryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| KnowledgeRepositoryError::LockPoisoned)?;
+
+        let stored = entries
+            .get_mut(id)
+            .ok_or_else(|| KnowledgeRepositoryError::NotFound(id.0.clone()))?;
+
+        if let Some(title) = update.title {
+            stored.entry_ref.title = title;
+        }
+        if let Some(content) = update.content_markdown {
+            stored.content_markdown = content;
+        }
+        if let Some(tags) = update.tags {
+            stored.tags = tags;
+        }
+        if let Some(source_uri) = update.source_uri {
+            stored.entry_ref.source_uri = Some(source_uri);
+        }
+        // metadata is not stored in MemoryKnowledgeRepository's StoredKnowledgeEntry
+
+        Ok(stored.entry_ref.clone())
+    }
 }
 
 /// Deterministic action executor for the first knowledge action seam.
@@ -2567,6 +2660,15 @@ impl ActionExecutor for KnowledgeActionExecutor {
                 let entry = self
                     .repository
                     .save_draft(input.draft)
+                    .await
+                    .map_err(repository_error_to_executor_error)?;
+                ActionResultPayload::Json(serde_json::to_value(entry).map_err(json_error)?)
+            }
+            KNOWLEDGE_UPDATE_ENTRY_ACTION_KIND => {
+                let input: KnowledgeUpdateEntryActionInput = parse_action_input(&request.input)?;
+                let entry = self
+                    .repository
+                    .update_entry(&input.id, input.update)
                     .await
                     .map_err(repository_error_to_executor_error)?;
                 ActionResultPayload::Json(serde_json::to_value(entry).map_err(json_error)?)
@@ -4491,6 +4593,81 @@ mod tests {
 
         let err = executor.execute(&request).await.unwrap_err();
         assert!(matches!(err, ActionExecutorError::NotSupported(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // update_entry tests for MemoryKnowledgeRepository
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn memory_update_entry_updates_title() {
+        let repo = MemoryKnowledgeRepository::new();
+        let draft = KnowledgeEntryDraft::new("Original Title", "# Content", ts());
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_title("New Title");
+        let updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        assert_eq!(updated.title, "New Title");
+        assert_eq!(updated.id, entry.id);
+    }
+
+    #[tokio::test]
+    async fn memory_update_entry_updates_content() {
+        let repo = MemoryKnowledgeRepository::new();
+        let draft = KnowledgeEntryDraft::new("Title", "# Original", ts());
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_content("# Updated");
+        let _updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        // Verify content was updated by searching for new content
+        let query = KnowledgeSearchQuery::new("Updated");
+        let results = repo.search(&query).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id, entry.id);
+    }
+
+    #[tokio::test]
+    async fn memory_update_entry_updates_tags() {
+        let repo = MemoryKnowledgeRepository::new();
+        let draft = KnowledgeEntryDraft::new("Title", "# Content", ts());
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        let update = KnowledgeEntryUpdate::new().with_tags(vec!["new-tag".to_string()]);
+        let _updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        // Verify tags were updated by searching with new tag
+        let query = KnowledgeSearchQuery::new("").with_tags(vec!["new-tag".to_string()]);
+        let results = repo.search(&query).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id, entry.id);
+    }
+
+    #[tokio::test]
+    async fn memory_update_entry_not_found() {
+        let repo = MemoryKnowledgeRepository::new();
+        let update = KnowledgeEntryUpdate::new().with_title("New");
+        let result = repo
+            .update_entry(&KnowledgeEntryId::from("nonexistent"), update)
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KnowledgeRepositoryError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_update_entry_preserves_unspecified_fields() {
+        let repo = MemoryKnowledgeRepository::new();
+        let draft = KnowledgeEntryDraft::new("Title", "# Content", ts())
+            .with_source_uri("https://example.com");
+        let entry = repo.save_draft(draft).await.unwrap();
+
+        // Only update title, source_uri should be preserved
+        let update = KnowledgeEntryUpdate::new().with_title("New Title");
+        let updated = repo.update_entry(&entry.id, update).await.unwrap();
+
+        assert_eq!(updated.title, "New Title");
+        assert_eq!(updated.source_uri, Some("https://example.com".to_string()));
     }
 
     // -----------------------------------------------------------------------
