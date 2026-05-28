@@ -53,7 +53,7 @@ impl From<&str> for ActionId {
 /// The kind of action, expressed as a dotted namespace string.
 ///
 /// Examples: `browser.navigate`, `knowledge.search`, `reminder.create`
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ActionKind(pub String);
 
 impl fmt::Display for ActionKind {

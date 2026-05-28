@@ -43,6 +43,7 @@ cargo run -p client-substrate --example minimal-commercial-client-host
 - `client-substrate`：商业客户端 facade，提供 typed command/event、UI projection、安全默认值和生产依赖校验。
 - `agentos-client-bridge`：给原生 binding 和应用壳使用的 JSON-safe bridge。
 - `agent-runtime`：更底层的 Agent run 处理器，负责 action proposal 路由、approval queue、retry、checkpoint，以及 run/action store。
+- `skill-core`：技能 manifest、registry 与 readiness/enablement validation contract，供客户端和服务端共享。
 
 如果你只是想把 runtime 嵌进一个宿主应用，优先看 `agentos-kernel`。如果你在做产品客户端界面，优先看 `client-substrate`，只有在需要更细粒度控制时再下沉到 `agentos-kernel`。
 
@@ -155,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
 
 - `conversation-core`、`conversation-journal`、`conversation-kernel`
 - `action-core`、`action-runtime`
+- `skill-core`
 - `capability-policy`
 - `audit-log`
 - `enterprise-permission-core`

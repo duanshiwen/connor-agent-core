@@ -15,6 +15,7 @@ members = [
     "crates/agentos-storage",
     "crates/action-core",
     "crates/action-runtime",
+    "crates/skill-core",
     "crates/capability-policy",
     "crates/audit-log",
     "crates/artifact-core",
