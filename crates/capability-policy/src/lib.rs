@@ -13,6 +13,15 @@
 //!   → PolicyDecision::Deny    → block, audit
 //! ```
 
+mod approval_receipt;
+
+pub use approval_receipt::{
+    ActionPayloadHash, ApprovalReceipt, ApprovalRequestId, ApprovalReusePolicy,
+    ApprovalSideEffectSummary, ApprovalValidationError, ApprovalValidationResult,
+    KernelApprovalDecision, KernelApprovalDecisionKind, KernelApprovalRequest,
+    validate_approval_receipt,
+};
+
 use action_core::{ActionRequest, SideEffectKind};
 use chrono::{DateTime, Utc};
 use enterprise_permission_core::{

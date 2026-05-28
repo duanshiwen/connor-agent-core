@@ -79,6 +79,37 @@ fn production_builder_rejects_test_only_components() {
     }
 }
 
+#[test]
+fn production_bundle_rejects_invalid_runtime_config_before_wiring() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(AgentOsStorage::init(temp.path()).unwrap());
+    let deps = ClientProductionDependencies {
+        conversation_journal: Arc::new(MemoryConversationJournal::new()),
+        model_adapter: Arc::new(FakeModelAdapter::default()),
+        audit_log: Arc::new(MemoryAuditSink::new()),
+        storage,
+        component_kinds: ClientProductionComponentKinds::local_durable_defaults(
+            SystemCredentialBackendKind::MacOsKeychain,
+        ),
+    };
+    let bundle = ClientProductionRuntimeBundle::new(
+        ClientProductionRuntimeConfig {
+            profile_id: ClientProfileId::from("profile-1"),
+            workspace_id: ClientWorkspaceId::from("workspace-1"),
+            storage_root: "".to_string(),
+            privacy_mode: "local_only".to_string(),
+            feature_flags: vec!["kernel_events".to_string()],
+        },
+        deps,
+    );
+
+    let result = ClientSubstrateBuilder::production_bundle(bundle).build();
+    assert!(matches!(
+        result,
+        Err(ClientSubstrateError::ProductionGuardFailed { .. })
+    ));
+}
+
 #[tokio::test]
 async fn event_cursor_and_projections_track_client_commands() {
     let substrate = ClientSubstrate::builder().build().unwrap();

@@ -8,8 +8,12 @@ echo "==> production safety guards"
 cargo test -p client-substrate production_builder_rejects_test_only_components --test commercial_client_substrate
 cargo test -p identity-core production
 
+echo "==> approval receipt smoke"
+cargo test -p capability-policy --test approval_receipt
+
 echo "==> diagnostics/redaction smoke"
 cargo test -p agentos-observability redaction
+cargo test -p agentos-observability --test diagnostic_bundle
 cargo test -p client-substrate secret
 
 if command -v cargo-deny >/dev/null 2>&1; then

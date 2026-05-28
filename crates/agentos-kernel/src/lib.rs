@@ -7,6 +7,7 @@
 mod builder;
 mod diagnostics;
 mod error;
+mod event_store;
 mod host_api;
 mod registries;
 mod runtime;
@@ -18,6 +19,12 @@ pub use diagnostics::{
     RecentAuditSummary, RedactedRuntimeConfig, StorageManifestDump,
 };
 pub use error::{KernelError, KernelErrorCategory, KernelResult};
+pub use event_store::{
+    CURRENT_KERNEL_EVENT_SCHEMA_VERSION, JsonlKernelEventStore, KernelAggregateRef,
+    KernelEventActor, KernelEventCursor, KernelEventEnvelope, KernelEventId, KernelEventKind,
+    KernelEventStore, KernelEventStoreError, KernelEventStoreResult, KernelProjectionSnapshot,
+    KernelRedactionClass, MemoryKernelEventStore, group_events_by_aggregate,
+};
 pub use host_api::{
     HostActionDecisionRequest, HostActorContext, HostApiError, HostApiErrorResponse, HostApiResult,
     HostExecuteApprovedActionRequest, HostPendingApproval, HostPermissionResource,

@@ -389,6 +389,93 @@ impl JsonlObservabilityFileSink {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyMode {
+    Standard,
+    LocalOnly,
+    NoTelemetry,
+    NoCloudSync,
+    EnterpriseManaged,
+    SensitiveWorkspace,
+}
+
+impl PrivacyMode {
+    pub fn telemetry_allowed(&self) -> bool {
+        !matches!(self, Self::NoTelemetry | Self::SensitiveWorkspace)
+    }
+
+    pub fn cloud_sync_allowed(&self) -> bool {
+        !matches!(
+            self,
+            Self::LocalOnly | Self::NoCloudSync | Self::SensitiveWorkspace
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticSectionManifest {
+    pub name: String,
+    pub included: bool,
+    pub redacted: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticBundleManifest {
+    pub schema_version: u32,
+    pub created_at: DateTime<Utc>,
+    pub privacy_mode: PrivacyMode,
+    pub sections: Vec<DiagnosticSectionManifest>,
+    pub redaction_summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticBundleBuilder {
+    privacy_mode: PrivacyMode,
+    sections: Vec<DiagnosticSectionManifest>,
+}
+
+impl DiagnosticBundleBuilder {
+    pub fn new(privacy_mode: PrivacyMode) -> Self {
+        Self {
+            privacy_mode,
+            sections: Vec::new(),
+        }
+    }
+
+    pub fn include_section(mut self, name: impl Into<String>, redacted: bool) -> Self {
+        self.sections.push(DiagnosticSectionManifest {
+            name: name.into(),
+            included: true,
+            redacted,
+            reason: None,
+        });
+        self
+    }
+
+    pub fn skip_section(mut self, name: impl Into<String>, reason: impl Into<String>) -> Self {
+        self.sections.push(DiagnosticSectionManifest {
+            name: name.into(),
+            included: false,
+            redacted: true,
+            reason: Some(reason.into()),
+        });
+        self
+    }
+
+    pub fn build(self) -> DiagnosticBundleManifest {
+        DiagnosticBundleManifest {
+            schema_version: CURRENT_OBSERVABILITY_SCHEMA_VERSION,
+            created_at: Utc::now(),
+            privacy_mode: self.privacy_mode,
+            sections: self.sections,
+            redaction_summary: "secrets and credential-like values are redacted by default"
+                .to_string(),
+        }
+    }
+}
+
 fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), ObservabilityExportError> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, value)?;

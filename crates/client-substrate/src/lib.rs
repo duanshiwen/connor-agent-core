@@ -605,6 +605,15 @@ impl ClientProductionComponentKinds {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientProductionRuntimeConfig {
+    pub profile_id: ClientProfileId,
+    pub workspace_id: ClientWorkspaceId,
+    pub storage_root: String,
+    pub privacy_mode: String,
+    pub feature_flags: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct ClientProductionDependencies {
     pub conversation_journal: Arc<dyn ConversationJournal>,
@@ -612,6 +621,38 @@ pub struct ClientProductionDependencies {
     pub audit_log: Arc<dyn AuditLog>,
     pub storage: Arc<AgentOsStorage>,
     pub component_kinds: ClientProductionComponentKinds,
+}
+
+#[derive(Clone)]
+pub struct ClientProductionRuntimeBundle {
+    pub config: ClientProductionRuntimeConfig,
+    pub dependencies: ClientProductionDependencies,
+}
+
+impl ClientProductionRuntimeBundle {
+    pub fn new(
+        config: ClientProductionRuntimeConfig,
+        dependencies: ClientProductionDependencies,
+    ) -> Self {
+        Self {
+            config,
+            dependencies,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ClientSubstrateError> {
+        let mut blockers = Vec::new();
+        if self.config.storage_root.trim().is_empty() {
+            blockers.push("production runtime storage_root is required".to_string());
+        }
+        if self.config.privacy_mode.trim().is_empty() {
+            blockers.push("production runtime privacy_mode is required".to_string());
+        }
+        if !blockers.is_empty() {
+            return Err(ClientSubstrateError::ProductionGuardFailed { blockers });
+        }
+        self.dependencies.validate()
+    }
 }
 
 impl ClientProductionDependencies {
@@ -755,6 +796,7 @@ pub struct ClientSubstrateBuilder {
     action_registry: ActionRegistry,
     runtime_mode: ClientRuntimeMode,
     production_dependencies: Option<ClientProductionDependencies>,
+    production_bundle_blockers: Vec<String>,
 }
 
 impl Default for ClientSubstrateBuilder {
@@ -766,6 +808,7 @@ impl Default for ClientSubstrateBuilder {
             action_registry: ActionRegistry::new(),
             runtime_mode: ClientRuntimeMode::Test,
             production_dependencies: None,
+            production_bundle_blockers: Vec::new(),
         }
     }
 }
@@ -789,6 +832,22 @@ impl ClientSubstrateBuilder {
             workspace_id,
             runtime_mode: ClientRuntimeMode::Production,
             production_dependencies: Some(dependencies),
+            ..Self::default()
+        }
+    }
+
+    pub fn production_bundle(bundle: ClientProductionRuntimeBundle) -> Self {
+        let blockers = match bundle.validate() {
+            Ok(()) => Vec::new(),
+            Err(ClientSubstrateError::ProductionGuardFailed { blockers }) => blockers,
+            Err(other) => vec![other.to_string()],
+        };
+        Self {
+            profile_id: bundle.config.profile_id,
+            workspace_id: bundle.config.workspace_id,
+            runtime_mode: ClientRuntimeMode::Production,
+            production_dependencies: Some(bundle.dependencies),
+            production_bundle_blockers: blockers,
             ..Self::default()
         }
     }
@@ -822,6 +881,11 @@ impl ClientSubstrateBuilder {
         let action_registry = Arc::new(self.action_registry);
         let runtime = match self.runtime_mode {
             ClientRuntimeMode::Production => {
+                if !self.production_bundle_blockers.is_empty() {
+                    return Err(ClientSubstrateError::ProductionGuardFailed {
+                        blockers: self.production_bundle_blockers,
+                    });
+                }
                 let dependencies = self.production_dependencies.ok_or_else(|| {
                     ClientSubstrateError::ProductionGuardFailed {
                         blockers: vec!["production dependencies are required".to_string()],

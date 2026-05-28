@@ -286,6 +286,61 @@ impl AssetPolicy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssetHash(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetBlobRef {
+    pub uri: String,
+    pub content_hash: Option<AssetHash>,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetRecord {
+    pub metadata: AssetMetadata,
+    pub policy: AssetPolicy,
+    pub blob: Option<AssetBlobRef>,
+    pub processing_status: AssetProcessingStatus,
+    pub extraction: Option<AssetExtractionResult>,
+    pub linked_work_objects: Vec<AssetWorkObjectLink>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AssetRecord {
+    pub fn new(metadata: AssetMetadata, policy: AssetPolicy, updated_at: DateTime<Utc>) -> Self {
+        Self {
+            processing_status: AssetProcessingStatus::Observed,
+            metadata,
+            policy,
+            blob: None,
+            extraction: None,
+            linked_work_objects: Vec::new(),
+            updated_at,
+        }
+    }
+
+    pub fn with_blob(mut self, blob: AssetBlobRef) -> Self {
+        self.blob = Some(blob);
+        self
+    }
+
+    pub fn apply_extraction(mut self, extraction: AssetExtractionResult) -> Self {
+        self.processing_status = extraction.status.clone();
+        self.extraction = Some(extraction);
+        self.updated_at = Utc::now();
+        self
+    }
+
+    pub fn link_work_object(mut self, link: AssetWorkObjectLink) -> Self {
+        if !self.linked_work_objects.contains(&link) {
+            self.linked_work_objects.push(link);
+            self.updated_at = Utc::now();
+        }
+        self
+    }
+}
+
 /// Supported extraction pipeline boundary for assets.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

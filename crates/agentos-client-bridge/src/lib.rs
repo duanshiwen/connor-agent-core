@@ -101,6 +101,18 @@ impl AgentOsClientBridge {
         BridgeResponse::from_serializable(&self.substrate.approval_projection())
     }
 
+    pub fn storage_health_report_json(&self) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        BridgeResponse::from_serializable(&self.substrate.storage_health_report())
+    }
+
+    pub fn knowledge_projection_json(&self) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        BridgeResponse::from_serializable(&self.substrate.knowledge_projection())
+    }
+
+    pub fn asset_projection_json(&self) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        BridgeResponse::from_serializable(&self.substrate.asset_projection())
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentOsClientBridgeError> {
         self.substrate
             .host_api_for_bridge()
@@ -138,5 +150,31 @@ mod tests {
             err,
             AgentOsClientBridgeError::InvalidArgument { .. }
         ));
+    }
+
+    #[test]
+    fn bridge_exposes_health_and_knowledge_asset_projections() {
+        let bridge = AgentOsClientBridge::for_tests().unwrap();
+        assert!(
+            bridge
+                .storage_health_report_json()
+                .unwrap()
+                .json
+                .contains("healthy")
+        );
+        assert!(
+            bridge
+                .knowledge_projection_json()
+                .unwrap()
+                .json
+                .contains("results")
+        );
+        assert!(
+            bridge
+                .asset_projection_json()
+                .unwrap()
+                .json
+                .contains("assets")
+        );
     }
 }
