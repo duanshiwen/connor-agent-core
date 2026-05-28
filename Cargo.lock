@@ -70,6 +70,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-client-bridge"
+version = "0.1.0"
+dependencies = [
+ "client-substrate",
+ "conversation-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "agentos-config"
 version = "0.1.0"
 dependencies = [
@@ -488,6 +500,7 @@ dependencies = [
  "action-core",
  "action-runtime",
  "agentos-kernel",
+ "agentos-storage",
  "anyhow",
  "async-trait",
  "audit-log",

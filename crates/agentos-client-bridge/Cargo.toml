@@ -1,0 +1,18 @@
+[package]
+name = "agentos-client-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "JSON-safe native bridge contract for AgentOS commercial client substrate."
+
+[dependencies]
+client-substrate = { path = "../client-substrate" }
+conversation-core = { path = "../conversation-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -8,6 +8,7 @@ members = [
     "crates/model-adapter",
     "crates/agent-runtime",
     "crates/client-substrate",
+    "crates/agentos-client-bridge",
     "crates/agentos-kernel",
     "crates/agentos-observability",
     "crates/agentos-config",

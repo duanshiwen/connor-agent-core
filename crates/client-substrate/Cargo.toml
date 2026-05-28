@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Commercial client substrate facade for AgentOS host integration."
 
 [dependencies]
+agentos-storage = { path = "../agentos-storage" }
 action-core = { path = "../action-core" }
 action-runtime = { path = "../action-runtime" }
 agentos-kernel = { path = "../agentos-kernel" }
@@ -26,3 +27,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "minimal-commercial-client-host"
+path = "examples/minimal_commercial_client_host.rs"

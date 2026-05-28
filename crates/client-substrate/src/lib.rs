@@ -5,6 +5,7 @@
 //! typed commands, UI-safe events, projection models, and conservative safety
 //! defaults.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use action_core::{ActionId, ActionRegistry, ActionRequest, ActionSchema, SideEffectKind};
@@ -13,17 +14,34 @@ use agentos_kernel::{
     HostRunStatus, KernelHostApi, KernelRuntime, KernelRuntimeBuilder, StartAgentRunRequest,
     SubmitUserMessageRequest,
 };
-use audit_log::MemoryAuditSink;
+use agentos_storage::{AgentOsStorage, STORAGE_LAYOUT_VERSION};
+use audit_log::{AuditLog, MemoryAuditSink};
 use capability_policy::{CapabilityPolicy, PolicyRule, PolicyRuleDecision};
 use chrono::{DateTime, Utc};
 use conversation_core::{
     ConversationId, ConversationKind, MessageId, Participant, ParticipantId, ParticipantKind,
 };
-use conversation_journal::MemoryConversationJournal;
+use conversation_journal::{ConversationJournal, MemoryConversationJournal};
 use conversation_kernel::CreateConversationCommand;
-use model_adapter::FakeModelAdapter;
+use model_adapter::{FakeModelAdapter, ModelAdapter};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Stable commercial client substrate API version.
+///
+/// Additive DTO fields may keep this value; breaking command/event/projection
+/// semantics must bump it and update the public API compatibility tests.
+pub const CLIENT_SUBSTRATE_API_VERSION: u32 = 1;
+
+/// Runtime mode selected by the host. Production mode enforces explicit durable
+/// dependencies and rejects fake/in-memory component declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRuntimeMode {
+    Test,
+    Development,
+    Production,
+}
 
 /// Stable client profile identifier supplied by the host product.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -546,12 +564,197 @@ pub struct ClientTelemetryConsent {
     pub product_analytics_enabled: bool,
 }
 
+/// Declared implementation class for a production dependency. The guard is
+/// intentionally declaration-based because most dependencies are trait objects;
+/// hosts must identify whether a supplied object is production-safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientDependencyKind {
+    InMemoryTest,
+    FakeTest,
+    DurableLocal,
+    SystemService,
+    BackendService,
+    EnterpriseManaged,
+}
+
+impl ClientDependencyKind {
+    fn is_test_only(self) -> bool {
+        matches!(self, Self::InMemoryTest | Self::FakeTest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientProductionComponentKinds {
+    pub conversation_journal: ClientDependencyKind,
+    pub model_adapter: ClientDependencyKind,
+    pub audit_log: ClientDependencyKind,
+    pub credential_backend: SystemCredentialBackendKind,
+    pub identity_crypto: ClientDependencyKind,
+}
+
+impl ClientProductionComponentKinds {
+    pub fn local_durable_defaults(credential_backend: SystemCredentialBackendKind) -> Self {
+        Self {
+            conversation_journal: ClientDependencyKind::DurableLocal,
+            model_adapter: ClientDependencyKind::BackendService,
+            audit_log: ClientDependencyKind::DurableLocal,
+            credential_backend,
+            identity_crypto: ClientDependencyKind::SystemService,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ClientProductionDependencies {
+    pub conversation_journal: Arc<dyn ConversationJournal>,
+    pub model_adapter: Arc<dyn ModelAdapter>,
+    pub audit_log: Arc<dyn AuditLog>,
+    pub storage: Arc<AgentOsStorage>,
+    pub component_kinds: ClientProductionComponentKinds,
+}
+
+impl ClientProductionDependencies {
+    pub fn validate(&self) -> Result<(), ClientSubstrateError> {
+        let mut blockers = Vec::new();
+        if self.component_kinds.conversation_journal.is_test_only() {
+            blockers.push("production conversation journal must be durable".to_string());
+        }
+        if self.component_kinds.model_adapter.is_test_only() {
+            blockers.push("production model adapter must not be fake".to_string());
+        }
+        if self.component_kinds.audit_log.is_test_only() {
+            blockers.push("production audit log must be durable or managed".to_string());
+        }
+        if self.component_kinds.identity_crypto.is_test_only() {
+            blockers.push("production identity crypto must not be fake".to_string());
+        }
+        if self.component_kinds.credential_backend == SystemCredentialBackendKind::InMemoryTest {
+            blockers.push("production credential backend must not be in-memory".to_string());
+        }
+        if self.storage.manifest().storage_version != STORAGE_LAYOUT_VERSION {
+            blockers.push(format!(
+                "unsupported storage layout version {}",
+                self.storage.manifest().storage_version
+            ));
+        }
+        if blockers.is_empty() {
+            Ok(())
+        } else {
+            Err(ClientSubstrateError::ProductionGuardFailed { blockers })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ClientEventId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientEventCursor {
+    pub last_seen: Option<ClientEventId>,
+}
+
+impl ClientEventCursor {
+    pub fn beginning() -> Self {
+        Self { last_seen: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientEventEnvelope {
+    pub id: ClientEventId,
+    pub occurred_at: DateTime<Utc>,
+    pub api_version: u32,
+    pub event: ClientEvent,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientProjectionState {
+    pub conversations: BTreeMap<String, ClientConversationSummary>,
+    pub timelines: BTreeMap<String, Vec<ClientTimelineItem>>,
+    pub runs: BTreeMap<String, ClientRunSummary>,
+    pub approvals: BTreeMap<String, ClientApprovalCard>,
+    pub knowledge: ClientKnowledgeProjection,
+    pub assets: BTreeMap<String, ClientAssetCard>,
+    pub errors: Vec<ClientErrorBanner>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientConversationListProjection {
+    pub conversations: Vec<ClientConversationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientTimelineProjection {
+    pub conversation_id: ConversationId,
+    pub items: Vec<ClientTimelineItem>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientRunProjection {
+    pub runs: Vec<ClientRunSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientApprovalProjection {
+    pub approvals: Vec<ClientApprovalCard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientCitationRef {
+    pub source_uri: Option<String>,
+    pub artifact_id: Option<String>,
+    pub asset_id: Option<String>,
+    pub evidence_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientKnowledgeResultCard {
+    pub entry_id: String,
+    pub title: String,
+    pub snippet: Option<String>,
+    pub score: f32,
+    pub confidentiality: Option<String>,
+    pub permission_required: bool,
+    pub citations: Vec<ClientCitationRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientAssetCard {
+    pub asset_id: String,
+    pub title: Option<String>,
+    pub kind: String,
+    pub source_uri: Option<String>,
+    pub processing_status: String,
+    pub linked_work_objects: Vec<ClientWorkObjectLinkSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientWorkObjectLinkSummary {
+    pub work_object_type: String,
+    pub work_object_id: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientKnowledgeProjection {
+    pub last_query: Option<String>,
+    pub results: Vec<ClientKnowledgeResultCard>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientAssetProjection {
+    pub assets: Vec<ClientAssetCard>,
+}
+
 /// Builder for [`ClientSubstrate`].
 pub struct ClientSubstrateBuilder {
     profile_id: ClientProfileId,
     workspace_id: ClientWorkspaceId,
     safety_profile: ClientSafetyProfile,
     action_registry: ActionRegistry,
+    runtime_mode: ClientRuntimeMode,
+    production_dependencies: Option<ClientProductionDependencies>,
 }
 
 impl Default for ClientSubstrateBuilder {
@@ -561,6 +764,8 @@ impl Default for ClientSubstrateBuilder {
             workspace_id: ClientWorkspaceId("local".to_string()),
             safety_profile: ClientSafetyProfile::personal_local_default(),
             action_registry: ActionRegistry::new(),
+            runtime_mode: ClientRuntimeMode::Test,
+            production_dependencies: None,
         }
     }
 }
@@ -568,6 +773,29 @@ impl Default for ClientSubstrateBuilder {
 impl ClientSubstrateBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn for_tests() -> Self {
+        Self::default()
+    }
+
+    pub fn production(
+        profile_id: ClientProfileId,
+        workspace_id: ClientWorkspaceId,
+        dependencies: ClientProductionDependencies,
+    ) -> Self {
+        Self {
+            profile_id,
+            workspace_id,
+            runtime_mode: ClientRuntimeMode::Production,
+            production_dependencies: Some(dependencies),
+            ..Self::default()
+        }
+    }
+
+    pub fn runtime_mode(mut self, runtime_mode: ClientRuntimeMode) -> Self {
+        self.runtime_mode = runtime_mode;
+        self
     }
 
     pub fn profile_id(mut self, profile_id: ClientProfileId) -> Self {
@@ -592,16 +820,34 @@ impl ClientSubstrateBuilder {
 
     pub fn build(self) -> Result<ClientSubstrate, ClientSubstrateError> {
         let action_registry = Arc::new(self.action_registry);
-        let runtime = KernelRuntimeBuilder::new()
-            .conversation_journal(Arc::new(MemoryConversationJournal::new()))
-            .model_adapter(Arc::new(FakeModelAdapter::default()))
-            .action_registry(Arc::clone(&action_registry))
-            .capability_policy(Arc::new(self.safety_profile.to_capability_policy()))
-            .audit_log(Arc::new(MemoryAuditSink::new()))
-            .build()
-            .map_err(|source| ClientSubstrateError::BuildFailed {
-                reason: source.to_string(),
-            })?;
+        let runtime = match self.runtime_mode {
+            ClientRuntimeMode::Production => {
+                let dependencies = self.production_dependencies.ok_or_else(|| {
+                    ClientSubstrateError::ProductionGuardFailed {
+                        blockers: vec!["production dependencies are required".to_string()],
+                    }
+                })?;
+                dependencies.validate()?;
+                KernelRuntimeBuilder::new()
+                    .conversation_journal(dependencies.conversation_journal)
+                    .model_adapter(dependencies.model_adapter)
+                    .action_registry(Arc::clone(&action_registry))
+                    .capability_policy(Arc::new(self.safety_profile.to_capability_policy()))
+                    .audit_log(dependencies.audit_log)
+                    .storage(dependencies.storage)
+                    .build()
+            }
+            ClientRuntimeMode::Test | ClientRuntimeMode::Development => KernelRuntimeBuilder::new()
+                .conversation_journal(Arc::new(MemoryConversationJournal::new()))
+                .model_adapter(Arc::new(FakeModelAdapter::default()))
+                .action_registry(Arc::clone(&action_registry))
+                .capability_policy(Arc::new(self.safety_profile.to_capability_policy()))
+                .audit_log(Arc::new(MemoryAuditSink::new()))
+                .build(),
+        }
+        .map_err(|source| ClientSubstrateError::BuildFailed {
+            reason: source.to_string(),
+        })?;
 
         Ok(ClientSubstrate::new(
             self.profile_id,
@@ -609,6 +855,7 @@ impl ClientSubstrateBuilder {
             self.safety_profile,
             action_registry,
             runtime,
+            self.runtime_mode,
         ))
     }
 }
@@ -621,7 +868,10 @@ pub struct ClientSubstrate {
     safety_profile: ClientSafetyProfile,
     action_registry: Arc<ActionRegistry>,
     host_api: KernelHostApi,
+    runtime_mode: ClientRuntimeMode,
     events: Arc<Mutex<Vec<ClientEvent>>>,
+    event_log: Arc<Mutex<Vec<ClientEventEnvelope>>>,
+    projections: Arc<Mutex<ClientProjectionState>>,
 }
 
 impl ClientSubstrate {
@@ -635,18 +885,23 @@ impl ClientSubstrate {
         safety_profile: ClientSafetyProfile,
         action_registry: Arc<ActionRegistry>,
         runtime: KernelRuntime,
+        runtime_mode: ClientRuntimeMode,
     ) -> Self {
-        let events = Arc::new(Mutex::new(vec![ClientEvent::RuntimeStatusChanged {
-            status: ClientRuntimeStatus::Ready,
-        }]));
-        Self {
+        let substrate = Self {
             profile_id,
             workspace_id,
             safety_profile,
             action_registry,
             host_api: KernelHostApi::new(runtime),
-            events,
-        }
+            runtime_mode,
+            events: Arc::new(Mutex::new(Vec::new())),
+            event_log: Arc::new(Mutex::new(Vec::new())),
+            projections: Arc::new(Mutex::new(ClientProjectionState::default())),
+        };
+        substrate.push_event(ClientEvent::RuntimeStatusChanged {
+            status: ClientRuntimeStatus::Ready,
+        });
+        substrate
     }
 
     pub fn profile_id(&self) -> &ClientProfileId {
@@ -661,14 +916,40 @@ impl ClientSubstrate {
         &self.safety_profile
     }
 
+    pub fn runtime_mode(&self) -> ClientRuntimeMode {
+        self.runtime_mode
+    }
+
+    /// Narrow escape hatch for native bridge crates. Product UI code should
+    /// prefer typed substrate methods and projections.
+    pub fn host_api_for_bridge(&self) -> &KernelHostApi {
+        &self.host_api
+    }
+
     pub fn storage_health_report(&self) -> ClientStorageHealthReport {
+        let mut issues = Vec::new();
+        let requires_migration = self
+            .host_api
+            .runtime()
+            .services()
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.manifest().storage_version != STORAGE_LAYOUT_VERSION);
+        if self.host_api.runtime().services().storage.is_none()
+            && self.runtime_mode == ClientRuntimeMode::Production
+        {
+            issues.push("production storage service is not configured".to_string());
+        }
+        if requires_migration {
+            issues.push("storage layout requires migration".to_string());
+        }
         ClientStorageHealthReport {
             profile_id: self.profile_id.clone(),
             workspace_id: self.workspace_id.clone(),
-            healthy: true,
-            requires_migration: false,
+            healthy: issues.is_empty(),
+            requires_migration,
             dirty_shutdown_recovered: false,
-            issues: Vec::new(),
+            issues,
         }
     }
 
@@ -704,6 +985,92 @@ impl ClientSubstrate {
     pub fn drain_events(&self) -> Vec<ClientEvent> {
         let mut events = self.events.lock().unwrap();
         std::mem::take(&mut *events)
+    }
+
+    pub fn latest_event_cursor(&self) -> ClientEventCursor {
+        let log = self.event_log.lock().unwrap();
+        ClientEventCursor {
+            last_seen: log.last().map(|event| event.id),
+        }
+    }
+
+    pub fn events_after(&self, cursor: ClientEventCursor) -> Vec<ClientEventEnvelope> {
+        let log = self.event_log.lock().unwrap();
+        log.iter()
+            .filter(|event| cursor.last_seen.is_none_or(|id| event.id > id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn conversation_list_projection(&self) -> ClientConversationListProjection {
+        let projections = self.projections.lock().unwrap();
+        let mut conversations = projections
+            .conversations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        conversations.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.conversation_id.0.cmp(&b.conversation_id.0))
+        });
+        ClientConversationListProjection { conversations }
+    }
+
+    pub fn timeline_projection(&self, conversation_id: ConversationId) -> ClientTimelineProjection {
+        let projections = self.projections.lock().unwrap();
+        ClientTimelineProjection {
+            conversation_id: conversation_id.clone(),
+            items: projections
+                .timelines
+                .get(&conversation_id.0)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn run_projection(&self) -> ClientRunProjection {
+        let projections = self.projections.lock().unwrap();
+        ClientRunProjection {
+            runs: projections.runs.values().cloned().collect(),
+        }
+    }
+
+    pub fn approval_projection(&self) -> ClientApprovalProjection {
+        let projections = self.projections.lock().unwrap();
+        ClientApprovalProjection {
+            approvals: projections.approvals.values().cloned().collect(),
+        }
+    }
+
+    pub fn knowledge_projection(&self) -> ClientKnowledgeProjection {
+        self.projections.lock().unwrap().knowledge.clone()
+    }
+
+    pub fn asset_projection(&self) -> ClientAssetProjection {
+        let projections = self.projections.lock().unwrap();
+        ClientAssetProjection {
+            assets: projections.assets.values().cloned().collect(),
+        }
+    }
+
+    pub fn replace_knowledge_results_for_host(
+        &self,
+        query: impl Into<String>,
+        results: Vec<ClientKnowledgeResultCard>,
+    ) {
+        self.projections.lock().unwrap().knowledge = ClientKnowledgeProjection {
+            last_query: Some(query.into()),
+            results,
+        };
+    }
+
+    pub fn upsert_asset_card_for_host(&self, card: ClientAssetCard) {
+        self.projections
+            .lock()
+            .unwrap()
+            .assets
+            .insert(card.asset_id.clone(), card);
     }
 
     pub async fn dispatch(
@@ -951,7 +1318,49 @@ impl ClientSubstrate {
     }
 
     fn push_event(&self, event: ClientEvent) {
-        self.events.lock().unwrap().push(event);
+        self.apply_projection(&event);
+        self.events.lock().unwrap().push(event.clone());
+        let mut log = self.event_log.lock().unwrap();
+        let id = ClientEventId(log.last().map_or(1, |last| last.id.0 + 1));
+        log.push(ClientEventEnvelope {
+            id,
+            occurred_at: Utc::now(),
+            api_version: CLIENT_SUBSTRATE_API_VERSION,
+            event,
+        });
+    }
+
+    fn apply_projection(&self, event: &ClientEvent) {
+        let mut projections = self.projections.lock().unwrap();
+        match event {
+            ClientEvent::ConversationCreated { summary } => {
+                projections
+                    .conversations
+                    .insert(summary.conversation_id.0.clone(), summary.clone());
+            }
+            ClientEvent::TimelineItemAppended { item } => {
+                projections
+                    .timelines
+                    .entry(item.conversation_id.0.clone())
+                    .or_default()
+                    .push(item.clone());
+                if let Some(summary) = projections.conversations.get_mut(&item.conversation_id.0) {
+                    summary.updated_at = item.created_at;
+                }
+            }
+            ClientEvent::AgentRunChanged { summary } => {
+                projections
+                    .runs
+                    .insert(summary.run_id.clone(), summary.clone());
+            }
+            ClientEvent::ApprovalRequested { card } => {
+                projections
+                    .approvals
+                    .insert(card.action_id.0.clone(), card.clone());
+            }
+            ClientEvent::ErrorRaised { banner } => projections.errors.push(banner.clone()),
+            ClientEvent::RuntimeStatusChanged { .. } => {}
+        }
     }
 }
 
@@ -960,6 +1369,8 @@ impl ClientSubstrate {
 pub enum ClientSubstrateError {
     #[error("client substrate build failed: {reason}")]
     BuildFailed { reason: String },
+    #[error("client production guard failed: {blockers:?}")]
+    ProductionGuardFailed { blockers: Vec<String> },
     #[error("client command failed: {banner:?}")]
     CommandFailed { banner: ClientErrorBanner },
 }
