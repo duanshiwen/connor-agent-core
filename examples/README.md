@@ -41,3 +41,9 @@ Run with:
 ```bash
 cargo run --example minimal-desktop-host
 ```
+
+## M2.3 knowledge sync bridge host flow
+
+File: [`knowledge_sync_bridge_host.md`](knowledge_sync_bridge_host.md)
+
+Documents the host-side flow for consuming backend `/api/v1/sync/events` responses through `agentos-client-bridge` or the `agentos-ffi` dylib. It covers pull/apply/persist/ack discipline, the C ABI functions, expected backend response shape, and reducer behavior for personal knowledge sync.

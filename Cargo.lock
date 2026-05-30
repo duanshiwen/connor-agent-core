@@ -132,6 +132,7 @@ dependencies = [
  "relationship-core",
  "reminder-core",
  "scheduler",
+ "serde_json",
  "server-account-core",
  "server-search-core",
  "skill-core",

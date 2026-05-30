@@ -1,3 +1,6 @@
+use agentos_client_bridge::{
+    apply_knowledge_sync_events_json, apply_knowledge_sync_pull_response_json,
+};
 use identity_core::{Ed25519CryptoProvider, SignedChallenge};
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -58,6 +61,71 @@ pub unsafe extern "C" fn agentos_identity_verify_ed25519_challenge(
     }
 }
 
+/// Applies backend M2.3 knowledge sync events through the client bridge reducer.
+///
+/// Arguments:
+/// - `projection_json`: serialized KnowledgeSyncProjection. Empty string starts from empty projection.
+/// - `events_json`: JSON array of ServerSyncEvent values.
+/// - `error_out`: optional allocated error string output.
+///
+/// Returns an allocated BridgeResponse JSON string on success, or null on error.
+/// The returned string must be released with `agentos_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentos_apply_knowledge_sync_events_json(
+    projection_json: *const c_char,
+    events_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        apply_knowledge_sync_events_inner(projection_json, events_json, error_out)
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            unsafe { set_error(error_out, "panic in agentos ffi") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Applies a full backend `/api/v1/sync/events` response envelope through the
+/// client bridge reducer.
+///
+/// Arguments:
+/// - `projection_json`: serialized KnowledgeSyncProjection. Empty string starts from empty projection.
+/// - `pull_response_json`: backend API response shaped as `{code,message,data:{events,...}}`.
+/// - `error_out`: optional allocated error string output.
+///
+/// Returns an allocated BridgeResponse JSON string on success, or null on error.
+/// The returned string must be released with `agentos_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentos_apply_knowledge_sync_pull_response_json(
+    projection_json: *const c_char,
+    pull_response_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        apply_knowledge_sync_pull_response_inner(projection_json, pull_response_json, error_out)
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            unsafe { set_error(error_out, "panic in agentos ffi") };
+            ptr::null_mut()
+        }
+    }
+}
+
 unsafe fn verify_ed25519_challenge_inner(
     challenge: *const c_char,
     signature_hex: *const c_char,
@@ -103,6 +171,95 @@ unsafe fn verify_ed25519_challenge_inner(
         Err(err) => {
             unsafe { set_error(error_out, &err.to_string()) };
             ERR_IDENTITY_CORE
+        }
+    }
+}
+
+unsafe fn apply_knowledge_sync_events_inner(
+    projection_json: *const c_char,
+    events_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if projection_json.is_null() || events_json.is_null() {
+        unsafe { set_error(error_out, "null argument") };
+        return ptr::null_mut();
+    }
+    let projection_json = match unsafe { cstr_to_str(projection_json) } {
+        Ok(value) => value,
+        Err(err) => {
+            unsafe { set_error(error_out, err) };
+            return ptr::null_mut();
+        }
+    };
+    let events_json = match unsafe { cstr_to_str(events_json) } {
+        Ok(value) => value,
+        Err(err) => {
+            unsafe { set_error(error_out, err) };
+            return ptr::null_mut();
+        }
+    };
+    match apply_knowledge_sync_events_json(projection_json, events_json) {
+        Ok(response) => bridge_response_to_c_string(response, error_out),
+        Err(err) => {
+            unsafe { set_error(error_out, &err.to_string()) };
+            ptr::null_mut()
+        }
+    }
+}
+
+unsafe fn apply_knowledge_sync_pull_response_inner(
+    projection_json: *const c_char,
+    pull_response_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if projection_json.is_null() || pull_response_json.is_null() {
+        unsafe { set_error(error_out, "null argument") };
+        return ptr::null_mut();
+    }
+    let projection_json = match unsafe { cstr_to_str(projection_json) } {
+        Ok(value) => value,
+        Err(err) => {
+            unsafe { set_error(error_out, err) };
+            return ptr::null_mut();
+        }
+    };
+    let pull_response_json = match unsafe { cstr_to_str(pull_response_json) } {
+        Ok(value) => value,
+        Err(err) => {
+            unsafe { set_error(error_out, err) };
+            return ptr::null_mut();
+        }
+    };
+    match apply_knowledge_sync_pull_response_json(projection_json, pull_response_json) {
+        Ok(response) => bridge_response_to_c_string(response, error_out),
+        Err(err) => {
+            unsafe { set_error(error_out, &err.to_string()) };
+            ptr::null_mut()
+        }
+    }
+}
+
+fn bridge_response_to_c_string(
+    response: agentos_client_bridge::BridgeResponse,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    let json = match serde_json::to_string(&response) {
+        Ok(json) => json,
+        Err(err) => {
+            unsafe {
+                set_error(
+                    error_out,
+                    &format!("bridge response serialization failed: {err}"),
+                )
+            };
+            return ptr::null_mut();
+        }
+    };
+    match CString::new(json) {
+        Ok(value) => value.into_raw(),
+        Err(_) => {
+            unsafe { set_error(error_out, "bridge response contained nul byte") };
+            ptr::null_mut()
         }
     }
 }
@@ -213,6 +370,87 @@ mod tests {
 
         assert_eq!(code, ERR_IDENTITY_CORE);
         assert!(!err.is_null());
+        unsafe { agentos_ffi_free_string(err) };
+    }
+
+    #[test]
+    fn applies_knowledge_sync_pull_response_via_ffi() {
+        let projection = CString::new("").unwrap();
+        let pull_response = CString::new(
+            serde_json::json!({
+                "code": 0,
+                "message": "ok",
+                "data": {
+                    "events": [{
+                        "id": "evt-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "knowledge.created",
+                        "schema_version": 1,
+                        "object_type": "knowledge",
+                        "object_id": "notes/ffi",
+                        "operation": "created",
+                        "source_device_id": "device-a",
+                        "client_event_id": "client-1",
+                        "payload": {
+                            "entry_id": "notes/ffi",
+                            "object_id": "notes/ffi",
+                            "title": "FFI Sync",
+                            "content_markdown": "# FFI Sync",
+                            "summary": "summary",
+                            "tags": ["agentos"],
+                            "metadata": {},
+                            "source_uri": "",
+                            "status": "active",
+                            "version": 1,
+                            "content_hash": "hash-ffi-1",
+                            "updated_by_device_id": "device-a",
+                            "updated_at": "2026-05-30T02:00:00Z"
+                        },
+                        "timestamp": "2026-05-30T02:00:01Z",
+                        "sequence": 1
+                    }],
+                    "next_after_sequence": 1,
+                    "has_more": false,
+                    "server_time": 1780106401000i64,
+                    "schema_version": 1
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+
+        let out = unsafe {
+            agentos_apply_knowledge_sync_pull_response_json(
+                projection.as_ptr(),
+                pull_response.as_ptr(),
+                &mut err,
+            )
+        };
+
+        assert!(err.is_null());
+        assert!(!out.is_null());
+        let response = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        assert!(response.contains("notes/ffi"));
+        assert!(response.contains("last_applied_sequence"));
+        unsafe { agentos_ffi_free_string(out) };
+    }
+
+    #[test]
+    fn returns_error_for_invalid_sync_events_json_via_ffi() {
+        let projection = CString::new("").unwrap();
+        let events = CString::new("not-json").unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+
+        let out = unsafe {
+            agentos_apply_knowledge_sync_events_json(projection.as_ptr(), events.as_ptr(), &mut err)
+        };
+
+        assert!(out.is_null());
+        assert!(!err.is_null());
+        let message = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        assert!(message.contains("invalid server sync events json"));
         unsafe { agentos_ffi_free_string(err) };
     }
 }

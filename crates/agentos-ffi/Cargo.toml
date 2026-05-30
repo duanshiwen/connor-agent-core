@@ -50,3 +50,4 @@ server-search-core = { path = "../server-search-core" }
 skill-core = { path = "../skill-core" }
 surface-core = { path = "../surface-core" }
 sync-runtime = { path = "../sync-runtime" }
+serde_json.workspace = true
