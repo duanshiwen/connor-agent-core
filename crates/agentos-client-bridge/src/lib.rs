@@ -12,6 +12,28 @@ use serde::{Deserialize, Serialize};
 use sync_runtime::{KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncEvent};
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct BackendApiResponse<T> {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    message: String,
+    data: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct BackendSyncPullData {
+    events: Vec<ServerSyncEvent>,
+    #[serde(default)]
+    next_after_sequence: u64,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    server_time: i64,
+    #[serde(default)]
+    schema_version: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum AgentOsClientBridgeError {
     #[error("invalid bridge argument: {reason}")]
@@ -140,6 +162,18 @@ impl AgentOsClientBridge {
         apply_knowledge_sync_events_json(projection_json, events_json)
     }
 
+    /// Apply a full backend `/api/v1/sync/events` JSON response envelope.
+    ///
+    /// This accepts the standard API response shape used by the Go backend:
+    /// `{"code":0,"data":{"events":[...],"next_after_sequence":...}}`.
+    pub fn apply_knowledge_sync_pull_response_json(
+        &self,
+        projection_json: &str,
+        pull_response_json: &str,
+    ) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        apply_knowledge_sync_pull_response_json(projection_json, pull_response_json)
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentOsClientBridgeError> {
         self.substrate
             .host_api_for_bridge()
@@ -159,6 +193,40 @@ pub fn apply_knowledge_sync_events_json(
     projection_json: &str,
     events_json: &str,
 ) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+    let events: Vec<ServerSyncEvent> = serde_json::from_str(events_json).map_err(|source| {
+        AgentOsClientBridgeError::InvalidArgument {
+            reason: format!("invalid server sync events json: {source}"),
+        }
+    })?;
+    apply_knowledge_sync_events(projection_json, &events)
+}
+
+/// Apply a full backend `/api/v1/sync/events` JSON response envelope.
+pub fn apply_knowledge_sync_pull_response_json(
+    projection_json: &str,
+    pull_response_json: &str,
+) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+    let response: BackendApiResponse<BackendSyncPullData> =
+        serde_json::from_str(pull_response_json).map_err(|source| {
+            AgentOsClientBridgeError::InvalidArgument {
+                reason: format!("invalid backend sync pull response json: {source}"),
+            }
+        })?;
+    if response.code != 0 {
+        return Err(AgentOsClientBridgeError::InvalidArgument {
+            reason: format!(
+                "backend sync pull response failed: code={} message={}",
+                response.code, response.message
+            ),
+        });
+    }
+    apply_knowledge_sync_events(projection_json, &response.data.events)
+}
+
+fn apply_knowledge_sync_events(
+    projection_json: &str,
+    events: &[ServerSyncEvent],
+) -> Result<BridgeResponse, AgentOsClientBridgeError> {
     let mut projection = if projection_json.trim().is_empty() {
         KnowledgeSyncProjection::new()
     } else {
@@ -168,12 +236,7 @@ pub fn apply_knowledge_sync_events_json(
             }
         })?
     };
-    let events: Vec<ServerSyncEvent> = serde_json::from_str(events_json).map_err(|source| {
-        AgentOsClientBridgeError::InvalidArgument {
-            reason: format!("invalid server sync events json: {source}"),
-        }
-    })?;
-    projection.apply_events(&events)?;
+    projection.apply_events(events)?;
     BridgeResponse::from_serializable(&projection)
 }
 
@@ -309,6 +372,81 @@ mod tests {
             sync_runtime::KnowledgeEntrySyncStatus::Deleted
         );
         assert_eq!(entry.version, 2);
+    }
+
+    #[test]
+    fn bridge_applies_backend_sync_pull_response_json() {
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [
+                    {
+                        "id": "evt-10",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "knowledge.created",
+                        "schema_version": 1,
+                        "object_type": "knowledge",
+                        "object_id": "notes/from-backend-envelope",
+                        "operation": "created",
+                        "source_device_id": "device-a",
+                        "client_event_id": "client-10",
+                        "payload": {
+                            "entry_id": "notes/from-backend-envelope",
+                            "object_id": "notes/from-backend-envelope",
+                            "title": "Backend Envelope",
+                            "content_markdown": "# Backend Envelope",
+                            "summary": "summary",
+                            "tags": ["agentos"],
+                            "metadata": {"source": "backend"},
+                            "source_uri": "",
+                            "status": "active",
+                            "version": 1,
+                            "content_hash": "hash-envelope-1",
+                            "updated_by_device_id": "device-a",
+                            "updated_at": "2026-05-30T02:10:00Z"
+                        },
+                        "timestamp": "2026-05-30T02:10:01Z",
+                        "sequence": 10
+                    }
+                ],
+                "next_after_sequence": 10,
+                "has_more": false,
+                "server_time": 1780107001000i64,
+                "schema_version": 1
+            }
+        });
+
+        let response = bridge
+            .apply_knowledge_sync_pull_response_json("", &pull_response.to_string())
+            .unwrap();
+        let projection: sync_runtime::KnowledgeSyncProjection =
+            serde_json::from_str(&response.json).unwrap();
+        assert_eq!(projection.cursor.last_applied_sequence, 10);
+        assert_eq!(
+            projection
+                .entries
+                .get("notes/from-backend-envelope")
+                .unwrap()
+                .title,
+            "Backend Envelope"
+        );
+    }
+
+    #[test]
+    fn bridge_rejects_backend_sync_error_response() {
+        let err = apply_knowledge_sync_pull_response_json(
+            "",
+            &serde_json::json!({"code": 401, "message": "unauthorized", "data": {"events": []}})
+                .to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AgentOsClientBridgeError::InvalidArgument { .. }
+        ));
     }
 
     #[test]
