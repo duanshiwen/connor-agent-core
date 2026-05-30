@@ -9,6 +9,7 @@ use client_substrate::{
     ClientEventCursor, ClientEventEnvelope, ClientSubstrate, ClientSubstrateError,
 };
 use serde::{Deserialize, Serialize};
+use sync_runtime::{KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncEvent};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,11 +20,21 @@ pub enum AgentOsClientBridgeError {
     Substrate { reason: String },
     #[error("bridge serialization failed: {reason}")]
     Serialization { reason: String },
+    #[error("server sync apply failed: {reason}")]
+    ServerSyncApply { reason: String },
 }
 
 impl From<ClientSubstrateError> for AgentOsClientBridgeError {
     fn from(value: ClientSubstrateError) -> Self {
         Self::Substrate {
+            reason: value.to_string(),
+        }
+    }
+}
+
+impl From<ServerSyncApplyError> for AgentOsClientBridgeError {
+    fn from(value: ServerSyncApplyError) -> Self {
+        Self::ServerSyncApply {
             reason: value.to_string(),
         }
     }
@@ -113,6 +124,22 @@ impl AgentOsClientBridge {
         BridgeResponse::from_serializable(&self.substrate.asset_projection())
     }
 
+    /// Apply backend M2.3 knowledge sync events to a JSON-encoded knowledge projection.
+    ///
+    /// `projection_json` should be a serialized `KnowledgeSyncProjection`. Empty input
+    /// starts from an empty projection. `events_json` should be a JSON array of
+    /// `ServerSyncEvent` values returned by the backend `/api/v1/sync/events` API.
+    ///
+    /// The returned JSON is the updated `KnowledgeSyncProjection`, including the advanced
+    /// cursor. Hosts should durably persist this JSON before acking the backend cursor.
+    pub fn apply_knowledge_sync_events_json(
+        &self,
+        projection_json: &str,
+        events_json: &str,
+    ) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        apply_knowledge_sync_events_json(projection_json, events_json)
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentOsClientBridgeError> {
         self.substrate
             .host_api_for_bridge()
@@ -122,6 +149,32 @@ impl AgentOsClientBridge {
                 reason: source.to_string(),
             })
     }
+}
+
+/// Stateless JSON-safe helper for applying backend M2.3 knowledge sync events.
+///
+/// This free function mirrors the bridge method so FFI or UniFFI layers can expose it
+/// without requiring an `AgentOsClientBridge` instance when they only need reducer logic.
+pub fn apply_knowledge_sync_events_json(
+    projection_json: &str,
+    events_json: &str,
+) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+    let mut projection = if projection_json.trim().is_empty() {
+        KnowledgeSyncProjection::new()
+    } else {
+        serde_json::from_str::<KnowledgeSyncProjection>(projection_json).map_err(|source| {
+            AgentOsClientBridgeError::InvalidArgument {
+                reason: format!("invalid knowledge projection json: {source}"),
+            }
+        })?
+    };
+    let events: Vec<ServerSyncEvent> = serde_json::from_str(events_json).map_err(|source| {
+        AgentOsClientBridgeError::InvalidArgument {
+            reason: format!("invalid server sync events json: {source}"),
+        }
+    })?;
+    projection.apply_events(&events)?;
+    BridgeResponse::from_serializable(&projection)
 }
 
 #[cfg(test)]
@@ -176,5 +229,94 @@ mod tests {
                 .json
                 .contains("assets")
         );
+    }
+
+    #[test]
+    fn bridge_applies_knowledge_sync_events_json() {
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
+        let events = serde_json::json!([
+            {
+                "id": "evt-1",
+                "user_id": "user-1",
+                "device_id": "device-b",
+                "event_type": "knowledge.created",
+                "schema_version": 1,
+                "object_type": "knowledge",
+                "object_id": "notes/alpha",
+                "operation": "created",
+                "source_device_id": "device-a",
+                "client_event_id": "client-1",
+                "payload": {
+                    "entry_id": "notes/alpha",
+                    "object_id": "notes/alpha",
+                    "title": "Alpha",
+                    "content_markdown": "# Alpha",
+                    "summary": "summary",
+                    "tags": ["agentos"],
+                    "metadata": {},
+                    "source_uri": "",
+                    "status": "active",
+                    "version": 1,
+                    "content_hash": "hash-1",
+                    "updated_by_device_id": "device-a",
+                    "updated_at": "2026-05-30T02:00:00Z"
+                },
+                "timestamp": "2026-05-30T02:00:01Z",
+                "sequence": 1
+            },
+            {
+                "id": "evt-2",
+                "user_id": "user-1",
+                "device_id": "device-b",
+                "event_type": "knowledge.deleted",
+                "schema_version": 1,
+                "object_type": "knowledge",
+                "object_id": "notes/alpha",
+                "operation": "deleted",
+                "source_device_id": "device-a",
+                "client_event_id": "client-2",
+                "payload": {
+                    "entry_id": "notes/alpha",
+                    "object_id": "notes/alpha",
+                    "title": "Alpha",
+                    "content_markdown": "# Alpha",
+                    "summary": "summary",
+                    "tags": ["agentos"],
+                    "metadata": {},
+                    "source_uri": "",
+                    "status": "deleted",
+                    "version": 2,
+                    "content_hash": "hash-2",
+                    "updated_by_device_id": "device-a",
+                    "updated_at": "2026-05-30T02:05:00Z",
+                    "deleted_at": "2026-05-30T02:05:00Z"
+                },
+                "timestamp": "2026-05-30T02:05:01Z",
+                "sequence": 2
+            }
+        ]);
+
+        let response = bridge
+            .apply_knowledge_sync_events_json("", &events.to_string())
+            .unwrap();
+        assert!(response.ok);
+        let projection: sync_runtime::KnowledgeSyncProjection =
+            serde_json::from_str(&response.json).unwrap();
+        assert_eq!(projection.cursor.last_applied_sequence, 2);
+        let entry = projection.entries.get("notes/alpha").unwrap();
+        assert_eq!(
+            entry.status,
+            sync_runtime::KnowledgeEntrySyncStatus::Deleted
+        );
+        assert_eq!(entry.version, 2);
+    }
+
+    #[test]
+    fn bridge_rejects_invalid_knowledge_sync_json() {
+        let err = apply_knowledge_sync_events_json("", "not-json").unwrap_err();
+        assert!(matches!(
+            err,
+            AgentOsClientBridgeError::InvalidArgument { .. }
+        ));
     }
 }
