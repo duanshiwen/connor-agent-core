@@ -9,6 +9,7 @@ description = "JSON-safe native bridge contract for AgentOS commercial client su
 [dependencies]
 client-substrate = { path = "../client-substrate" }
 conversation-core = { path = "../conversation-core" }
+sync-runtime = { path = "../sync-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
