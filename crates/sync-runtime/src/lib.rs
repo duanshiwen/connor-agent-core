@@ -21,6 +21,247 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
+// AgentOS Server Sync Consumer Contract (M2.3)
+// ---------------------------------------------------------------------------
+
+/// Current server sync event schema version supported by this SDK crate.
+pub const AGENTOS_SERVER_SYNC_SCHEMA_VERSION: u32 = 1;
+
+/// Per-user server sync cursor. The backend sequence is monotonic within a user stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct ServerSyncCursor {
+    pub last_applied_sequence: u64,
+}
+
+impl ServerSyncCursor {
+    pub fn beginning() -> Self {
+        Self {
+            last_applied_sequence: 0,
+        }
+    }
+
+    pub fn after(sequence: u64) -> Self {
+        Self {
+            last_applied_sequence: sequence,
+        }
+    }
+
+    pub fn should_apply(&self, event: &ServerSyncEvent) -> bool {
+        event.sequence > self.last_applied_sequence
+    }
+
+    pub fn advance_to(&mut self, sequence: u64) {
+        if sequence > self.last_applied_sequence {
+            self.last_applied_sequence = sequence;
+        }
+    }
+}
+
+/// Backend server sync event envelope returned by `/api/v1/sync/events`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerSyncEvent {
+    pub id: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub event_type: String,
+    pub schema_version: u32,
+    pub object_type: ServerSyncObjectType,
+    pub object_id: String,
+    pub operation: ServerSyncOperation,
+    pub source_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_event_id: Option<String>,
+    pub payload: serde_json::Value,
+    pub timestamp: DateTime<Utc>,
+    pub sequence: u64,
+}
+
+impl ServerSyncEvent {
+    pub fn ensure_supported(&self) -> Result<(), ServerSyncApplyError> {
+        if self.schema_version != AGENTOS_SERVER_SYNC_SCHEMA_VERSION {
+            return Err(ServerSyncApplyError::UnsupportedSchemaVersion {
+                expected: AGENTOS_SERVER_SYNC_SCHEMA_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Backend object family names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerSyncObjectType {
+    Profile,
+    Message,
+    Skill,
+    Agent,
+    Server,
+    Knowledge,
+}
+
+/// Backend operation names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerSyncOperation {
+    Created,
+    Updated,
+    Deleted,
+    Enabled,
+    Disabled,
+    Added,
+    Removed,
+}
+
+/// Personal knowledge entry status carried by backend sync payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEntrySyncStatus {
+    Active,
+    Deleted,
+}
+
+/// Full-snapshot knowledge payload used by `knowledge.created`, `knowledge.updated`,
+/// and `knowledge.deleted` events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEntrySyncPayload {
+    pub entry_id: String,
+    #[serde(default)]
+    pub object_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub content_markdown: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub source_uri: String,
+    pub status: KnowledgeEntrySyncStatus,
+    pub version: u64,
+    pub content_hash: String,
+    pub updated_by_device_id: String,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Minimal local knowledge projection for client reducer tests and host integration.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct KnowledgeSyncProjection {
+    pub cursor: ServerSyncCursor,
+    pub entries: HashMap<String, KnowledgeEntrySyncPayload>,
+}
+
+impl KnowledgeSyncProjection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, entry_id: &str) -> Option<&KnowledgeEntrySyncPayload> {
+        self.entries.get(entry_id)
+    }
+
+    /// Applies an ordered or partially repeated batch of server events.
+    ///
+    /// The reducer is deterministic and idempotent:
+    /// - events at or below the local cursor are ignored;
+    /// - unsupported schema versions stop application;
+    /// - knowledge payloads upsert by `entry_id` when version is newer;
+    /// - same-version payloads must match `status` and `content_hash`;
+    /// - stale versions are ignored;
+    /// - cursor advances only after the event has been accepted or safely ignored as stale.
+    pub fn apply_events(&mut self, events: &[ServerSyncEvent]) -> Result<(), ServerSyncApplyError> {
+        for event in events {
+            self.apply_event(event)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_event(&mut self, event: &ServerSyncEvent) -> Result<(), ServerSyncApplyError> {
+        if !self.cursor.should_apply(event) {
+            return Ok(());
+        }
+        event.ensure_supported()?;
+        if event.object_type != ServerSyncObjectType::Knowledge {
+            return Err(ServerSyncApplyError::UnexpectedObjectType {
+                object_type: format!("{:?}", event.object_type),
+            });
+        }
+        match event.operation {
+            ServerSyncOperation::Created
+            | ServerSyncOperation::Updated
+            | ServerSyncOperation::Deleted => {}
+            _ => {
+                return Err(ServerSyncApplyError::UnexpectedOperation {
+                    operation: format!("{:?}", event.operation),
+                });
+            }
+        }
+
+        let payload: KnowledgeEntrySyncPayload = serde_json::from_value(event.payload.clone())?;
+        if payload.entry_id != event.object_id {
+            return Err(ServerSyncApplyError::ObjectIdMismatch {
+                object_id: event.object_id.clone(),
+                entry_id: payload.entry_id,
+            });
+        }
+        if event.operation == ServerSyncOperation::Deleted
+            && payload.status != KnowledgeEntrySyncStatus::Deleted
+        {
+            return Err(ServerSyncApplyError::DeleteWithoutTombstone {
+                entry_id: event.object_id.clone(),
+            });
+        }
+
+        match self.entries.get(&event.object_id) {
+            None => {
+                self.entries.insert(event.object_id.clone(), payload);
+            }
+            Some(local) if payload.version > local.version => {
+                self.entries.insert(event.object_id.clone(), payload);
+            }
+            Some(local) if payload.version == local.version => {
+                if payload.status != local.status || payload.content_hash != local.content_hash {
+                    return Err(ServerSyncApplyError::SameVersionMismatch {
+                        entry_id: event.object_id.clone(),
+                        version: payload.version,
+                    });
+                }
+            }
+            Some(_) => {
+                // Older payload. It is safe to skip while still advancing cursor because the
+                // event has been observed and cannot improve the projection.
+            }
+        }
+
+        self.cursor.advance_to(event.sequence);
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServerSyncApplyError {
+    #[error("unsupported server sync schema version: expected {expected}, got {actual}")]
+    UnsupportedSchemaVersion { expected: u32, actual: u32 },
+    #[error("unexpected object type for knowledge reducer: {object_type}")]
+    UnexpectedObjectType { object_type: String },
+    #[error("unexpected operation for knowledge reducer: {operation}")]
+    UnexpectedOperation { operation: String },
+    #[error("invalid event payload: {0}")]
+    InvalidPayload(#[from] serde_json::Error),
+    #[error("event object_id {object_id} does not match payload entry_id {entry_id}")]
+    ObjectIdMismatch { object_id: String, entry_id: String },
+    #[error("knowledge.deleted event missing tombstone status for {entry_id}")]
+    DeleteWithoutTombstone { entry_id: String },
+    #[error("same-version knowledge payload mismatch for {entry_id} at version {version}")]
+    SameVersionMismatch { entry_id: String, version: u64 },
+}
+
+// ---------------------------------------------------------------------------
 // Sync Object Identity
 // ---------------------------------------------------------------------------
 
@@ -1164,6 +1405,212 @@ mod tests {
             merge_policy: policy,
             payload: serde_json::json!({"data": id}),
         }
+    }
+
+    fn knowledge_event(
+        sequence: u64,
+        operation: ServerSyncOperation,
+        entry_id: &str,
+        title: &str,
+        status: KnowledgeEntrySyncStatus,
+        version: u64,
+        hash: &str,
+    ) -> ServerSyncEvent {
+        let event_type = match operation {
+            ServerSyncOperation::Created => "knowledge.created",
+            ServerSyncOperation::Updated => "knowledge.updated",
+            ServerSyncOperation::Deleted => "knowledge.deleted",
+            _ => "knowledge.updated",
+        };
+        ServerSyncEvent {
+            id: format!("evt-{sequence}"),
+            user_id: "user-1".to_string(),
+            device_id: "device-phone".to_string(),
+            event_type: event_type.to_string(),
+            schema_version: AGENTOS_SERVER_SYNC_SCHEMA_VERSION,
+            object_type: ServerSyncObjectType::Knowledge,
+            object_id: entry_id.to_string(),
+            operation,
+            source_device_id: "device-laptop".to_string(),
+            client_event_id: Some(format!("client-{sequence}")),
+            payload: serde_json::json!({
+                "entry_id": entry_id,
+                "object_id": entry_id,
+                "title": title,
+                "content_markdown": format!("# {title}"),
+                "summary": "summary",
+                "tags": ["agentos"],
+                "metadata": {"category": "notes"},
+                "source_uri": "",
+                "status": status,
+                "version": version,
+                "content_hash": hash,
+                "updated_by_device_id": "device-laptop",
+                "updated_at": "2026-05-30T02:00:00Z",
+                "deleted_at": if matches!(status, KnowledgeEntrySyncStatus::Deleted) {
+                    serde_json::Value::String("2026-05-30T02:05:00Z".to_string())
+                } else {
+                    serde_json::Value::Null
+                }
+            }),
+            timestamp: ts(sequence as i64),
+            sequence,
+        }
+    }
+
+    // ---- M2.3 server sync consumer contract tests ----
+
+    #[test]
+    fn server_sync_event_rejects_unsupported_schema_version() {
+        let mut event = knowledge_event(
+            1,
+            ServerSyncOperation::Created,
+            "notes/alpha",
+            "Alpha",
+            KnowledgeEntrySyncStatus::Active,
+            1,
+            "hash-1",
+        );
+        event.schema_version = AGENTOS_SERVER_SYNC_SCHEMA_VERSION + 1;
+
+        let mut projection = KnowledgeSyncProjection::new();
+        let err = projection.apply_event(&event).unwrap_err();
+        assert!(matches!(
+            err,
+            ServerSyncApplyError::UnsupportedSchemaVersion { .. }
+        ));
+        assert_eq!(projection.cursor.last_applied_sequence, 0);
+    }
+
+    #[test]
+    fn knowledge_projection_applies_create_update_delete_and_advances_cursor() {
+        let created = knowledge_event(
+            1,
+            ServerSyncOperation::Created,
+            "notes/alpha",
+            "Alpha",
+            KnowledgeEntrySyncStatus::Active,
+            1,
+            "hash-1",
+        );
+        let updated = knowledge_event(
+            2,
+            ServerSyncOperation::Updated,
+            "notes/alpha",
+            "Alpha v2",
+            KnowledgeEntrySyncStatus::Active,
+            2,
+            "hash-2",
+        );
+        let deleted = knowledge_event(
+            3,
+            ServerSyncOperation::Deleted,
+            "notes/alpha",
+            "Alpha v2",
+            KnowledgeEntrySyncStatus::Deleted,
+            3,
+            "hash-3",
+        );
+
+        let mut projection = KnowledgeSyncProjection::new();
+        projection
+            .apply_events(&[created.clone(), updated.clone(), deleted.clone()])
+            .unwrap();
+
+        let entry = projection.get("notes/alpha").unwrap();
+        assert_eq!(entry.version, 3);
+        assert_eq!(entry.status, KnowledgeEntrySyncStatus::Deleted);
+        assert_eq!(entry.content_hash, "hash-3");
+        assert_eq!(projection.cursor.last_applied_sequence, 3);
+
+        projection.apply_event(&updated).unwrap();
+        let entry = projection.get("notes/alpha").unwrap();
+        assert_eq!(entry.version, 3, "duplicate/stale cursor event is ignored");
+        assert_eq!(projection.cursor.last_applied_sequence, 3);
+    }
+
+    #[test]
+    fn knowledge_projection_ignores_stale_versions_but_advances_cursor() {
+        let mut projection = KnowledgeSyncProjection::new();
+        projection
+            .apply_event(&knowledge_event(
+                1,
+                ServerSyncOperation::Created,
+                "notes/alpha",
+                "Alpha",
+                KnowledgeEntrySyncStatus::Active,
+                2,
+                "hash-2",
+            ))
+            .unwrap();
+        projection
+            .apply_event(&knowledge_event(
+                2,
+                ServerSyncOperation::Updated,
+                "notes/alpha",
+                "Alpha stale",
+                KnowledgeEntrySyncStatus::Active,
+                1,
+                "hash-1",
+            ))
+            .unwrap();
+
+        let entry = projection.get("notes/alpha").unwrap();
+        assert_eq!(entry.version, 2);
+        assert_eq!(entry.title, "Alpha");
+        assert_eq!(projection.cursor.last_applied_sequence, 2);
+    }
+
+    #[test]
+    fn knowledge_projection_detects_same_version_mismatch() {
+        let mut projection = KnowledgeSyncProjection::new();
+        projection
+            .apply_event(&knowledge_event(
+                1,
+                ServerSyncOperation::Created,
+                "notes/alpha",
+                "Alpha",
+                KnowledgeEntrySyncStatus::Active,
+                1,
+                "hash-1",
+            ))
+            .unwrap();
+        let err = projection
+            .apply_event(&knowledge_event(
+                2,
+                ServerSyncOperation::Updated,
+                "notes/alpha",
+                "Alpha divergent",
+                KnowledgeEntrySyncStatus::Active,
+                1,
+                "hash-divergent",
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ServerSyncApplyError::SameVersionMismatch { .. }
+        ));
+        assert_eq!(projection.cursor.last_applied_sequence, 1);
+    }
+
+    #[test]
+    fn knowledge_delete_requires_tombstone_status() {
+        let mut projection = KnowledgeSyncProjection::new();
+        let err = projection
+            .apply_event(&knowledge_event(
+                1,
+                ServerSyncOperation::Deleted,
+                "notes/alpha",
+                "Alpha",
+                KnowledgeEntrySyncStatus::Active,
+                1,
+                "hash-1",
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ServerSyncApplyError::DeleteWithoutTombstone { .. }
+        ));
     }
 
     // ---- Type roundtrip tests ----
