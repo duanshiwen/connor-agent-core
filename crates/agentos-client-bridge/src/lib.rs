@@ -9,7 +9,11 @@ use client_substrate::{
     ClientEventCursor, ClientEventEnvelope, ClientSubstrate, ClientSubstrateError,
 };
 use serde::{Deserialize, Serialize};
-use sync_runtime::{KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncEvent};
+use std::collections::HashMap;
+use sync_runtime::{
+    KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncCursor, ServerSyncEvent,
+    ServerSyncObjectType, ServerSyncOperation,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,6 +178,16 @@ impl AgentOsClientBridge {
         apply_knowledge_sync_pull_response_json(projection_json, pull_response_json)
     }
 
+    /// Apply a full backend `/api/v1/sync/events` response envelope to the general
+    /// client-ready sync projection.
+    pub fn apply_sync_pull_response_json(
+        &self,
+        projection_json: &str,
+        pull_response_json: &str,
+    ) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+        apply_sync_pull_response_json(projection_json, pull_response_json)
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentOsClientBridgeError> {
         self.substrate
             .host_api_for_bridge()
@@ -182,6 +196,123 @@ impl AgentOsClientBridge {
             .map_err(|source| AgentOsClientBridgeError::Substrate {
                 reason: source.to_string(),
             })
+    }
+}
+
+/// Client-ready projection for backend sync events across object families.
+///
+/// The projection is intentionally JSON-first and conservative. It stores last accepted
+/// snapshots by backend object id for non-knowledge object families, while delegating
+/// knowledge merge semantics to `KnowledgeSyncProjection`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClientReadySyncProjection {
+    pub cursor: ServerSyncCursor,
+    #[serde(default)]
+    pub knowledge: KnowledgeSyncProjection,
+    #[serde(default)]
+    pub profiles: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub messages: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub skills: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub agents: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub servers: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub plugins: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub plugin_permissions: HashMap<String, serde_json::Value>,
+}
+
+impl ClientReadySyncProjection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_events(&mut self, events: &[ServerSyncEvent]) -> Result<(), AgentOsClientBridgeError> {
+        for event in events {
+            self.apply_event(event)?;
+        }
+        Ok(())
+    }
+
+    fn apply_event(&mut self, event: &ServerSyncEvent) -> Result<(), AgentOsClientBridgeError> {
+        if !self.cursor.should_apply(event) {
+            return Ok(());
+        }
+        event.ensure_supported()?;
+        match event.object_type {
+            ServerSyncObjectType::Knowledge => {
+                self.knowledge.apply_event(event)?;
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Profile => {
+                require_operation(event, &[ServerSyncOperation::Updated])?;
+                upsert_snapshot(&mut self.profiles, &event.object_id, event.payload.clone());
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Message => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Created,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Deleted,
+                    ],
+                )?;
+                apply_snapshot_operation(&mut self.messages, event);
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Skill => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Enabled,
+                        ServerSyncOperation::Disabled,
+                    ],
+                )?;
+                upsert_snapshot(&mut self.skills, &event.object_id, event.payload.clone());
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Agent => {
+                require_operation(event, &[ServerSyncOperation::Updated])?;
+                upsert_snapshot(&mut self.agents, &event.object_id, event.payload.clone());
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Server => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Added,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Removed,
+                    ],
+                )?;
+                apply_snapshot_operation(&mut self.servers, event);
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Plugin => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Added,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Removed,
+                        ServerSyncOperation::Installed,
+                        ServerSyncOperation::Uninstalled,
+                        ServerSyncOperation::Enabled,
+                        ServerSyncOperation::Disabled,
+                        ServerSyncOperation::PermissionGranted,
+                        ServerSyncOperation::PermissionRevoked,
+                    ],
+                )?;
+                apply_plugin_event(self, event);
+                self.cursor.advance_to(event.sequence);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +369,111 @@ fn apply_knowledge_sync_events(
     };
     projection.apply_events(events)?;
     BridgeResponse::from_serializable(&projection)
+}
+
+/// Apply a full backend `/api/v1/sync/events` JSON response envelope to a
+/// client-ready projection covering all currently supported backend object families.
+pub fn apply_sync_pull_response_json(
+    projection_json: &str,
+    pull_response_json: &str,
+) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+    let response: BackendApiResponse<BackendSyncPullData> =
+        serde_json::from_str(pull_response_json).map_err(|source| {
+            AgentOsClientBridgeError::InvalidArgument {
+                reason: format!("invalid backend sync pull response json: {source}"),
+            }
+        })?;
+    if response.code != 0 {
+        return Err(AgentOsClientBridgeError::InvalidArgument {
+            reason: format!(
+                "backend sync pull response failed: code={} message={}",
+                response.code, response.message
+            ),
+        });
+    }
+    apply_sync_events(projection_json, &response.data.events)
+}
+
+fn apply_sync_events(
+    projection_json: &str,
+    events: &[ServerSyncEvent],
+) -> Result<BridgeResponse, AgentOsClientBridgeError> {
+    let mut projection = if projection_json.trim().is_empty() {
+        ClientReadySyncProjection::new()
+    } else {
+        serde_json::from_str::<ClientReadySyncProjection>(projection_json).map_err(|source| {
+            AgentOsClientBridgeError::InvalidArgument {
+                reason: format!("invalid client-ready sync projection json: {source}"),
+            }
+        })?
+    };
+    projection.apply_events(events)?;
+    BridgeResponse::from_serializable(&projection)
+}
+
+fn require_operation(
+    event: &ServerSyncEvent,
+    allowed: &[ServerSyncOperation],
+) -> Result<(), AgentOsClientBridgeError> {
+    if allowed.iter().any(|operation| operation == &event.operation) {
+        return Ok(());
+    }
+    Err(AgentOsClientBridgeError::ServerSyncApply {
+        reason: format!(
+            "unexpected operation {:?} for object type {:?}",
+            event.operation, event.object_type
+        ),
+    })
+}
+
+fn upsert_snapshot(map: &mut HashMap<String, serde_json::Value>, key: &str, payload: serde_json::Value) {
+    map.insert(key.to_string(), payload);
+}
+
+fn apply_snapshot_operation(map: &mut HashMap<String, serde_json::Value>, event: &ServerSyncEvent) {
+    match event.operation {
+        ServerSyncOperation::Deleted
+        | ServerSyncOperation::Removed
+        | ServerSyncOperation::Uninstalled => {
+            map.remove(&event.object_id);
+        }
+        _ => upsert_snapshot(map, &event.object_id, event.payload.clone()),
+    }
+}
+
+fn apply_plugin_event(projection: &mut ClientReadySyncProjection, event: &ServerSyncEvent) {
+    match event.operation {
+        ServerSyncOperation::PermissionGranted | ServerSyncOperation::PermissionRevoked => {
+            let permission_key = event
+                .payload
+                .get("grant_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    let permission = event
+                        .payload
+                        .get("permission_key")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    format!("{}:{permission}", event.object_id)
+                });
+            if event.operation == ServerSyncOperation::PermissionRevoked {
+                projection.plugin_permissions.remove(&permission_key);
+            } else {
+                projection
+                    .plugin_permissions
+                    .insert(permission_key, event.payload.clone());
+            }
+        }
+        ServerSyncOperation::Uninstalled | ServerSyncOperation::Removed => {
+            projection.plugins.remove(&event.object_id);
+            let prefix = format!("{}:", event.object_id);
+            projection
+                .plugin_permissions
+                .retain(|key, value| key != &event.object_id && !key.starts_with(&prefix) && value.get("installation_id").and_then(|v| v.as_str()) != Some(event.object_id.as_str()));
+        }
+        _ => upsert_snapshot(&mut projection.plugins, &event.object_id, event.payload.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +669,147 @@ mod tests {
                 .title,
             "Backend Envelope"
         );
+    }
+
+    #[test]
+    fn bridge_applies_client_ready_sync_pull_response_json() {
+        let bridge = AgentOsClientBridge::for_local_development().unwrap();
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [
+                    {
+                        "id": "evt-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "skill.enabled",
+                        "schema_version": 1,
+                        "object_type": "skill",
+                        "object_id": "superpowers",
+                        "operation": "enabled",
+                        "source_device_id": "device-a",
+                        "client_event_id": "skill-enable-1",
+                        "payload": {"skill_id": "superpowers", "object_id": "superpowers", "enabled": true, "config": {}, "updated_by_device_id": "device-a"},
+                        "timestamp": "2026-06-01T01:00:00Z",
+                        "sequence": 1
+                    },
+                    {
+                        "id": "evt-2",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "agent.updated",
+                        "schema_version": 1,
+                        "object_type": "agent",
+                        "object_id": "assistant-main",
+                        "operation": "updated",
+                        "source_device_id": "device-a",
+                        "client_event_id": "agent-update-1",
+                        "payload": {"agent_id": "assistant-main", "object_id": "assistant-main", "display_name": "Assistant", "config": {"model": "fast"}},
+                        "timestamp": "2026-06-01T01:01:00Z",
+                        "sequence": 2
+                    },
+                    {
+                        "id": "evt-3",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "server.added",
+                        "schema_version": 1,
+                        "object_type": "server",
+                        "object_id": "server-record-1",
+                        "operation": "added",
+                        "source_device_id": "device-a",
+                        "client_event_id": "server-add-1",
+                        "payload": {"server_id": "primary", "object_id": "server-record-1", "name": "Primary", "base_url": "https://agent.example", "status": "active"},
+                        "timestamp": "2026-06-01T01:02:00Z",
+                        "sequence": 3
+                    },
+                    {
+                        "id": "evt-4",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "plugin.installed",
+                        "schema_version": 1,
+                        "object_type": "plugin",
+                        "object_id": "installation-1",
+                        "operation": "installed",
+                        "source_device_id": "device-a",
+                        "client_event_id": "plugin-install-1",
+                        "payload": {"installation_id": "installation-1", "plugin_id": "plugin-1", "plugin_key": "com.example.hotel", "version_id": "version-1", "status": "active", "track_mode": "latest_approved"},
+                        "timestamp": "2026-06-01T01:03:00Z",
+                        "sequence": 4
+                    },
+                    {
+                        "id": "evt-5",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "plugin.permission_granted",
+                        "schema_version": 1,
+                        "object_type": "plugin",
+                        "object_id": "installation-1",
+                        "operation": "permission_granted",
+                        "source_device_id": "device-a",
+                        "client_event_id": "plugin-grant-1",
+                        "payload": {"installation_id": "installation-1", "grant_id": "grant-1", "permission_key": "plugin.api.call", "plugin_id": "plugin-1", "risk_level": "low", "status": "active"},
+                        "timestamp": "2026-06-01T01:04:00Z",
+                        "sequence": 5
+                    },
+                    {
+                        "id": "evt-6",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "knowledge.created",
+                        "schema_version": 1,
+                        "object_type": "knowledge",
+                        "object_id": "notes/client-ready",
+                        "operation": "created",
+                        "source_device_id": "device-a",
+                        "client_event_id": "knowledge-create-1",
+                        "payload": {
+                            "entry_id": "notes/client-ready",
+                            "object_id": "notes/client-ready",
+                            "title": "Client Ready",
+                            "content_markdown": "# Client Ready",
+                            "summary": "summary",
+                            "tags": ["agentos"],
+                            "metadata": {},
+                            "source_uri": "",
+                            "status": "active",
+                            "version": 1,
+                            "content_hash": "hash-client-ready-1",
+                            "updated_by_device_id": "device-a",
+                            "updated_at": "2026-06-01T01:05:00Z"
+                        },
+                        "timestamp": "2026-06-01T01:05:00Z",
+                        "sequence": 6
+                    }
+                ],
+                "next_after_sequence": 6,
+                "has_more": false,
+                "server_time": 1780275900000i64,
+                "schema_version": 1
+            }
+        });
+
+        let response = bridge
+            .apply_sync_pull_response_json("", &pull_response.to_string())
+            .unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+        assert_eq!(projection.cursor.last_applied_sequence, 6);
+        assert!(projection.skills.contains_key("superpowers"));
+        assert!(projection.agents.contains_key("assistant-main"));
+        assert!(projection.servers.contains_key("server-record-1"));
+        assert_eq!(
+            projection
+                .plugins
+                .get("installation-1")
+                .unwrap()
+                .get("plugin_key")
+                .and_then(|value| value.as_str()),
+            Some("com.example.hotel")
+        );
+        assert!(projection.plugin_permissions.contains_key("grant-1"));
+        assert!(projection.knowledge.entries.contains_key("notes/client-ready"));
     }
 
     #[test]

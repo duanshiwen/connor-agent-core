@@ -1,5 +1,6 @@
 use agentos_client_bridge::{
     apply_knowledge_sync_events_json, apply_knowledge_sync_pull_response_json,
+    apply_sync_pull_response_json,
 };
 use identity_core::{Ed25519CryptoProvider, SignedChallenge};
 use std::ffi::{CStr, CString, c_char};
@@ -94,7 +95,7 @@ pub unsafe extern "C" fn agentos_apply_knowledge_sync_events_json(
 }
 
 /// Applies a full backend `/api/v1/sync/events` response envelope through the
-/// client bridge reducer.
+/// knowledge-only client bridge reducer.
 ///
 /// Arguments:
 /// - `projection_json`: serialized KnowledgeSyncProjection. Empty string starts from empty projection.
@@ -117,6 +118,39 @@ pub unsafe extern "C" fn agentos_apply_knowledge_sync_pull_response_json(
 
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         apply_knowledge_sync_pull_response_inner(projection_json, pull_response_json, error_out)
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            unsafe { set_error(error_out, "panic in agentos ffi") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Applies a full backend `/api/v1/sync/events` response envelope through the
+/// general client-ready sync bridge reducer.
+///
+/// Arguments:
+/// - `projection_json`: serialized ClientReadySyncProjection. Empty string starts from empty projection.
+/// - `pull_response_json`: backend API response shaped as `{code,message,data:{events,...}}`.
+/// - `error_out`: optional allocated error string output.
+///
+/// Returns an allocated BridgeResponse JSON string on success, or null on error.
+/// The returned string must be released with `agentos_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentos_apply_sync_pull_response_json(
+    projection_json: *const c_char,
+    pull_response_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        apply_sync_pull_response_inner(projection_json, pull_response_json, error_out)
     })) {
         Ok(ptr) => ptr,
         Err(_) => {
@@ -212,6 +246,37 @@ unsafe fn apply_knowledge_sync_pull_response_inner(
     pull_response_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
+    unsafe {
+        apply_pull_response_with(
+            projection_json,
+            pull_response_json,
+            error_out,
+            apply_knowledge_sync_pull_response_json,
+        )
+    }
+}
+
+unsafe fn apply_sync_pull_response_inner(
+    projection_json: *const c_char,
+    pull_response_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    unsafe {
+        apply_pull_response_with(
+            projection_json,
+            pull_response_json,
+            error_out,
+            apply_sync_pull_response_json,
+        )
+    }
+}
+
+unsafe fn apply_pull_response_with(
+    projection_json: *const c_char,
+    pull_response_json: *const c_char,
+    error_out: *mut *mut c_char,
+    apply: fn(&str, &str) -> Result<agentos_client_bridge::BridgeResponse, agentos_client_bridge::AgentOsClientBridgeError>,
+) -> *mut c_char {
     if projection_json.is_null() || pull_response_json.is_null() {
         unsafe { set_error(error_out, "null argument") };
         return ptr::null_mut();
@@ -230,7 +295,7 @@ unsafe fn apply_knowledge_sync_pull_response_inner(
             return ptr::null_mut();
         }
     };
-    match apply_knowledge_sync_pull_response_json(projection_json, pull_response_json) {
+    match apply(projection_json, pull_response_json) {
         Ok(response) => bridge_response_to_c_string(response, error_out),
         Err(err) => {
             unsafe { set_error(error_out, &err.to_string()) };
