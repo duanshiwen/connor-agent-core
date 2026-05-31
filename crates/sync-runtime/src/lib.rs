@@ -98,6 +98,7 @@ pub enum ServerSyncObjectType {
     Agent,
     Server,
     Knowledge,
+    Plugin,
 }
 
 /// Backend operation names.
@@ -111,6 +112,10 @@ pub enum ServerSyncOperation {
     Disabled,
     Added,
     Removed,
+    Installed,
+    Uninstalled,
+    PermissionGranted,
+    PermissionRevoked,
 }
 
 /// Personal knowledge entry status carried by backend sync payloads.
