@@ -210,6 +210,8 @@ pub struct ClientReadySyncProjection {
     #[serde(default)]
     pub knowledge: KnowledgeSyncProjection,
     #[serde(default)]
+    pub contacts: HashMap<String, serde_json::Value>,
+    #[serde(default)]
     pub profiles: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub conversations: HashMap<String, serde_json::Value>,
@@ -238,7 +240,10 @@ impl ClientReadySyncProjection {
         Self::default()
     }
 
-    pub fn apply_events(&mut self, events: &[ServerSyncEvent]) -> Result<(), AgentOsClientBridgeError> {
+    pub fn apply_events(
+        &mut self,
+        events: &[ServerSyncEvent],
+    ) -> Result<(), AgentOsClientBridgeError> {
         for event in events {
             self.apply_event(event)?;
         }
@@ -260,6 +265,18 @@ impl ClientReadySyncProjection {
                 upsert_snapshot(&mut self.profiles, &event.object_id, event.payload.clone());
                 self.cursor.advance_to(event.sequence);
             }
+            ServerSyncObjectType::Contact => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Created,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Deleted,
+                    ],
+                )?;
+                apply_snapshot_operation(&mut self.contacts, event);
+                self.cursor.advance_to(event.sequence);
+            }
             ServerSyncObjectType::Conversation => {
                 require_operation(
                     event,
@@ -270,9 +287,17 @@ impl ClientReadySyncProjection {
                     ],
                 )?;
                 if event.operation == ServerSyncOperation::Read {
-                    upsert_snapshot(&mut self.conversation_reads, &event.object_id, event.payload.clone());
+                    upsert_snapshot(
+                        &mut self.conversation_reads,
+                        &event.object_id,
+                        event.payload.clone(),
+                    );
                 } else {
-                    upsert_snapshot(&mut self.conversations, &event.object_id, event.payload.clone());
+                    upsert_snapshot(
+                        &mut self.conversations,
+                        &event.object_id,
+                        event.payload.clone(),
+                    );
                 }
                 self.cursor.advance_to(event.sequence);
             }
@@ -460,7 +485,10 @@ fn require_operation(
     event: &ServerSyncEvent,
     allowed: &[ServerSyncOperation],
 ) -> Result<(), AgentOsClientBridgeError> {
-    if allowed.iter().any(|operation| operation == &event.operation) {
+    if allowed
+        .iter()
+        .any(|operation| operation == &event.operation)
+    {
         return Ok(());
     }
     Err(AgentOsClientBridgeError::ServerSyncApply {
@@ -471,7 +499,11 @@ fn require_operation(
     })
 }
 
-fn upsert_snapshot(map: &mut HashMap<String, serde_json::Value>, key: &str, payload: serde_json::Value) {
+fn upsert_snapshot(
+    map: &mut HashMap<String, serde_json::Value>,
+    key: &str,
+    payload: serde_json::Value,
+) {
     map.insert(key.to_string(), payload);
 }
 
@@ -522,11 +554,18 @@ fn apply_plugin_event(projection: &mut ClientReadySyncProjection, event: &Server
         ServerSyncOperation::Uninstalled | ServerSyncOperation::Removed => {
             projection.plugins.remove(&event.object_id);
             let prefix = format!("{}:", event.object_id);
-            projection
-                .plugin_permissions
-                .retain(|key, value| key != &event.object_id && !key.starts_with(&prefix) && value.get("installation_id").and_then(|v| v.as_str()) != Some(event.object_id.as_str()));
+            projection.plugin_permissions.retain(|key, value| {
+                key != &event.object_id
+                    && !key.starts_with(&prefix)
+                    && value.get("installation_id").and_then(|v| v.as_str())
+                        != Some(event.object_id.as_str())
+            });
         }
-        _ => upsert_snapshot(&mut projection.plugins, &event.object_id, event.payload.clone()),
+        _ => upsert_snapshot(
+            &mut projection.plugins,
+            &event.object_id,
+            event.payload.clone(),
+        ),
     }
 }
 
@@ -863,7 +902,12 @@ mod tests {
             Some("com.example.hotel")
         );
         assert!(projection.plugin_permissions.contains_key("grant-1"));
-        assert!(projection.knowledge.entries.contains_key("notes/client-ready"));
+        assert!(
+            projection
+                .knowledge
+                .entries
+                .contains_key("notes/client-ready")
+        );
     }
 
     #[test]
@@ -990,9 +1034,21 @@ mod tests {
         let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
         assert_eq!(projection.cursor.last_applied_sequence, 7);
         assert!(projection.conversations.contains_key("conversation-1"));
-        assert!(projection.participants.contains_key("conversation-1:user-1"));
-        assert!(projection.conversation_reads.contains_key("conversation-1:user-1"));
-        assert!(!projection.message_reactions.contains_key("message-1:user-1:👍"));
+        assert!(
+            projection
+                .participants
+                .contains_key("conversation-1:user-1")
+        );
+        assert!(
+            projection
+                .conversation_reads
+                .contains_key("conversation-1:user-1")
+        );
+        assert!(
+            !projection
+                .message_reactions
+                .contains_key("message-1:user-1:👍")
+        );
         assert_eq!(
             projection
                 .skills

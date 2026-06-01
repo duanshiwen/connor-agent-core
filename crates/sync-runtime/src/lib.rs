@@ -100,6 +100,7 @@ pub enum ServerSyncObjectType {
     Agent,
     Server,
     Knowledge,
+    Contact,
     Plugin,
 }
 
