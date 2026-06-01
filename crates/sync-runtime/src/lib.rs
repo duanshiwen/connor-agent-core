@@ -93,6 +93,8 @@ impl ServerSyncEvent {
 #[serde(rename_all = "snake_case")]
 pub enum ServerSyncObjectType {
     Profile,
+    Conversation,
+    Participant,
     Message,
     Skill,
     Agent,
@@ -116,6 +118,9 @@ pub enum ServerSyncOperation {
     Uninstalled,
     PermissionGranted,
     PermissionRevoked,
+    Read,
+    ReactionAdded,
+    ReactionRemoved,
 }
 
 /// Personal knowledge entry status carried by backend sync payloads.
