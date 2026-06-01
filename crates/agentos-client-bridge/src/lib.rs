@@ -212,7 +212,15 @@ pub struct ClientReadySyncProjection {
     #[serde(default)]
     pub profiles: HashMap<String, serde_json::Value>,
     #[serde(default)]
+    pub conversations: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub participants: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub conversation_reads: HashMap<String, serde_json::Value>,
+    #[serde(default)]
     pub messages: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub message_reactions: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub skills: HashMap<String, serde_json::Value>,
     #[serde(default)]
@@ -252,6 +260,34 @@ impl ClientReadySyncProjection {
                 upsert_snapshot(&mut self.profiles, &event.object_id, event.payload.clone());
                 self.cursor.advance_to(event.sequence);
             }
+            ServerSyncObjectType::Conversation => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Created,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Read,
+                    ],
+                )?;
+                if event.operation == ServerSyncOperation::Read {
+                    upsert_snapshot(&mut self.conversation_reads, &event.object_id, event.payload.clone());
+                } else {
+                    upsert_snapshot(&mut self.conversations, &event.object_id, event.payload.clone());
+                }
+                self.cursor.advance_to(event.sequence);
+            }
+            ServerSyncObjectType::Participant => {
+                require_operation(
+                    event,
+                    &[
+                        ServerSyncOperation::Added,
+                        ServerSyncOperation::Updated,
+                        ServerSyncOperation::Removed,
+                    ],
+                )?;
+                apply_snapshot_operation(&mut self.participants, event);
+                self.cursor.advance_to(event.sequence);
+            }
             ServerSyncObjectType::Message => {
                 require_operation(
                     event,
@@ -259,9 +295,16 @@ impl ClientReadySyncProjection {
                         ServerSyncOperation::Created,
                         ServerSyncOperation::Updated,
                         ServerSyncOperation::Deleted,
+                        ServerSyncOperation::ReactionAdded,
+                        ServerSyncOperation::ReactionRemoved,
                     ],
                 )?;
-                apply_snapshot_operation(&mut self.messages, event);
+                match event.operation {
+                    ServerSyncOperation::ReactionAdded | ServerSyncOperation::ReactionRemoved => {
+                        apply_reaction_operation(&mut self.message_reactions, event);
+                    }
+                    _ => apply_snapshot_operation(&mut self.messages, event),
+                }
                 self.cursor.advance_to(event.sequence);
             }
             ServerSyncObjectType::Skill => {
@@ -271,9 +314,11 @@ impl ClientReadySyncProjection {
                         ServerSyncOperation::Updated,
                         ServerSyncOperation::Enabled,
                         ServerSyncOperation::Disabled,
+                        ServerSyncOperation::Installed,
+                        ServerSyncOperation::Uninstalled,
                     ],
                 )?;
-                upsert_snapshot(&mut self.skills, &event.object_id, event.payload.clone());
+                apply_snapshot_operation(&mut self.skills, event);
                 self.cursor.advance_to(event.sequence);
             }
             ServerSyncObjectType::Agent => {
@@ -435,6 +480,15 @@ fn apply_snapshot_operation(map: &mut HashMap<String, serde_json::Value>, event:
         ServerSyncOperation::Deleted
         | ServerSyncOperation::Removed
         | ServerSyncOperation::Uninstalled => {
+            map.remove(&event.object_id);
+        }
+        _ => upsert_snapshot(map, &event.object_id, event.payload.clone()),
+    }
+}
+
+fn apply_reaction_operation(map: &mut HashMap<String, serde_json::Value>, event: &ServerSyncEvent) {
+    match event.operation {
+        ServerSyncOperation::ReactionRemoved => {
             map.remove(&event.object_id);
         }
         _ => upsert_snapshot(map, &event.object_id, event.payload.clone()),
@@ -810,6 +864,145 @@ mod tests {
         );
         assert!(projection.plugin_permissions.contains_key("grant-1"));
         assert!(projection.knowledge.entries.contains_key("notes/client-ready"));
+    }
+
+    #[test]
+    fn bridge_applies_conversation_participant_reaction_and_skill_installation_events() {
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [
+                    {
+                        "id": "evt-conversation-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "conversation.created",
+                        "schema_version": 1,
+                        "object_type": "conversation",
+                        "object_id": "conversation-1",
+                        "operation": "created",
+                        "source_device_id": "device-a",
+                        "client_event_id": "conversation-create-1",
+                        "payload": {"object_id": "conversation-1", "conversation_id": "conversation-1", "type": "private", "name": "DM", "created_by": "user-1", "created_at": "2026-06-01T02:00:00Z", "updated_at": "2026-06-01T02:00:00Z"},
+                        "timestamp": "2026-06-01T02:00:00Z",
+                        "sequence": 1
+                    },
+                    {
+                        "id": "evt-participant-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "participant.added",
+                        "schema_version": 1,
+                        "object_type": "participant",
+                        "object_id": "conversation-1:user-1",
+                        "operation": "added",
+                        "source_device_id": "device-a",
+                        "client_event_id": "participant-add-1",
+                        "payload": {"object_id": "conversation-1:user-1", "conversation_id": "conversation-1", "user_id": "user-1", "role": "member", "status": "active", "joined_at": "2026-06-01T02:00:00Z"},
+                        "timestamp": "2026-06-01T02:01:00Z",
+                        "sequence": 2
+                    },
+                    {
+                        "id": "evt-conversation-read-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "conversation.read",
+                        "schema_version": 1,
+                        "object_type": "conversation",
+                        "object_id": "conversation-1:user-1",
+                        "operation": "read",
+                        "source_device_id": "device-a",
+                        "client_event_id": "conversation-read-1",
+                        "payload": {"object_id": "conversation-1:user-1", "conversation_id": "conversation-1", "user_id": "user-1", "last_read_message_id": "message-1", "last_read_at": "2026-06-01T02:02:00Z"},
+                        "timestamp": "2026-06-01T02:02:00Z",
+                        "sequence": 3
+                    },
+                    {
+                        "id": "evt-reaction-add-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "message.reaction_added",
+                        "schema_version": 1,
+                        "object_type": "message",
+                        "object_id": "message-1:user-1:👍",
+                        "operation": "reaction_added",
+                        "source_device_id": "device-a",
+                        "client_event_id": "reaction-add-1",
+                        "payload": {"object_id": "message-1:user-1:👍", "conversation_id": "conversation-1", "message_id": "message-1", "user_id": "user-1", "emoji": "👍", "created_at": "2026-06-01T02:03:00Z"},
+                        "timestamp": "2026-06-01T02:03:00Z",
+                        "sequence": 4
+                    },
+                    {
+                        "id": "evt-reaction-remove-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "message.reaction_removed",
+                        "schema_version": 1,
+                        "object_type": "message",
+                        "object_id": "message-1:user-1:👍",
+                        "operation": "reaction_removed",
+                        "source_device_id": "device-a",
+                        "client_event_id": "reaction-remove-1",
+                        "payload": {"object_id": "message-1:user-1:👍", "conversation_id": "conversation-1", "message_id": "message-1", "user_id": "user-1", "emoji": "👍"},
+                        "timestamp": "2026-06-01T02:04:00Z",
+                        "sequence": 5
+                    },
+                    {
+                        "id": "evt-skill-install-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "skill.installed",
+                        "schema_version": 1,
+                        "object_type": "skill",
+                        "object_id": "installation-1",
+                        "operation": "installed",
+                        "source_device_id": "device-a",
+                        "client_event_id": "skill-install-1",
+                        "payload": {"object_id": "installation-1", "installation_id": "installation-1", "skill_id": "skill-1", "skill_key": "research.brief", "version_id": "version-1", "track_mode": "latest", "status": "active", "config": {}},
+                        "timestamp": "2026-06-01T02:05:00Z",
+                        "sequence": 6
+                    },
+                    {
+                        "id": "evt-skill-uninstall-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "skill.uninstalled",
+                        "schema_version": 1,
+                        "object_type": "skill",
+                        "object_id": "installation-removed",
+                        "operation": "uninstalled",
+                        "source_device_id": "device-a",
+                        "client_event_id": "skill-uninstall-1",
+                        "payload": {"object_id": "installation-removed", "installation_id": "installation-removed", "skill_id": "skill-removed", "skill_key": "removed.skill", "status": "uninstalled"},
+                        "timestamp": "2026-06-01T02:06:00Z",
+                        "sequence": 7
+                    }
+                ],
+                "next_after_sequence": 7,
+                "has_more": false,
+                "server_time": 1780279560000i64,
+                "schema_version": 1
+            }
+        });
+
+        let response = apply_sync_pull_response_json("", &pull_response.to_string()).unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+        assert_eq!(projection.cursor.last_applied_sequence, 7);
+        assert!(projection.conversations.contains_key("conversation-1"));
+        assert!(projection.participants.contains_key("conversation-1:user-1"));
+        assert!(projection.conversation_reads.contains_key("conversation-1:user-1"));
+        assert!(!projection.message_reactions.contains_key("message-1:user-1:👍"));
+        assert_eq!(
+            projection
+                .skills
+                .get("installation-1")
+                .unwrap()
+                .get("skill_key")
+                .and_then(|value| value.as_str()),
+            Some("research.brief")
+        );
+        assert!(!projection.skills.contains_key("installation-removed"));
     }
 
     #[test]
