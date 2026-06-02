@@ -11,8 +11,8 @@ use client_substrate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use sync_runtime::{
-    KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncCursor, ServerSyncEvent,
-    ServerSyncObjectType, ServerSyncOperation,
+    KnowledgeEntrySyncStatus, KnowledgeSyncProjection, ServerSyncApplyError, ServerSyncCursor,
+    ServerSyncEvent, ServerSyncObjectType, ServerSyncOperation,
 };
 use thiserror::Error;
 
@@ -83,6 +83,56 @@ impl BridgeResponse {
             })?,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSkillInstructionBundle {
+    pub installation_id: String,
+    pub skill_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    pub instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskContext {
+    pub user_task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_skill_key: Option<String>,
+    pub developer_instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SageInvocationRequest {
+    pub plugin_key: String,
+    pub permission_key: String,
+    pub risk_level: RuntimeRiskLevel,
+    #[serde(default)]
+    pub user_confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SageRuntimeDecision {
+    Allow,
+    RequiresConfirmation { reason: String },
+    Deny { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeKnowledgeCitation {
+    pub entry_id: String,
+    pub title: String,
+    pub excerpt: String,
+    pub content_hash: String,
 }
 
 #[derive(Clone)]
@@ -238,6 +288,146 @@ pub struct ClientReadySyncProjection {
 impl ClientReadySyncProjection {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds task-scoped runtime instruction bundles from active Skill installation
+    /// snapshots. This is the Stage 5B consumption boundary: hosts can prove that
+    /// backend Skill Hub installation state has reached the Agent Runtime before
+    /// acking the sync cursor.
+    pub fn skill_runtime_bundles(&self) -> Vec<RuntimeSkillInstructionBundle> {
+        let mut bundles: Vec<RuntimeSkillInstructionBundle> = self
+            .skills
+            .iter()
+            .filter_map(|(installation_id, payload)| {
+                if !is_active_payload(payload) {
+                    return None;
+                }
+                let skill_key = payload
+                    .get("skill_key")
+                    .or_else(|| payload.get("skill_id"))
+                    .and_then(|value| value.as_str())?
+                    .to_string();
+                let instructions = extract_instruction_texts(payload);
+                if instructions.is_empty() {
+                    return None;
+                }
+                Some(RuntimeSkillInstructionBundle {
+                    installation_id: installation_id.clone(),
+                    skill_key,
+                    version_id: payload
+                        .get("version_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    instructions,
+                })
+            })
+            .collect();
+        bundles.sort_by(|left, right| left.skill_key.cmp(&right.skill_key));
+        bundles
+    }
+
+    pub fn apply_skill_to_task_context(
+        &self,
+        skill_key: &str,
+        user_task: impl Into<String>,
+    ) -> Result<RuntimeTaskContext, AgentOsClientBridgeError> {
+        let bundle = self
+            .skill_runtime_bundles()
+            .into_iter()
+            .find(|bundle| bundle.skill_key == skill_key)
+            .ok_or_else(|| AgentOsClientBridgeError::InvalidArgument {
+                reason: format!("active skill `{skill_key}` is not installed in projection"),
+            })?;
+        Ok(RuntimeTaskContext {
+            user_task: user_task.into(),
+            applied_skill_key: Some(bundle.skill_key),
+            developer_instructions: bundle.instructions,
+        })
+    }
+
+    /// Evaluates whether a projected SAGE plugin installation can execute a
+    /// requested permission. The backend remains the source of truth for grants;
+    /// the client/runtime is the execution point that must deny, allow, or require
+    /// confirmation before calling a plugin flow.
+    pub fn evaluate_sage_invocation(
+        &self,
+        request: &SageInvocationRequest,
+    ) -> SageRuntimeDecision {
+        let Some((installation_id, _plugin)) = self.plugins.iter().find(|(_, payload)| {
+            is_active_payload(payload)
+                && payload
+                    .get("plugin_key")
+                    .and_then(|value| value.as_str())
+                    == Some(request.plugin_key.as_str())
+        }) else {
+            return SageRuntimeDecision::Deny {
+                reason: "plugin_not_installed".to_string(),
+            };
+        };
+
+        let Some(grant) = self.plugin_permissions.values().find(|payload| {
+            is_active_payload(payload)
+                && payload
+                    .get("installation_id")
+                    .and_then(|value| value.as_str())
+                    == Some(installation_id.as_str())
+                && payload
+                    .get("permission_key")
+                    .and_then(|value| value.as_str())
+                    == Some(request.permission_key.as_str())
+        }) else {
+            return SageRuntimeDecision::Deny {
+                reason: "permission_not_granted".to_string(),
+            };
+        };
+
+        let requires_confirmation = request.risk_level == RuntimeRiskLevel::High
+            || grant
+                .get("requires_confirmation")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            || grant
+                .get("risk_level")
+                .and_then(|value| value.as_str())
+                == Some("high");
+        if requires_confirmation && !request.user_confirmed {
+            return SageRuntimeDecision::RequiresConfirmation {
+                reason: "high_risk_action_requires_confirmation".to_string(),
+            };
+        }
+        SageRuntimeDecision::Allow
+    }
+
+    /// Returns simple citation-ready knowledge context from the projected personal
+    /// knowledge store. Stage 5B intentionally proves the runtime consumption loop
+    /// first; richer chunking/reranking can follow after the loop exists.
+    pub fn retrieve_knowledge_context(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<RuntimeKnowledgeCitation> {
+        let query = query.to_lowercase();
+        let mut citations: Vec<RuntimeKnowledgeCitation> = self
+            .knowledge
+            .entries
+            .values()
+            .filter(|entry| entry.status == KnowledgeEntrySyncStatus::Active)
+            .filter(|entry| {
+                query.trim().is_empty()
+                    || entry.title.to_lowercase().contains(&query)
+                    || entry.content_markdown.to_lowercase().contains(&query)
+                    || entry.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
+            })
+            .map(|entry| RuntimeKnowledgeCitation {
+                entry_id: entry.entry_id.clone(),
+                title: entry.title.clone(),
+                excerpt: excerpt(&entry.content_markdown, 180),
+                content_hash: entry.content_hash.clone(),
+            })
+            .collect();
+        citations.sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
+        citations.truncate(limit);
+        citations
     }
 
     pub fn apply_events(
@@ -525,6 +715,46 @@ fn apply_reaction_operation(map: &mut HashMap<String, serde_json::Value>, event:
         }
         _ => upsert_snapshot(map, &event.object_id, event.payload.clone()),
     }
+}
+
+fn is_active_payload(payload: &serde_json::Value) -> bool {
+    !matches!(
+        payload.get("status").and_then(|value| value.as_str()),
+        Some("disabled" | "deleted" | "removed" | "uninstalled" | "inactive")
+    )
+}
+
+fn extract_instruction_texts(payload: &serde_json::Value) -> Vec<String> {
+    if let Some(instructions) = payload.get("runtime_instructions").and_then(|value| value.as_array()) {
+        return instructions
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    if let Some(instruction) = payload.get("runtime_instruction").and_then(|value| value.as_str()) {
+        let instruction = instruction.trim();
+        if !instruction.is_empty() {
+            return vec![instruction.to_string()];
+        }
+    }
+    if let Some(entrypoint) = payload.get("entrypoint_content").and_then(|value| value.as_str()) {
+        let entrypoint = entrypoint.trim();
+        if !entrypoint.is_empty() {
+            return vec![entrypoint.to_string()];
+        }
+    }
+    Vec::new()
+}
+
+fn excerpt(content: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in content.trim().chars().take(max_chars) {
+        out.push(ch);
+    }
+    out
 }
 
 fn apply_plugin_event(projection: &mut ClientReadySyncProjection, event: &ServerSyncEvent) {
@@ -1059,6 +1289,213 @@ mod tests {
             Some("research.brief")
         );
         assert!(!projection.skills.contains_key("installation-removed"));
+    }
+
+    #[test]
+    fn stage5b_skill_sync_projection_reaches_runtime_task_context() {
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [{
+                    "id": "evt-skill-stage5b-1",
+                    "user_id": "user-1",
+                    "device_id": "device-b",
+                    "event_type": "skill.installed",
+                    "schema_version": 1,
+                    "object_type": "skill",
+                    "object_id": "install-research-brief",
+                    "operation": "installed",
+                    "source_device_id": "device-a",
+                    "client_event_id": "install-research-brief-1",
+                    "payload": {
+                        "object_id": "install-research-brief",
+                        "installation_id": "install-research-brief",
+                        "skill_key": "research.brief",
+                        "version_id": "version-1",
+                        "status": "active",
+                        "runtime_instructions": [
+                            "Write a research brief with Findings, Evidence, Uncertainty, and Next Actions sections."
+                        ]
+                    },
+                    "timestamp": "2026-06-02T02:00:00Z",
+                    "sequence": 1
+                }],
+                "next_after_sequence": 1,
+                "has_more": false,
+                "server_time": 1780336800000_i64,
+                "schema_version": 1
+            }
+        });
+
+        let response = apply_sync_pull_response_json("", &pull_response.to_string()).unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+        let context = projection
+            .apply_skill_to_task_context("research.brief", "Analyze this article")
+            .unwrap();
+        assert_eq!(context.applied_skill_key.as_deref(), Some("research.brief"));
+        assert!(context.developer_instructions[0].contains("research brief"));
+
+        let uninstall = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [{
+                    "id": "evt-skill-stage5b-2",
+                    "user_id": "user-1",
+                    "device_id": "device-b",
+                    "event_type": "skill.uninstalled",
+                    "schema_version": 1,
+                    "object_type": "skill",
+                    "object_id": "install-research-brief",
+                    "operation": "uninstalled",
+                    "source_device_id": "device-a",
+                    "client_event_id": "uninstall-research-brief-1",
+                    "payload": {"installation_id": "install-research-brief", "skill_key": "research.brief", "status": "uninstalled"},
+                    "timestamp": "2026-06-02T02:01:00Z",
+                    "sequence": 2
+                }],
+                "next_after_sequence": 2,
+                "has_more": false,
+                "server_time": 1780336860000_i64,
+                "schema_version": 1
+            }
+        });
+        let response = apply_sync_pull_response_json(&response.json, &uninstall.to_string()).unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+        assert!(projection.skill_runtime_bundles().is_empty());
+        assert!(projection
+            .apply_skill_to_task_context("research.brief", "Analyze this article")
+            .is_err());
+    }
+
+    #[test]
+    fn stage5b_sage_policy_projection_drives_runtime_decision() {
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [
+                    {
+                        "id": "evt-plugin-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "plugin.installed",
+                        "schema_version": 1,
+                        "object_type": "plugin",
+                        "object_id": "calendar-installation",
+                        "operation": "installed",
+                        "source_device_id": "device-a",
+                        "client_event_id": "plugin-install-1",
+                        "payload": {"installation_id": "calendar-installation", "plugin_key": "mock.calendar", "status": "active"},
+                        "timestamp": "2026-06-02T02:10:00Z",
+                        "sequence": 1
+                    },
+                    {
+                        "id": "evt-plugin-grant-1",
+                        "user_id": "user-1",
+                        "device_id": "device-b",
+                        "event_type": "plugin.permission_granted",
+                        "schema_version": 1,
+                        "object_type": "plugin",
+                        "object_id": "calendar-installation",
+                        "operation": "permission_granted",
+                        "source_device_id": "device-a",
+                        "client_event_id": "plugin-grant-1",
+                        "payload": {"installation_id": "calendar-installation", "grant_id": "grant-calendar-write", "permission_key": "calendar.write", "risk_level": "high", "status": "active"},
+                        "timestamp": "2026-06-02T02:11:00Z",
+                        "sequence": 2
+                    }
+                ],
+                "next_after_sequence": 2,
+                "has_more": false,
+                "server_time": 1780337460000_i64,
+                "schema_version": 1
+            }
+        });
+        let response = apply_sync_pull_response_json("", &pull_response.to_string()).unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+
+        let request = SageInvocationRequest {
+            plugin_key: "mock.calendar".to_string(),
+            permission_key: "calendar.write".to_string(),
+            risk_level: RuntimeRiskLevel::High,
+            user_confirmed: false,
+        };
+        assert_eq!(
+            projection.evaluate_sage_invocation(&request),
+            SageRuntimeDecision::RequiresConfirmation {
+                reason: "high_risk_action_requires_confirmation".to_string()
+            }
+        );
+
+        let confirmed = SageInvocationRequest { user_confirmed: true, ..request };
+        assert_eq!(
+            projection.evaluate_sage_invocation(&confirmed),
+            SageRuntimeDecision::Allow
+        );
+
+        let denied = SageInvocationRequest {
+            plugin_key: "mock.calendar".to_string(),
+            permission_key: "calendar.delete".to_string(),
+            risk_level: RuntimeRiskLevel::High,
+            user_confirmed: true,
+        };
+        assert_eq!(
+            projection.evaluate_sage_invocation(&denied),
+            SageRuntimeDecision::Deny {
+                reason: "permission_not_granted".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stage5b_knowledge_projection_supplies_runtime_citations() {
+        let pull_response = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "events": [{
+                    "id": "evt-kb-runtime-1",
+                    "user_id": "user-1",
+                    "device_id": "device-b",
+                    "event_type": "knowledge.created",
+                    "schema_version": 1,
+                    "object_type": "knowledge",
+                    "object_id": "notes/agentos-stage5b",
+                    "operation": "created",
+                    "source_device_id": "device-a",
+                    "client_event_id": "knowledge-create-1",
+                    "payload": {
+                        "entry_id": "notes/agentos-stage5b",
+                        "object_id": "notes/agentos-stage5b",
+                        "title": "Stage 5B Runtime Consumption Loop",
+                        "content_markdown": "AgentOS Stage 5B turns backend control-plane state into runtime behavior with Skill, SAGE, and KB loops.",
+                        "summary": "summary",
+                        "tags": ["agentos", "runtime"],
+                        "metadata": {"collection_id": "kb-agentos"},
+                        "source_uri": "",
+                        "status": "active",
+                        "version": 1,
+                        "content_hash": "hash-stage5b-1",
+                        "updated_by_device_id": "device-a",
+                        "updated_at": "2026-06-02T02:20:00Z"
+                    },
+                    "timestamp": "2026-06-02T02:20:01Z",
+                    "sequence": 1
+                }],
+                "next_after_sequence": 1,
+                "has_more": false,
+                "server_time": 1780338001000_i64,
+                "schema_version": 1
+            }
+        });
+        let response = apply_sync_pull_response_json("", &pull_response.to_string()).unwrap();
+        let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
+        let citations = projection.retrieve_knowledge_context("runtime", 3);
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].entry_id, "notes/agentos-stage5b");
+        assert!(citations[0].excerpt.contains("runtime behavior"));
     }
 
     #[test]
