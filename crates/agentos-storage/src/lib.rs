@@ -21,8 +21,8 @@ pub use artifact_store::{
 pub use backup::{BackupFileEntry, BackupManifest, BackupReport, RestoreReport, StorageBackup};
 pub use knowledge_engine_store::{
     FsKnowledgeEngineStore, KnowledgeBlobIntegrity, KnowledgeBlobMetadataRecord,
-    KnowledgeBlobPutReport, KnowledgeBlobStorageRef, KnowledgeLogAppendReport,
-    KnowledgeProjectionWriteReport, KnowledgeRecordProjectionKind,
+    KnowledgeBlobPutReport, KnowledgeBlobStorageRef, KnowledgeChainedLogAppendReport,
+    KnowledgeLogAppendReport, KnowledgeProjectionWriteReport, KnowledgeRecordProjectionKind,
 };
 pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
@@ -124,6 +124,9 @@ pub enum StorageError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("knowledge engine record shape error at {path}: {reason}")]
+    KnowledgeEngineRecordShape { path: PathBuf, reason: String },
 
     #[error("invalid knowledge blob sha256 hash: {blob_hash}")]
     InvalidKnowledgeBlobHash { blob_hash: String },

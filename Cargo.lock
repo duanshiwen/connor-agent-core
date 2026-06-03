@@ -201,6 +201,7 @@ dependencies = [
  "conversation-core",
  "conversation-journal",
  "conversation-kernel",
+ "knowledge-entity",
  "serde",
  "serde_json",
  "sha2",

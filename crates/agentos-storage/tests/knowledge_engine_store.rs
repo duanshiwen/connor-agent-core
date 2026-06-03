@@ -157,3 +157,85 @@ fn empty_projection_read_returns_empty_vec() {
         .unwrap();
     assert!(loaded.is_empty());
 }
+
+#[test]
+fn chained_event_append_sets_prev_and_current_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = AgentOsStorage::init(dir.path()).unwrap();
+    let store = FsKnowledgeEngineStore::for_storage(&storage).unwrap();
+    let ts = Utc.with_ymd_and_hms(2026, 6, 3, 10, 30, 0).unwrap();
+
+    let first = store
+        .append_event_chained(
+            ts,
+            json!({
+                "event_id": "evt-1",
+                "event_type": "object.created",
+                "timestamp": ts,
+                "payload": { "object_id": "obj-mass" }
+            }),
+        )
+        .unwrap();
+    let second = store
+        .append_event_chained(
+            ts,
+            json!({
+                "event_id": "evt-2",
+                "event_type": "attribute.value.verified",
+                "timestamp": ts,
+                "payload": { "object_id": "obj-mass", "attribute_key": "unit" }
+            }),
+        )
+        .unwrap();
+
+    assert!(first.record["prev_event_hash"].is_null());
+    let first_hash = first.record["event_hash"].as_str().unwrap();
+    assert!(first_hash.starts_with("sha256:"));
+    assert_eq!(second.record["prev_event_hash"], first.record["event_hash"]);
+    assert_ne!(second.record["event_hash"], first.record["event_hash"]);
+
+    let events: Vec<serde_json::Value> = store.read_events(2026, 6).unwrap();
+    assert_eq!(events[0], first.record);
+    assert_eq!(events[1], second.record);
+}
+
+#[test]
+fn chained_audit_append_sets_prev_and_current_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = AgentOsStorage::init(dir.path()).unwrap();
+    let store = FsKnowledgeEngineStore::for_storage(&storage).unwrap();
+    let ts = Utc.with_ymd_and_hms(2026, 6, 3, 10, 40, 0).unwrap();
+
+    let first = store
+        .append_audit_chained(
+            ts,
+            json!({
+                "audit_id": "aud-1",
+                "operation_type": "query",
+                "timestamp": ts,
+                "result": { "status": "returned" }
+            }),
+        )
+        .unwrap();
+    let second = store
+        .append_audit_chained(
+            ts,
+            json!({
+                "audit_id": "aud-2",
+                "operation_type": "update_attribute",
+                "timestamp": ts,
+                "result": { "status": "committed" }
+            }),
+        )
+        .unwrap();
+
+    assert!(first.record["prev_audit_hash"].is_null());
+    assert!(
+        first.record["audit_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(second.record["prev_audit_hash"], first.record["audit_hash"]);
+    assert_ne!(second.record["audit_hash"], first.record["audit_hash"]);
+}

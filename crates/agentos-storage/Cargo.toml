@@ -19,5 +19,6 @@ thiserror.workspace = true
 sha2 = "0.10"
 
 [dev-dependencies]
+knowledge-entity = { path = "../knowledge-entity" }
 tempfile.workspace = true
 tokio.workspace = true

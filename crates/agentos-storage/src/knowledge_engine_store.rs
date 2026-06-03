@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{AgentOsStorage, StorageError, StorageResult, create_dir_all};
@@ -71,6 +72,12 @@ pub struct KnowledgeLogAppendReport {
     pub path: PathBuf,
     pub byte_len: u64,
     pub line_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeChainedLogAppendReport {
+    pub append: KnowledgeLogAppendReport,
+    pub record: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +143,15 @@ impl FsKnowledgeEngineStore {
         append_jsonl(&path, event)
     }
 
+    pub fn append_event_chained(
+        &self,
+        timestamp: DateTime<Utc>,
+        event: Value,
+    ) -> StorageResult<KnowledgeChainedLogAppendReport> {
+        let path = self.segment_path("events", timestamp, EVENT_SEGMENT_FILE);
+        append_jsonl_chained(&path, event, "prev_event_hash", "event_hash")
+    }
+
     pub fn append_audit<T: Serialize>(
         &self,
         timestamp: DateTime<Utc>,
@@ -143,6 +159,15 @@ impl FsKnowledgeEngineStore {
     ) -> StorageResult<KnowledgeLogAppendReport> {
         let path = self.segment_path("audit", timestamp, AUDIT_SEGMENT_FILE);
         append_jsonl(&path, audit)
+    }
+
+    pub fn append_audit_chained(
+        &self,
+        timestamp: DateTime<Utc>,
+        audit: Value,
+    ) -> StorageResult<KnowledgeChainedLogAppendReport> {
+        let path = self.segment_path("audit", timestamp, AUDIT_SEGMENT_FILE);
+        append_jsonl_chained(&path, audit, "prev_audit_hash", "audit_hash")
     }
 
     pub fn read_events<T: DeserializeOwned>(&self, year: i32, month: u32) -> StorageResult<Vec<T>> {
@@ -275,6 +300,71 @@ impl FsKnowledgeEngineStore {
             .join(&hash_hex[2..4])
             .join(format!("{hash_hex}.{BLOB_META_EXTENSION}"))
     }
+}
+
+fn append_jsonl_chained(
+    path: &Path,
+    mut record: Value,
+    prev_hash_field: &str,
+    hash_field: &str,
+) -> StorageResult<KnowledgeChainedLogAppendReport> {
+    let prev_hash = latest_jsonl_hash(path, hash_field)?;
+    {
+        let object =
+            record
+                .as_object_mut()
+                .ok_or_else(|| StorageError::KnowledgeEngineRecordShape {
+                    path: path.to_path_buf(),
+                    reason: "chained log record must be a JSON object".to_string(),
+                })?;
+        object.insert(
+            prev_hash_field.to_string(),
+            prev_hash.map(Value::String).unwrap_or(Value::Null),
+        );
+        object.insert(hash_field.to_string(), Value::Null);
+    }
+
+    let hash_input =
+        serde_json::to_vec(&record).map_err(|source| StorageError::KnowledgeEngineSerde {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let object =
+        record
+            .as_object_mut()
+            .ok_or_else(|| StorageError::KnowledgeEngineRecordShape {
+                path: path.to_path_buf(),
+                reason: "chained log record must be a JSON object".to_string(),
+            })?;
+    object.insert(
+        hash_field.to_string(),
+        Value::String(format!("sha256:{}", sha256_hex(&hash_input))),
+    );
+
+    let append = append_jsonl(path, &record)?;
+    Ok(KnowledgeChainedLogAppendReport { append, record })
+}
+
+fn latest_jsonl_hash(path: &Path, hash_field: &str) -> StorageResult<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).map_err(|source| StorageError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let Some(last_line) = text.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let value: Value =
+        serde_json::from_str(last_line).map_err(|source| StorageError::KnowledgeEngineSerde {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(value
+        .get(hash_field)
+        .and_then(Value::as_str)
+        .map(|hash| hash.to_string()))
 }
 
 fn write_jsonl_replace<T: Serialize>(
