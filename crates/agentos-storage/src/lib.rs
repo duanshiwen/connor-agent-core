@@ -2,6 +2,7 @@
 
 pub mod artifact_store;
 pub mod backup;
+pub mod knowledge_engine_store;
 pub mod lock;
 pub mod migration;
 pub mod repair;
@@ -18,6 +19,10 @@ pub use artifact_store::{
     FsArtifactRecord, FsArtifactStore,
 };
 pub use backup::{BackupFileEntry, BackupManifest, BackupReport, RestoreReport, StorageBackup};
+pub use knowledge_engine_store::{
+    FsKnowledgeEngineStore, KnowledgeBlobIntegrity, KnowledgeBlobMetadataRecord,
+    KnowledgeBlobPutReport, KnowledgeBlobStorageRef, KnowledgeLogAppendReport,
+};
 pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{
     MigrationMode, MigrationPlan, MigrationPlanStep, MigrationReport, MigrationStatus,
@@ -111,6 +116,16 @@ pub enum StorageError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("knowledge engine serialization failed at {path}: {source}")]
+    KnowledgeEngineSerde {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("invalid knowledge blob sha256 hash: {blob_hash}")]
+    InvalidKnowledgeBlobHash { blob_hash: String },
 
     #[error("artifact already exists: {artifact_id}")]
     ArtifactAlreadyExists { artifact_id: String },
