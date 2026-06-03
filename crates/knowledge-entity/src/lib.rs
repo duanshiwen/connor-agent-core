@@ -2442,6 +2442,528 @@ pub enum KnowledgeRepositoryError {
     NotFound(String),
 }
 
+// ---------------------------------------------------------------------------
+// Object/Relation Knowledge Engine v0.1 storage contracts
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for an object in the structured object graph projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeObjectId(pub String);
+
+impl fmt::Display for KnowledgeObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for KnowledgeObjectId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for KnowledgeObjectId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeRelationId(pub String);
+
+impl From<&str> for KnowledgeRelationId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeAttributeId(pub String);
+
+impl From<&str> for KnowledgeAttributeId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeClaimId(pub String);
+
+impl From<&str> for KnowledgeClaimId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeAssetBindingId(pub String);
+
+impl From<&str> for KnowledgeAssetBindingId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeEventId(pub String);
+
+impl From<&str> for KnowledgeEventId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeAuditId(pub String);
+
+impl From<&str> for KnowledgeAuditId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeTransactionId(pub String);
+
+impl From<&str> for KnowledgeTransactionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Actor envelope used by event and audit records. Human, LLM, tool and engine
+/// actors all enter the same deterministic boundary; LLM writes remain proposals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeActor {
+    pub actor_type: String,
+    pub actor_id: String,
+    pub delegated_by: Option<String>,
+}
+
+impl KnowledgeActor {
+    pub fn engine(delegated_by: impl Into<String>) -> Self {
+        Self {
+            actor_type: "engine".to_string(),
+            actor_id: "knowledge-engine".to_string(),
+            delegated_by: Some(delegated_by.into()),
+        }
+    }
+
+    pub fn llm(actor_id: impl Into<String>, delegated_by: impl Into<String>) -> Self {
+        Self {
+            actor_type: "llm".to_string(),
+            actor_id: actor_id.into(),
+            delegated_by: Some(delegated_by.into()),
+        }
+    }
+}
+
+/// Append-only event envelope. The event log is the authoritative history for
+/// object, attribute, relation, claim, evidence, asset and blob mutations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEventEnvelope {
+    pub event_id: KnowledgeEventId,
+    pub event_type: String,
+    pub schema_version: String,
+    pub timestamp: DateTime<Utc>,
+    pub transaction_id: KnowledgeTransactionId,
+    pub causation_id: Option<String>,
+    pub correlation_id: Option<String>,
+    pub actor: KnowledgeActor,
+    pub payload: serde_json::Value,
+    pub evidence_refs: Vec<EvidenceRefId>,
+    pub audit_refs: Vec<KnowledgeAuditId>,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: Option<String>,
+}
+
+impl KnowledgeEventEnvelope {
+    pub fn new(
+        event_id: impl Into<KnowledgeEventId>,
+        event_type: impl Into<String>,
+        transaction_id: impl Into<KnowledgeTransactionId>,
+        actor: KnowledgeActor,
+        payload: serde_json::Value,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            event_id: event_id.into(),
+            event_type: event_type.into(),
+            schema_version: "0.1.0".to_string(),
+            timestamp,
+            transaction_id: transaction_id.into(),
+            causation_id: None,
+            correlation_id: None,
+            actor,
+            payload,
+            evidence_refs: Vec::new(),
+            audit_refs: Vec::new(),
+            prev_event_hash: None,
+            event_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeObjectRecord {
+    pub record_type: String,
+    pub object_id: KnowledgeObjectId,
+    pub canonical_name: String,
+    pub object_types: Vec<String>,
+    pub status: String,
+    pub identity: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub version: u64,
+    pub last_event_id: KnowledgeEventId,
+    pub trust_score: f32,
+}
+
+impl KnowledgeObjectRecord {
+    pub fn new(
+        object_id: impl Into<KnowledgeObjectId>,
+        canonical_name: impl Into<String>,
+        object_types: Vec<String>,
+        event_id: impl Into<KnowledgeEventId>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let canonical_name = canonical_name.into();
+        Self {
+            record_type: "object".to_string(),
+            object_id: object_id.into(),
+            identity: serde_json::json!({ "canonical_name": canonical_name, "aliases": [] }),
+            canonical_name,
+            object_types,
+            status: "active".to_string(),
+            created_at: now,
+            updated_at: now,
+            version: 1,
+            last_event_id: event_id.into(),
+            trust_score: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAttributeRecord {
+    pub record_type: String,
+    pub attribute_id: KnowledgeAttributeId,
+    pub object_id: KnowledgeObjectId,
+    pub attribute_key: String,
+    pub attribute_type: String,
+    pub value: serde_json::Value,
+    pub constraints: serde_json::Value,
+    pub status: String,
+    pub confidence: f32,
+    pub evidence_refs: Vec<EvidenceRefId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_event_id: KnowledgeEventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeRelationRecord {
+    pub record_type: String,
+    pub relation_id: KnowledgeRelationId,
+    pub from_object_id: KnowledgeObjectId,
+    pub relation_type: String,
+    pub to_object_id: KnowledgeObjectId,
+    pub direction: String,
+    pub relation_attributes: serde_json::Value,
+    pub status: String,
+    pub confidence: f32,
+    pub evidence_refs: Vec<EvidenceRefId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_event_id: KnowledgeEventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeClaimRecord {
+    pub record_type: String,
+    pub claim_id: KnowledgeClaimId,
+    pub subject: serde_json::Value,
+    pub claim_text: String,
+    pub claim_status: String,
+    pub confidence: f32,
+    pub evidence_refs: Vec<EvidenceRefId>,
+    pub negotiation_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeAssetStatus {
+    ImportedUnbound,
+    CandidateBound,
+    ActiveBound,
+    EvidenceBound,
+    Deprecated,
+    GarbageCollectable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeAssetRepresentationKind {
+    MetadataOnly,
+    BindingSummary,
+    SemanticSummary,
+    OcrText,
+    Transcript,
+    Thumbnail,
+    Preview,
+    OptimizedBlob,
+    RawBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "target_type")]
+pub enum KnowledgeBindingTarget {
+    Object {
+        object_id: KnowledgeObjectId,
+    },
+    ObjectAttribute {
+        object_id: KnowledgeObjectId,
+        attribute_key: String,
+    },
+    ObjectState {
+        object_id: KnowledgeObjectId,
+        state_key: String,
+    },
+    Relation {
+        relation_id: KnowledgeRelationId,
+    },
+    Claim {
+        claim_id: KnowledgeClaimId,
+    },
+    Evidence {
+        evidence_id: EvidenceRefId,
+    },
+    Event {
+        event_id: KnowledgeEventId,
+    },
+}
+
+impl KnowledgeBindingTarget {
+    pub fn object_attribute(
+        object_id: impl Into<KnowledgeObjectId>,
+        attribute_key: impl Into<String>,
+    ) -> Self {
+        Self::ObjectAttribute {
+            object_id: object_id.into(),
+            attribute_key: attribute_key.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAssetVisibility {
+    pub llm_access: String,
+    pub raw_blob_access: bool,
+}
+
+impl Default for KnowledgeAssetVisibility {
+    fn default() -> Self {
+        Self {
+            llm_access: "metadata_and_derivatives_only".to_string(),
+            raw_blob_access: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeBlobMetadata {
+    pub blob_hash: String,
+    pub size_bytes: u64,
+    pub mime_type_detected: String,
+    pub compression: String,
+    pub created_at: DateTime<Utc>,
+    pub integrity: serde_json::Value,
+    pub storage: serde_json::Value,
+}
+
+impl KnowledgeBlobMetadata {
+    pub fn sha256(
+        hash: impl Into<String>,
+        size_bytes: u64,
+        mime_type_detected: impl Into<String>,
+        relative_path: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        let hash = hash.into();
+        Self {
+            blob_hash: hash.clone(),
+            size_bytes,
+            mime_type_detected: mime_type_detected.into(),
+            compression: "none".to_string(),
+            created_at,
+            integrity: serde_json::json!({
+                "hash_algorithm": "sha256",
+                "verified_at": created_at,
+            }),
+            storage: serde_json::json!({
+                "path": relative_path.into(),
+                "encrypted": false,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAssetRecord {
+    pub record_type: String,
+    pub asset_id: AssetId,
+    pub asset_type: String,
+    pub mime_type: String,
+    pub original_filename: Option<String>,
+    pub blob_refs: HashMap<String, String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub source: serde_json::Value,
+    pub technical_metadata: serde_json::Value,
+    pub semantic_metadata: serde_json::Value,
+    pub status: KnowledgeAssetStatus,
+    pub visibility: KnowledgeAssetVisibility,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_event_id: KnowledgeEventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAssetBindingConfidence {
+    pub extraction_confidence: f32,
+    pub binding_confidence: f32,
+    pub truth_confidence: f32,
+}
+
+impl KnowledgeAssetBindingConfidence {
+    pub fn candidate(extraction_confidence: f32, binding_confidence: f32) -> Self {
+        Self {
+            extraction_confidence,
+            binding_confidence,
+            truth_confidence: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAssetPropertyBindingRecord {
+    pub record_type: String,
+    pub binding_id: KnowledgeAssetBindingId,
+    pub asset_id: AssetId,
+    pub binding_target: KnowledgeBindingTarget,
+    pub evidence_mode: String,
+    pub observed_value: serde_json::Value,
+    pub localization: serde_json::Value,
+    pub confidence: KnowledgeAssetBindingConfidence,
+    pub status: String,
+    pub extracted_by: serde_json::Value,
+    pub evidence_refs: Vec<EvidenceRefId>,
+    pub negotiation_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl KnowledgeAssetPropertyBindingRecord {
+    pub fn candidate(
+        binding_id: impl Into<KnowledgeAssetBindingId>,
+        asset_id: impl Into<AssetId>,
+        binding_target: KnowledgeBindingTarget,
+        evidence_mode: impl Into<String>,
+        observed_value: serde_json::Value,
+        confidence: KnowledgeAssetBindingConfidence,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            record_type: "asset_property_binding".to_string(),
+            binding_id: binding_id.into(),
+            asset_id: asset_id.into(),
+            binding_target,
+            evidence_mode: evidence_mode.into(),
+            observed_value,
+            localization: serde_json::json!({}),
+            confidence,
+            status: "candidate".to_string(),
+            extracted_by: serde_json::json!({}),
+            evidence_refs: Vec::new(),
+            negotiation_refs: Vec::new(),
+            created_at,
+        }
+    }
+}
+
+/// Immutable audit record for both query and command operations. Query audit is
+/// intentionally first-class because retrieved context can shape downstream LLM decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeAuditRecord {
+    pub audit_id: KnowledgeAuditId,
+    pub timestamp: DateTime<Utc>,
+    pub operation_type: String,
+    pub operation_id: String,
+    pub transaction_id: Option<KnowledgeTransactionId>,
+    pub actor: KnowledgeActor,
+    pub interface: serde_json::Value,
+    pub target: serde_json::Value,
+    pub request: serde_json::Value,
+    pub process: serde_json::Value,
+    pub result: serde_json::Value,
+    pub prev_audit_hash: Option<String>,
+    pub audit_hash: Option<String>,
+}
+
+impl KnowledgeAuditRecord {
+    pub fn query(
+        audit_id: impl Into<KnowledgeAuditId>,
+        operation_id: impl Into<String>,
+        actor: KnowledgeActor,
+        endpoint: impl Into<String>,
+        params_hash: impl Into<String>,
+        result_count: usize,
+        returned_ids: Vec<String>,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            audit_id: audit_id.into(),
+            timestamp,
+            operation_type: "query".to_string(),
+            operation_id: operation_id.into(),
+            transaction_id: None,
+            actor,
+            interface: serde_json::json!({ "kind": "engine_api", "endpoint": endpoint.into() }),
+            target: serde_json::json!({}),
+            request: serde_json::json!({ "params_hash": params_hash.into() }),
+            process: serde_json::json!({}),
+            result: serde_json::json!({
+                "status": "returned",
+                "result_summary": {
+                    "result_count": result_count,
+                    "returned_ids": returned_ids,
+                    "truncated": false,
+                }
+            }),
+            prev_audit_hash: None,
+            audit_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEngineAccessMode {
+    /// LLM receives controlled packets/derivatives only; raw files stay behind the engine.
+    LlmControlledPacket,
+    /// Human or advanced tooling uses the same engine API, with audit.
+    EngineApi,
+    /// Direct filesystem access is represented only so validators can reject it.
+    DirectFilesystem,
+}
+
+impl KnowledgeEngineAccessMode {
+    pub fn is_allowed(self) -> bool {
+        !matches!(self, Self::DirectFilesystem)
+    }
+}
+
 /// Storage abstraction for knowledge entry metadata.
 #[async_trait]
 pub trait KnowledgeRepository: Send + Sync {
@@ -5152,5 +5674,67 @@ mod tests {
             1,
             "source_uri evidence should always pass"
         );
+    }
+
+    #[test]
+    fn knowledge_engine_event_and_audit_contracts_are_json_safe() {
+        let now = ts();
+        let event = KnowledgeEventEnvelope::new(
+            "evt-1",
+            "object.created",
+            "txn-1",
+            KnowledgeActor::engine("user:shiwen"),
+            serde_json::json!({"object_id":"obj_mass","canonical_name":"质量"}),
+            now,
+        );
+        let event_json = serde_json::to_value(&event).unwrap();
+        assert_eq!(event_json["schema_version"], "0.1.0");
+        assert_eq!(event_json["event_type"], "object.created");
+
+        let audit = KnowledgeAuditRecord::query(
+            "aud-1",
+            "op-1",
+            KnowledgeActor::llm("llm_gateway:test", "user:shiwen"),
+            "object.get",
+            "sha256:params",
+            1,
+            vec!["obj_mass".to_string()],
+            now,
+        );
+        let audit_json = serde_json::to_value(&audit).unwrap();
+        assert_eq!(audit_json["operation_type"], "query");
+        assert_eq!(
+            audit_json["result"]["result_summary"]["returned_ids"][0],
+            "obj_mass"
+        );
+    }
+
+    #[test]
+    fn asset_property_binding_separates_extraction_binding_and_truth_confidence() {
+        let binding = KnowledgeAssetPropertyBindingRecord::candidate(
+            "apb-1",
+            "asset-1",
+            KnowledgeBindingTarget::object_attribute("obj_kumquat", "color"),
+            "visual_observation",
+            serde_json::json!({ "kind": "string", "data": "orange" }),
+            KnowledgeAssetBindingConfidence::candidate(0.78, 0.84),
+            ts(),
+        );
+
+        assert_eq!(binding.status, "candidate");
+        assert_eq!(binding.confidence.extraction_confidence, 0.78);
+        assert_eq!(binding.confidence.binding_confidence, 0.84);
+        assert_eq!(binding.confidence.truth_confidence, 0.0);
+        assert!(matches!(
+            binding.binding_target,
+            KnowledgeBindingTarget::ObjectAttribute { .. }
+        ));
+    }
+
+    #[test]
+    fn direct_filesystem_access_is_explicitly_rejected_boundary() {
+        assert!(KnowledgeEngineAccessMode::EngineApi.is_allowed());
+        assert!(KnowledgeEngineAccessMode::LlmControlledPacket.is_allowed());
+        assert!(!KnowledgeEngineAccessMode::DirectFilesystem.is_allowed());
     }
 }

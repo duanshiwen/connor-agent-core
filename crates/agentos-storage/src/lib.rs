@@ -45,6 +45,43 @@ pub const STORAGE_LAYOUT_DIRECTORIES: [&str; 11] = [
     "connectors",
 ];
 
+/// Local-first object/relation knowledge engine store directory.
+///
+/// This is the authoritative knowledge storage root described by the desktop
+/// AgentOS storage design. Markdown remains an export/compatibility view; the
+/// authoritative layers live under this content-addressed, event-sourced store.
+pub const KNOWLEDGE_ENGINE_STORE_DIR: &str = ".ke-store";
+
+pub const KNOWLEDGE_ENGINE_AUTHORITATIVE_LAYERS: [&str; 3] = ["events", "audit", "blobs"];
+
+pub const KNOWLEDGE_ENGINE_PROJECTION_LAYERS: [&str; 4] =
+    ["records", "indexes", "snapshots", "derivatives"];
+
+/// v0.1 desktop full-node layout for the object/relation knowledge engine.
+pub const KNOWLEDGE_ENGINE_LAYOUT_DIRECTORIES: [&str; 21] = [
+    "events",
+    "audit",
+    "records",
+    "blobs",
+    "blobs/sha256",
+    "derivatives",
+    "derivatives/previews",
+    "derivatives/thumbnails",
+    "derivatives/ocr",
+    "derivatives/extracted",
+    "derivatives/transcripts",
+    "derivatives/keyframes",
+    "derivatives/embeddings",
+    "indexes",
+    "indexes/sqlite",
+    "indexes/tantivy",
+    "indexes/graph",
+    "indexes/vector",
+    "snapshots",
+    "exports",
+    "quarantine",
+];
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage io error at {path}: {source}")]
@@ -148,6 +185,14 @@ pub struct StorageManifest {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub layout_directories: Vec<String>,
+    #[serde(default = "default_knowledge_engine_store_dir")]
+    pub knowledge_engine_store_dir: String,
+    #[serde(default = "default_knowledge_engine_layout_directories")]
+    pub knowledge_engine_layout_directories: Vec<String>,
+    #[serde(default = "default_knowledge_engine_authoritative_layers")]
+    pub knowledge_engine_authoritative_layers: Vec<String>,
+    #[serde(default = "default_knowledge_engine_projection_layers")]
+    pub knowledge_engine_projection_layers: Vec<String>,
 }
 
 impl StorageManifest {
@@ -156,21 +201,56 @@ impl StorageManifest {
             storage_version: STORAGE_LAYOUT_VERSION,
             created_at: now,
             updated_at: now,
-            layout_directories: STORAGE_LAYOUT_DIRECTORIES
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
+            layout_directories: default_storage_layout_directories(),
+            knowledge_engine_store_dir: default_knowledge_engine_store_dir(),
+            knowledge_engine_layout_directories: default_knowledge_engine_layout_directories(),
+            knowledge_engine_authoritative_layers: default_knowledge_engine_authoritative_layers(),
+            knowledge_engine_projection_layers: default_knowledge_engine_projection_layers(),
         }
     }
 
     fn refreshed(mut self, now: DateTime<Utc>) -> Self {
         self.updated_at = now;
-        self.layout_directories = STORAGE_LAYOUT_DIRECTORIES
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
+        self.layout_directories = default_storage_layout_directories();
+        self.knowledge_engine_store_dir = default_knowledge_engine_store_dir();
+        self.knowledge_engine_layout_directories = default_knowledge_engine_layout_directories();
+        self.knowledge_engine_authoritative_layers =
+            default_knowledge_engine_authoritative_layers();
+        self.knowledge_engine_projection_layers = default_knowledge_engine_projection_layers();
         self
     }
+}
+
+fn default_storage_layout_directories() -> Vec<String> {
+    STORAGE_LAYOUT_DIRECTORIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn default_knowledge_engine_store_dir() -> String {
+    KNOWLEDGE_ENGINE_STORE_DIR.to_string()
+}
+
+fn default_knowledge_engine_layout_directories() -> Vec<String> {
+    KNOWLEDGE_ENGINE_LAYOUT_DIRECTORIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn default_knowledge_engine_authoritative_layers() -> Vec<String> {
+    KNOWLEDGE_ENGINE_AUTHORITATIVE_LAYERS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn default_knowledge_engine_projection_layers() -> Vec<String> {
+    KNOWLEDGE_ENGINE_PROJECTION_LAYERS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +266,12 @@ impl AgentOsStorage {
 
         for dir in STORAGE_LAYOUT_DIRECTORIES {
             create_dir_all(root.join(dir))?;
+        }
+
+        let knowledge_engine_root = root.join(KNOWLEDGE_ENGINE_STORE_DIR);
+        create_dir_all(&knowledge_engine_root)?;
+        for dir in KNOWLEDGE_ENGINE_LAYOUT_DIRECTORIES {
+            create_dir_all(knowledge_engine_root.join(dir))?;
         }
 
         let manifest_path = root.join("manifest.json");
@@ -222,6 +308,14 @@ impl AgentOsStorage {
 
     pub fn path_for(&self, layout_dir: &str) -> PathBuf {
         self.root.join(layout_dir)
+    }
+
+    pub fn knowledge_engine_root(&self) -> PathBuf {
+        self.root.join(KNOWLEDGE_ENGINE_STORE_DIR)
+    }
+
+    pub fn knowledge_engine_path_for(&self, layout_dir: &str) -> PathBuf {
+        self.knowledge_engine_root().join(layout_dir)
     }
 
     pub fn acquire_lock(&self, options: StorageLockOptions) -> StorageResult<StorageLockGuard> {
