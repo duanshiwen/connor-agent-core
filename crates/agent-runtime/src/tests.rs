@@ -717,8 +717,8 @@ fn assert_agent_run_completed(
     assert_eq!(run.output_message_id.as_ref(), Some(output_message_id));
 }
 
-fn knowledge_draft(title: &str, content_markdown: &str) -> knowledge_entity::KnowledgeEntryDraft {
-    knowledge_entity::KnowledgeEntryDraft::new(title, content_markdown, chrono::Utc::now())
+fn knowledge_draft(title: &str, content: &str) -> knowledge_entity::KnowledgeEntryDraft {
+    knowledge_entity::KnowledgeEntryDraft::new(title, content, chrono::Utc::now())
         .with_tags(vec!["agent-os".to_string()])
 }
 
@@ -908,7 +908,7 @@ async fn agent_runtime_reports_real_knowledge_create_draft_approval_required() {
     let repository = std::sync::Arc::new(knowledge_entity::MemoryKnowledgeRepository::new());
     let repository_for_assert = repository.clone();
     let (outcome, kernel, conv_id, run_id, audit) = process_static_knowledge_action_response(
-            "I will draft. ACTION knowledge.create_draft {\"title\":\"AgentOS Notes\",\"content_markdown\":\"draft content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}",
+            "I will draft. ACTION knowledge.create_draft {\"title\":\"AgentOS Notes\",\"content\":\"draft content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}",
             repository,
         )
         .await;
@@ -946,7 +946,7 @@ async fn agent_runtime_denies_real_knowledge_save_entry_by_default_safe_policy()
     let repository = std::sync::Arc::new(knowledge_entity::MemoryKnowledgeRepository::new());
     let repository_for_assert = repository.clone();
     let (outcome, kernel, conv_id, run_id, audit) = process_static_knowledge_action_response(
-            "I will save. ACTION knowledge.save_entry {\"draft\":{\"title\":\"AgentOS Notes\",\"content_markdown\":\"saved content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}}",
+            "I will save. ACTION knowledge.save_entry {\"draft\":{\"title\":\"AgentOS Notes\",\"content\":\"saved content\",\"source_uri\":null,\"source_artifact_id\":null,\"source_asset_id\":null,\"tags\":[\"agent-os\"],\"metadata\":{},\"created_at\":\"2026-05-24T12:00:00Z\"}}",
             repository,
         )
         .await;

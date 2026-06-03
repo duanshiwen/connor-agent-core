@@ -22,8 +22,7 @@ use knowledge_entity::{
     KnowledgeActionExecutor, KnowledgeCreateDraftActionInput, KnowledgeEntryDraft,
     KnowledgeEntryRef, KnowledgeGetEntryActionInput, KnowledgeRepository,
     KnowledgeSaveEntryActionInput, KnowledgeSearchActionInput, KnowledgeSearchQuery,
-    KnowledgeSearchResult, MemoryKnowledgeRepository, markdown_repo::MarkdownKnowledgeRepository,
-    register_knowledge_action_schemas,
+    KnowledgeSearchResult, MemoryKnowledgeRepository, register_knowledge_action_schemas,
 };
 use std::sync::{Arc, Mutex};
 
@@ -694,9 +693,8 @@ fn knowledge_registry() -> ActionRegistry {
     registry
 }
 
-fn knowledge_draft(title: &str, content_markdown: &str) -> KnowledgeEntryDraft {
-    KnowledgeEntryDraft::new(title, content_markdown, Utc::now())
-        .with_tags(vec!["agent-os".to_string()])
+fn knowledge_draft(title: &str, content: &str) -> KnowledgeEntryDraft {
+    KnowledgeEntryDraft::new(title, content, Utc::now()).with_tags(vec!["agent-os".to_string()])
 }
 
 #[tokio::test]
@@ -817,7 +815,7 @@ async fn knowledge_create_draft_requires_approval_through_action_runtime() {
         "knowledge.create_draft",
         serde_json::to_value(KnowledgeCreateDraftActionInput {
             title: "AgentOS Notes".to_string(),
-            content_markdown: "draft content".to_string(),
+            content: "draft content".to_string(),
             source_uri: None,
             source_artifact_id: None,
             source_asset_id: None,
@@ -948,7 +946,7 @@ async fn approved_knowledge_create_draft_executes_after_approval() {
         "knowledge.create_draft",
         serde_json::to_value(KnowledgeCreateDraftActionInput {
             title: "AgentOS Approved Notes".to_string(),
-            content_markdown: "approved draft content".to_string(),
+            content: "approved draft content".to_string(),
             source_uri: None,
             source_artifact_id: None,
             source_asset_id: None,
@@ -1154,230 +1152,6 @@ async fn execute_approved_records_failure_for_executor_error() {
     assert_eq!(events[1].policy_decision, "approved");
     assert_eq!(events[1].result_status, "failed");
     assert_eq!(events[1].approved_by.as_deref(), Some("user-1"));
-}
-
-// ---- PR 34: MarkdownKnowledgeRepository integration regression ----
-
-fn markdown_repo_kb_draft(title: &str, content: &str) -> KnowledgeEntryDraft {
-    KnowledgeEntryDraft::new(title, content, Utc::now())
-        .with_tags(vec!["agent-os".to_string()])
-        .with_metadata(serde_json::json!({
-            "category": "test-category",
-            "summary": "Test summary",
-            "industry": "general"
-        }))
-}
-
-#[tokio::test]
-async fn knowledge_search_via_markdown_repo_through_action_runtime() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = Arc::new(MarkdownKnowledgeRepository::new(dir.path()));
-    KnowledgeRepository::save_draft(
-        repo.as_ref(),
-        markdown_repo_kb_draft("AgentOS Architecture", "foundation and kernel design"),
-    )
-    .await
-    .unwrap();
-    KnowledgeRepository::save_draft(
-        repo.as_ref(),
-        markdown_repo_kb_draft("Browser Automation", "web content extraction patterns"),
-    )
-    .await
-    .unwrap();
-
-    let kernel = test_kernel();
-    let conversation_id = create_conversation(&kernel).await;
-    let registry = knowledge_registry();
-    let executor = KnowledgeActionExecutor::new(repo);
-    let audit = MemoryAuditSink::new();
-
-    let outcome = process_action_with_input(
-        &kernel,
-        &registry,
-        &executor,
-        &audit,
-        &conversation_id,
-        "action-md-search",
-        "knowledge.search",
-        serde_json::to_value(KnowledgeSearchActionInput {
-            query: KnowledgeSearchQuery::new("AgentOS"),
-        })
-        .unwrap(),
-    )
-    .await;
-
-    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
-        panic!("expected completed outcome");
-    };
-    let ActionResultPayload::Json(value) = result.payload else {
-        panic!("expected json payload");
-    };
-    let results: Vec<KnowledgeSearchResult> = serde_json::from_value(value).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].entry.title, "AgentOS Architecture");
-
-    let state = kernel.load_state(&conversation_id).await.unwrap();
-    let action = state
-        .actions
-        .get(&ActionId::from("action-md-search"))
-        .unwrap();
-    assert_eq!(action.status, ConversationActionStatus::Completed);
-
-    let events = audit.list().await.unwrap();
-    assert_eq!(events[0].policy_decision, "allow");
-    assert_eq!(events[0].result_status, "completed");
-}
-
-#[tokio::test]
-async fn knowledge_get_entry_via_markdown_repo_through_action_runtime() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = Arc::new(MarkdownKnowledgeRepository::new(dir.path()));
-    let saved = KnowledgeRepository::save_draft(
-        repo.as_ref(),
-        markdown_repo_kb_draft("KB Entry", "entry content for get test"),
-    )
-    .await
-    .unwrap();
-
-    let kernel = test_kernel();
-    let conversation_id = create_conversation(&kernel).await;
-    let registry = knowledge_registry();
-    let executor = KnowledgeActionExecutor::new(repo);
-    let audit = MemoryAuditSink::new();
-
-    let outcome = process_action_with_input(
-        &kernel,
-        &registry,
-        &executor,
-        &audit,
-        &conversation_id,
-        "action-md-get",
-        "knowledge.get_entry",
-        serde_json::to_value(KnowledgeGetEntryActionInput {
-            id: saved.id.clone(),
-        })
-        .unwrap(),
-    )
-    .await;
-
-    let ActionRuntimeOutcome::Completed { result, .. } = outcome else {
-        panic!("expected completed outcome");
-    };
-    let ActionResultPayload::Json(value) = result.payload else {
-        panic!("expected json payload");
-    };
-    let entry: Option<KnowledgeEntryRef> = serde_json::from_value(value).unwrap();
-    assert!(entry.is_some());
-    assert_eq!(entry.unwrap().title, "KB Entry");
-
-    let state = kernel.load_state(&conversation_id).await.unwrap();
-    let action = state.actions.get(&ActionId::from("action-md-get")).unwrap();
-    assert_eq!(action.status, ConversationActionStatus::Completed);
-}
-
-#[tokio::test]
-async fn knowledge_save_entry_via_markdown_repo_through_action_runtime() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = Arc::new(MarkdownKnowledgeRepository::new(dir.path()));
-
-    let kernel = test_kernel();
-    let conversation_id = create_conversation(&kernel).await;
-    let registry = knowledge_registry();
-    let executor = KnowledgeActionExecutor::new(repo.clone());
-    let audit = MemoryAuditSink::new();
-
-    // save_entry is denied by default_safe policy.
-    let outcome = process_action_with_input(
-        &kernel,
-        &registry,
-        &executor,
-        &audit,
-        &conversation_id,
-        "action-md-save",
-        "knowledge.save_entry",
-        serde_json::to_value(KnowledgeSaveEntryActionInput {
-            draft: markdown_repo_kb_draft("Saved Entry", "saved content"),
-        })
-        .unwrap(),
-    )
-    .await;
-
-    assert!(matches!(outcome, ActionRuntimeOutcome::Denied { .. }));
-    // Verify no file was written.
-    assert!(
-        KnowledgeRepository::list_entries(repo.as_ref())
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let state = kernel.load_state(&conversation_id).await.unwrap();
-    let action = state
-        .actions
-        .get(&ActionId::from("action-md-save"))
-        .unwrap();
-    assert_eq!(action.status, ConversationActionStatus::Denied);
-
-    let events = audit.list().await.unwrap();
-    assert_eq!(events[0].policy_decision, "deny");
-    assert_eq!(events[0].result_status, "denied");
-}
-
-#[tokio::test]
-async fn knowledge_create_draft_via_markdown_repo_produces_draft_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = Arc::new(MarkdownKnowledgeRepository::new(dir.path()));
-
-    let kernel = test_kernel();
-    let conversation_id = create_conversation(&kernel).await;
-    let registry = knowledge_registry();
-    let executor = KnowledgeActionExecutor::new(repo.clone());
-    let audit = MemoryAuditSink::new();
-
-    let outcome = process_action_with_input(
-        &kernel,
-        &registry,
-        &executor,
-        &audit,
-        &conversation_id,
-        "action-md-create-draft",
-        "knowledge.create_draft",
-        serde_json::to_value(KnowledgeCreateDraftActionInput {
-            title: "Draft Only".to_string(),
-            content_markdown: "draft body".to_string(),
-            source_uri: None,
-            source_artifact_id: None,
-            source_asset_id: None,
-            tags: vec!["test".to_string()],
-            metadata: serde_json::json!({}),
-            created_at: Utc::now(),
-        })
-        .unwrap(),
-    )
-    .await;
-
-    assert!(matches!(
-        outcome,
-        ActionRuntimeOutcome::ApprovalRequired { .. }
-    ));
-    // Verify no file was written (create_draft doesn't persist).
-    assert!(
-        KnowledgeRepository::list_entries(repo.as_ref())
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let state = kernel.load_state(&conversation_id).await.unwrap();
-    let action = state
-        .actions
-        .get(&ActionId::from("action-md-create-draft"))
-        .unwrap();
-    assert_eq!(action.status, ConversationActionStatus::ApprovalRequired);
-
-    let events = audit.list().await.unwrap();
-    assert_eq!(events[0].policy_decision, "ask");
-    assert_eq!(events[0].result_status, "approval_required");
 }
 
 // ---- PR 36: Browser ActionRuntime integration regression ----

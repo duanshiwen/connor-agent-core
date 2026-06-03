@@ -98,6 +98,25 @@ Diagnostics 和 telemetry 类型围绕 redaction 和显式同意边界设计。�
 - `agentos-config`
 - `client-substrate`
 
+### Knowledge Engine 使用对象/关系存储
+
+知识系统的权威存储不再是 Markdown 文件。AgentOS 的桌面知识引擎以对象、属性、关系、claim、asset binding、event 和 audit record 为核心模型，并通过 `.ke-store` 写入本地 durable storage。Markdown 只能作为导出、人类阅读视图或兼容格式存在，不能绕过 Engine API 直接写入事实。
+
+本地 `.ke-store` 的关键层包括：
+
+- `events/`：append-only knowledge event log。
+- `audit/`：append-only audit log，用于记录 query/write 操作边界。
+- `records/`：当前状态 projection，例如 objects、attributes、relations、assets 和 asset-property bindings。
+- `blobs/sha256/`：content-addressed blob store，用于资产、附件和派生内容。
+- `indexes/`：SQLite、全文、图和向量索引的投影位置。
+
+相关 crate：
+
+- `knowledge-entity`：定义 typed knowledge records 和 action-level contract。
+- `agentos-storage`：初始化 `.ke-store`，写入 event/audit/projection/blob。
+- `asset-core`：定义 asset 与 work-object 相关基础类型。
+
+
 ## 最小 Kernel 示例
 
 ```rust
