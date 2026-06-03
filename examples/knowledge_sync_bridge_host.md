@@ -1,7 +1,10 @@
 # M2.3 Knowledge Sync Bridge Host Example
 
 This example shows the intended host-side flow for consuming AgentOS backend
-`/api/v1/sync/events` responses through the Core SDK bridge.
+`/api/v1/sync/events` responses through the Core SDK bridge. The sync payload uses
+a storage-neutral `content` field; it is not a Markdown-backed knowledge
+repository, and hosts should not treat synced entries as authoritative `.md`
+files.
 
 The goal is deliberately narrow:
 
@@ -108,7 +111,7 @@ The full response helper accepts the standard Go backend API envelope:
           "entry_id": "notes/alpha",
           "object_id": "notes/alpha",
           "title": "Alpha",
-          "content": "# Alpha",
+          "content": "Alpha knowledge note",
           "summary": "summary",
           "tags": ["agentos"],
           "metadata": {},
@@ -146,6 +149,10 @@ If apply fails, do not ack. Keep the old projection and retry after resolving th
 error.
 
 ## Reducer behavior
+
+The bridge currently applies only personal knowledge projection events. These are
+legacy bridge projection events, not direct writes to `.ke-store`; authoritative
+object/relation writes must go through the Engine API and storage layer.
 
 The bridge currently applies only personal knowledge events:
 
