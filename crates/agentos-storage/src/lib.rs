@@ -22,6 +22,7 @@ pub use backup::{BackupFileEntry, BackupManifest, BackupReport, RestoreReport, S
 pub use knowledge_engine_store::{
     FsKnowledgeEngineStore, KnowledgeBlobIntegrity, KnowledgeBlobMetadataRecord,
     KnowledgeBlobPutReport, KnowledgeBlobStorageRef, KnowledgeLogAppendReport,
+    KnowledgeProjectionWriteReport, KnowledgeRecordProjectionKind,
 };
 pub use lock::{StorageLockGuard, StorageLockInfo, StorageLockOptions};
 pub use migration::{

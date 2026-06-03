@@ -21,6 +21,51 @@ const AUDIT_SEGMENT_FILE: &str = "audit-seg-000001.kaudit.ndjson";
 const BLOB_EXTENSION: &str = "blob";
 const BLOB_META_EXTENSION: &str = "meta.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeRecordProjectionKind {
+    Objects,
+    Aliases,
+    Attributes,
+    Relations,
+    Claims,
+    Evidence,
+    Mechanisms,
+    Evaluations,
+    MetaphorMappings,
+    Assets,
+    AssetPropertyBindings,
+    Observations,
+    Tools,
+}
+
+impl KnowledgeRecordProjectionKind {
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::Objects => "objects.krec.ndjson",
+            Self::Aliases => "aliases.krec.ndjson",
+            Self::Attributes => "attributes.krec.ndjson",
+            Self::Relations => "relations.krec.ndjson",
+            Self::Claims => "claims.krec.ndjson",
+            Self::Evidence => "evidence.krec.ndjson",
+            Self::Mechanisms => "mechanisms.krec.ndjson",
+            Self::Evaluations => "evaluations.krec.ndjson",
+            Self::MetaphorMappings => "metaphor_mappings.krec.ndjson",
+            Self::Assets => "assets.krec.ndjson",
+            Self::AssetPropertyBindings => "asset_property_bindings.krec.ndjson",
+            Self::Observations => "observations.krec.ndjson",
+            Self::Tools => "tools.krec.ndjson",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeProjectionWriteReport {
+    pub path: PathBuf,
+    pub record_count: u64,
+    pub byte_len: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeLogAppendReport {
     pub path: PathBuf,
@@ -106,6 +151,26 @@ impl FsKnowledgeEngineStore {
 
     pub fn read_audit<T: DeserializeOwned>(&self, year: i32, month: u32) -> StorageResult<Vec<T>> {
         read_jsonl(&self.month_segment_path("audit", year, month, AUDIT_SEGMENT_FILE))
+    }
+
+    pub fn replace_projection_records<T: Serialize>(
+        &self,
+        kind: KnowledgeRecordProjectionKind,
+        records: &[T],
+    ) -> StorageResult<KnowledgeProjectionWriteReport> {
+        let path = self.projection_path(kind);
+        write_jsonl_replace(&path, records)
+    }
+
+    pub fn read_projection_records<T: DeserializeOwned>(
+        &self,
+        kind: KnowledgeRecordProjectionKind,
+    ) -> StorageResult<Vec<T>> {
+        read_jsonl(&self.projection_path(kind))
+    }
+
+    pub fn projection_path(&self, kind: KnowledgeRecordProjectionKind) -> PathBuf {
+        self.root.join("records").join(kind.filename())
     }
 
     pub fn put_blob(
@@ -210,6 +275,39 @@ impl FsKnowledgeEngineStore {
             .join(&hash_hex[2..4])
             .join(format!("{hash_hex}.{BLOB_META_EXTENSION}"))
     }
+}
+
+fn write_jsonl_replace<T: Serialize>(
+    path: &Path,
+    records: &[T],
+) -> StorageResult<KnowledgeProjectionWriteReport> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    let mut bytes = Vec::new();
+    for record in records {
+        let mut line =
+            serde_json::to_vec(record).map_err(|source| StorageError::KnowledgeEngineSerde {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        line.push(b'\n');
+        bytes.extend(line);
+    }
+    fs::write(&tmp_path, &bytes).map_err(|source| StorageError::Io {
+        path: tmp_path.clone(),
+        source,
+    })?;
+    fs::rename(&tmp_path, path).map_err(|source| StorageError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(KnowledgeProjectionWriteReport {
+        path: path.to_path_buf(),
+        record_count: records.len() as u64,
+        byte_len: bytes.len() as u64,
+    })
 }
 
 fn append_jsonl<T: Serialize>(path: &Path, record: &T) -> StorageResult<KnowledgeLogAppendReport> {

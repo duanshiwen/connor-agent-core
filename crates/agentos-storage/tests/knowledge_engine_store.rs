@@ -1,4 +1,4 @@
-use agentos_storage::{AgentOsStorage, FsKnowledgeEngineStore};
+use agentos_storage::{AgentOsStorage, FsKnowledgeEngineStore, KnowledgeRecordProjectionKind};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 
@@ -95,4 +95,65 @@ fn invalid_blob_hash_is_rejected() {
         err.to_string()
             .contains("invalid knowledge blob sha256 hash")
     );
+}
+
+#[test]
+fn projection_records_replace_and_read_current_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = AgentOsStorage::init(dir.path()).unwrap();
+    let store = FsKnowledgeEngineStore::for_storage(&storage).unwrap();
+
+    let records = vec![
+        json!({
+            "record_type": "object",
+            "object_id": "obj-mass",
+            "canonical_name": "质量",
+            "status": "active"
+        }),
+        json!({
+            "record_type": "object",
+            "object_id": "obj-gravity",
+            "canonical_name": "万有引力",
+            "status": "active"
+        }),
+    ];
+
+    let report = store
+        .replace_projection_records(KnowledgeRecordProjectionKind::Objects, &records)
+        .unwrap();
+
+    assert_eq!(report.record_count, 2);
+    assert!(report.path.ends_with("records/objects.krec.ndjson"));
+
+    let loaded: Vec<serde_json::Value> = store
+        .read_projection_records(KnowledgeRecordProjectionKind::Objects)
+        .unwrap();
+    assert_eq!(loaded, records);
+
+    let replacement = vec![json!({
+        "record_type": "object",
+        "object_id": "obj-mass",
+        "canonical_name": "质量",
+        "status": "active",
+        "version": 2
+    })];
+    store
+        .replace_projection_records(KnowledgeRecordProjectionKind::Objects, &replacement)
+        .unwrap();
+    let loaded_after_replace: Vec<serde_json::Value> = store
+        .read_projection_records(KnowledgeRecordProjectionKind::Objects)
+        .unwrap();
+    assert_eq!(loaded_after_replace, replacement);
+}
+
+#[test]
+fn empty_projection_read_returns_empty_vec() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = AgentOsStorage::init(dir.path()).unwrap();
+    let store = FsKnowledgeEngineStore::for_storage(&storage).unwrap();
+
+    let loaded: Vec<serde_json::Value> = store
+        .read_projection_records(KnowledgeRecordProjectionKind::Relations)
+        .unwrap();
+    assert!(loaded.is_empty());
 }
