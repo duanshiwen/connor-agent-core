@@ -349,15 +349,10 @@ impl ClientReadySyncProjection {
     /// requested permission. The backend remains the source of truth for grants;
     /// the client/runtime is the execution point that must deny, allow, or require
     /// confirmation before calling a plugin flow.
-    pub fn evaluate_sage_invocation(
-        &self,
-        request: &SageInvocationRequest,
-    ) -> SageRuntimeDecision {
+    pub fn evaluate_sage_invocation(&self, request: &SageInvocationRequest) -> SageRuntimeDecision {
         let Some((installation_id, _plugin)) = self.plugins.iter().find(|(_, payload)| {
             is_active_payload(payload)
-                && payload
-                    .get("plugin_key")
-                    .and_then(|value| value.as_str())
+                && payload.get("plugin_key").and_then(|value| value.as_str())
                     == Some(request.plugin_key.as_str())
         }) else {
             return SageRuntimeDecision::Deny {
@@ -386,10 +381,7 @@ impl ClientReadySyncProjection {
                 .get("requires_confirmation")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false)
-            || grant
-                .get("risk_level")
-                .and_then(|value| value.as_str())
-                == Some("high");
+            || grant.get("risk_level").and_then(|value| value.as_str()) == Some("high");
         if requires_confirmation && !request.user_confirmed {
             return SageRuntimeDecision::RequiresConfirmation {
                 reason: "high_risk_action_requires_confirmation".to_string(),
@@ -415,13 +407,16 @@ impl ClientReadySyncProjection {
             .filter(|entry| {
                 query.trim().is_empty()
                     || entry.title.to_lowercase().contains(&query)
-                    || entry.content_markdown.to_lowercase().contains(&query)
-                    || entry.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
+                    || entry.content.to_lowercase().contains(&query)
+                    || entry
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&query))
             })
             .map(|entry| RuntimeKnowledgeCitation {
                 entry_id: entry.entry_id.clone(),
                 title: entry.title.clone(),
-                excerpt: excerpt(&entry.content_markdown, 180),
+                excerpt: excerpt(&entry.content, 180),
                 content_hash: entry.content_hash.clone(),
             })
             .collect();
@@ -725,7 +720,10 @@ fn is_active_payload(payload: &serde_json::Value) -> bool {
 }
 
 fn extract_instruction_texts(payload: &serde_json::Value) -> Vec<String> {
-    if let Some(instructions) = payload.get("runtime_instructions").and_then(|value| value.as_array()) {
+    if let Some(instructions) = payload
+        .get("runtime_instructions")
+        .and_then(|value| value.as_array())
+    {
         return instructions
             .iter()
             .filter_map(|value| value.as_str())
@@ -734,13 +732,19 @@ fn extract_instruction_texts(payload: &serde_json::Value) -> Vec<String> {
             .map(str::to_string)
             .collect();
     }
-    if let Some(instruction) = payload.get("runtime_instruction").and_then(|value| value.as_str()) {
+    if let Some(instruction) = payload
+        .get("runtime_instruction")
+        .and_then(|value| value.as_str())
+    {
         let instruction = instruction.trim();
         if !instruction.is_empty() {
             return vec![instruction.to_string()];
         }
     }
-    if let Some(entrypoint) = payload.get("entrypoint_content").and_then(|value| value.as_str()) {
+    if let Some(entrypoint) = payload
+        .get("entrypoint_content")
+        .and_then(|value| value.as_str())
+    {
         let entrypoint = entrypoint.trim();
         if !entrypoint.is_empty() {
             return vec![entrypoint.to_string()];
@@ -872,7 +876,7 @@ mod tests {
                     "entry_id": "notes/alpha",
                     "object_id": "notes/alpha",
                     "title": "Alpha",
-                    "content_markdown": "# Alpha",
+                    "content": "# Alpha",
                     "summary": "summary",
                     "tags": ["agentos"],
                     "metadata": {},
@@ -901,7 +905,7 @@ mod tests {
                     "entry_id": "notes/alpha",
                     "object_id": "notes/alpha",
                     "title": "Alpha",
-                    "content_markdown": "# Alpha",
+                    "content": "# Alpha",
                     "summary": "summary",
                     "tags": ["agentos"],
                     "metadata": {},
@@ -956,7 +960,7 @@ mod tests {
                             "entry_id": "notes/from-backend-envelope",
                             "object_id": "notes/from-backend-envelope",
                             "title": "Backend Envelope",
-                            "content_markdown": "# Backend Envelope",
+                            "content": "# Backend Envelope",
                             "summary": "summary",
                             "tags": ["agentos"],
                             "metadata": {"source": "backend"},
@@ -1092,7 +1096,7 @@ mod tests {
                             "entry_id": "notes/client-ready",
                             "object_id": "notes/client-ready",
                             "title": "Client Ready",
-                            "content_markdown": "# Client Ready",
+                            "content": "# Client Ready",
                             "summary": "summary",
                             "tags": ["agentos"],
                             "metadata": {},
@@ -1361,12 +1365,15 @@ mod tests {
                 "schema_version": 1
             }
         });
-        let response = apply_sync_pull_response_json(&response.json, &uninstall.to_string()).unwrap();
+        let response =
+            apply_sync_pull_response_json(&response.json, &uninstall.to_string()).unwrap();
         let projection: ClientReadySyncProjection = serde_json::from_str(&response.json).unwrap();
         assert!(projection.skill_runtime_bundles().is_empty());
-        assert!(projection
-            .apply_skill_to_task_context("research.brief", "Analyze this article")
-            .is_err());
+        assert!(
+            projection
+                .apply_skill_to_task_context("research.brief", "Analyze this article")
+                .is_err()
+        );
     }
 
     #[test]
@@ -1429,7 +1436,10 @@ mod tests {
             }
         );
 
-        let confirmed = SageInvocationRequest { user_confirmed: true, ..request };
+        let confirmed = SageInvocationRequest {
+            user_confirmed: true,
+            ..request
+        };
         assert_eq!(
             projection.evaluate_sage_invocation(&confirmed),
             SageRuntimeDecision::Allow
@@ -1470,7 +1480,7 @@ mod tests {
                         "entry_id": "notes/agentos-stage5b",
                         "object_id": "notes/agentos-stage5b",
                         "title": "Stage 5B Runtime Consumption Loop",
-                        "content_markdown": "AgentOS Stage 5B turns backend control-plane state into runtime behavior with Skill, SAGE, and KB loops.",
+                        "content": "AgentOS Stage 5B turns backend control-plane state into runtime behavior with Skill, SAGE, and KB loops.",
                         "summary": "summary",
                         "tags": ["agentos", "runtime"],
                         "metadata": {"collection_id": "kb-agentos"},

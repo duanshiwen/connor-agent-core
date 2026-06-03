@@ -275,7 +275,13 @@ unsafe fn apply_pull_response_with(
     projection_json: *const c_char,
     pull_response_json: *const c_char,
     error_out: *mut *mut c_char,
-    apply: fn(&str, &str) -> Result<agentos_client_bridge::BridgeResponse, agentos_client_bridge::AgentOsClientBridgeError>,
+    apply: fn(
+        &str,
+        &str,
+    ) -> Result<
+        agentos_client_bridge::BridgeResponse,
+        agentos_client_bridge::AgentOsClientBridgeError,
+    >,
 ) -> *mut c_char {
     if projection_json.is_null() || pull_response_json.is_null() {
         unsafe { set_error(error_out, "null argument") };
@@ -461,7 +467,7 @@ mod tests {
                             "entry_id": "notes/ffi",
                             "object_id": "notes/ffi",
                             "title": "FFI Sync",
-                            "content_markdown": "# FFI Sync",
+                            "content": "# FFI Sync",
                             "summary": "summary",
                             "tags": ["agentos"],
                             "metadata": {},

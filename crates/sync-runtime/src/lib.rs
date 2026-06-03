@@ -142,7 +142,7 @@ pub struct KnowledgeEntrySyncPayload {
     #[serde(default)]
     pub title: String,
     #[serde(default)]
-    pub content_markdown: String,
+    pub content: String,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
@@ -1448,7 +1448,7 @@ mod tests {
                 "entry_id": entry_id,
                 "object_id": entry_id,
                 "title": title,
-                "content_markdown": format!("# {title}"),
+                "content": format!("# {title}"),
                 "summary": "summary",
                 "tags": ["agentos"],
                 "metadata": {"category": "notes"},

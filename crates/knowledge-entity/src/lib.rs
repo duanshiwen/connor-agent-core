@@ -1,16 +1,11 @@
 //! # Knowledge Entity
 //!
 //! Domain types, deterministic in-memory repository, and action-level seams for
-//! AgentOS knowledge entries.
+//! AgentOS knowledge records and draft entries.
 //!
 //! This crate provides pure Knowledge Entity abstractions that later action/runtime
 //! integrations can use through `ActionRuntime` and `CapabilityPolicy`.
 //!
-//! It includes both a `MemoryKnowledgeRepository` for tests and a
-//! `MarkdownKnowledgeRepository` for real filesystem-backed knowledge bases.
-
-pub mod markdown_repo;
-
 use action_core::{
     ActionExecutor, ActionExecutorError, ActionKind, ActionRegistry, ActionRegistryError,
     ActionRequest, ActionResult, ActionResultPayload, ActionSchema, ActionStatus, SideEffectKind,
@@ -90,7 +85,7 @@ pub struct KnowledgeEntryRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeEntryDraft {
     pub title: String,
-    pub content_markdown: String,
+    pub content: String,
     pub source_uri: Option<String>,
     pub source_artifact_id: Option<ArtifactId>,
     pub source_asset_id: Option<AssetId>,
@@ -102,12 +97,12 @@ pub struct KnowledgeEntryDraft {
 impl KnowledgeEntryDraft {
     pub fn new(
         title: impl Into<String>,
-        content_markdown: impl Into<String>,
+        content: impl Into<String>,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             title: title.into(),
-            content_markdown: content_markdown.into(),
+            content: content.into(),
             source_uri: None,
             source_artifact_id: None,
             source_asset_id: None,
@@ -143,7 +138,7 @@ impl KnowledgeEntryDraft {
     }
 
     pub fn validate_for_write(&self) -> Result<(), KnowledgeValidationError> {
-        validate_draft_fields(&self.title, &self.content_markdown)
+        validate_draft_fields(&self.title, &self.content)
     }
 }
 
@@ -152,7 +147,7 @@ impl KnowledgeEntryDraft {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeEntryUpdate {
     pub title: Option<String>,
-    pub content_markdown: Option<String>,
+    pub content: Option<String>,
     pub tags: Option<Vec<String>>,
     pub source_uri: Option<String>,
     pub metadata: Option<serde_json::Value>,
@@ -169,7 +164,7 @@ impl KnowledgeEntryUpdate {
     }
 
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
-        self.content_markdown = Some(content.into());
+        self.content = Some(content.into());
         self
     }
 
@@ -232,7 +227,7 @@ pub struct KnowledgeSearchResult {
 pub struct KnowledgeFullTextQuery {
     pub text: String,
     pub tags: Vec<String>,
-    pub frontmatter_filters: Vec<(String, String)>,
+    pub metadata_filters: Vec<(String, String)>,
     pub limit: usize,
 }
 
@@ -241,7 +236,7 @@ impl KnowledgeFullTextQuery {
         Self {
             text: text.into(),
             tags: vec![],
-            frontmatter_filters: vec![],
+            metadata_filters: vec![],
             limit: 10,
         }
     }
@@ -251,12 +246,12 @@ impl KnowledgeFullTextQuery {
         self
     }
 
-    pub fn with_frontmatter_filter(
+    pub fn with_metadata_filter(
         mut self,
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
-        self.frontmatter_filters.push((key.into(), value.into()));
+        self.metadata_filters.push((key.into(), value.into()));
         self
     }
 
@@ -270,18 +265,18 @@ impl KnowledgeFullTextQuery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeIndexDocument {
     pub entry: KnowledgeEntryRef,
-    pub body_markdown: String,
+    pub body: String,
     pub tags: Vec<String>,
-    pub frontmatter: serde_json::Value,
+    pub metadata: serde_json::Value,
 }
 
 impl KnowledgeIndexDocument {
-    pub fn new(entry: KnowledgeEntryRef, body_markdown: impl Into<String>) -> Self {
+    pub fn new(entry: KnowledgeEntryRef, body: impl Into<String>) -> Self {
         Self {
             entry,
-            body_markdown: body_markdown.into(),
+            body: body.into(),
             tags: vec![],
-            frontmatter: serde_json::json!({}),
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -290,8 +285,8 @@ impl KnowledgeIndexDocument {
         self
     }
 
-    pub fn with_frontmatter(mut self, frontmatter: serde_json::Value) -> Self {
-        self.frontmatter = frontmatter;
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -331,7 +326,7 @@ impl KnowledgeEmbeddingVector {
 pub struct KnowledgeSemanticQuery {
     pub embedding: KnowledgeEmbeddingVector,
     pub tags: Vec<String>,
-    pub frontmatter_filters: Vec<(String, String)>,
+    pub metadata_filters: Vec<(String, String)>,
     pub limit: usize,
 }
 
@@ -340,7 +335,7 @@ impl KnowledgeSemanticQuery {
         Self {
             embedding,
             tags: vec![],
-            frontmatter_filters: vec![],
+            metadata_filters: vec![],
             limit: 10,
         }
     }
@@ -350,12 +345,12 @@ impl KnowledgeSemanticQuery {
         self
     }
 
-    pub fn with_frontmatter_filter(
+    pub fn with_metadata_filter(
         mut self,
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
-        self.frontmatter_filters.push((key.into(), value.into()));
+        self.metadata_filters.push((key.into(), value.into()));
         self
     }
 
@@ -371,7 +366,7 @@ pub struct KnowledgeEmbeddingDocument {
     pub entry: KnowledgeEntryRef,
     pub embedding: KnowledgeEmbeddingVector,
     pub tags: Vec<String>,
-    pub frontmatter: serde_json::Value,
+    pub metadata: serde_json::Value,
 }
 
 impl KnowledgeEmbeddingDocument {
@@ -380,7 +375,7 @@ impl KnowledgeEmbeddingDocument {
             entry,
             embedding,
             tags: vec![],
-            frontmatter: serde_json::json!({}),
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -389,8 +384,8 @@ impl KnowledgeEmbeddingDocument {
         self
     }
 
-    pub fn with_frontmatter(mut self, frontmatter: serde_json::Value) -> Self {
-        self.frontmatter = frontmatter;
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -704,7 +699,7 @@ struct FullTextTermWeights {
     title: u32,
     body: u32,
     tags: u32,
-    frontmatter: u32,
+    metadata: u32,
 }
 
 impl Default for FullTextTermWeights {
@@ -713,7 +708,7 @@ impl Default for FullTextTermWeights {
             title: 4,
             body: 2,
             tags: 3,
-            frontmatter: 1,
+            metadata: 1,
         }
     }
 }
@@ -739,15 +734,15 @@ impl DeterministicFullTextKnowledgeBackend {
             .tags
             .iter()
             .all(|tag| document.tags.iter().any(|candidate| candidate == tag));
-        let matches_frontmatter = query.frontmatter_filters.iter().all(|(key, value)| {
+        let matches_metadata = query.metadata_filters.iter().all(|(key, value)| {
             document
-                .frontmatter
+                .metadata
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .map(|candidate| candidate == value)
                 .unwrap_or(false)
         });
-        matches_text && matches_tags && matches_frontmatter
+        matches_text && matches_tags && matches_metadata
     }
 
     fn score(&self, document: &KnowledgeIndexDocument, query: &KnowledgeFullTextQuery) -> f32 {
@@ -756,20 +751,20 @@ impl DeterministicFullTextKnowledgeBackend {
             return 0.0;
         }
         let title = document.entry.title.to_ascii_lowercase();
-        let body = document.body_markdown.to_ascii_lowercase();
+        let body = document.body.to_ascii_lowercase();
         let tags = document.tags.join(" ").to_ascii_lowercase();
-        let frontmatter = document.frontmatter.to_string().to_ascii_lowercase();
+        let metadata = document.metadata.to_string().to_ascii_lowercase();
         terms.into_iter().fold(0.0, |score, term| {
             score
                 + weighted_contains(&title, &term, self.weights.title)
                 + weighted_contains(&body, &term, self.weights.body)
                 + weighted_contains(&tags, &term, self.weights.tags)
-                + weighted_contains(&frontmatter, &term, self.weights.frontmatter)
+                + weighted_contains(&metadata, &term, self.weights.metadata)
         })
     }
 
     fn snippet(document: &KnowledgeIndexDocument) -> Option<String> {
-        Some(document.body_markdown.chars().take(160).collect())
+        Some(document.body.chars().take(160).collect())
     }
 }
 
@@ -786,9 +781,9 @@ fn indexed_text(document: &KnowledgeIndexDocument) -> String {
     format!(
         "{}\n{}\n{}\n{}",
         document.entry.title,
-        document.body_markdown,
+        document.body,
         document.tags.join(" "),
-        document.frontmatter
+        document.metadata
     )
     .to_ascii_lowercase()
 }
@@ -884,15 +879,15 @@ impl DeterministicEmbeddingKnowledgeBackend {
             .tags
             .iter()
             .all(|tag| document.tags.iter().any(|candidate| candidate == tag));
-        let matches_frontmatter = query.frontmatter_filters.iter().all(|(key, value)| {
+        let matches_metadata = query.metadata_filters.iter().all(|(key, value)| {
             document
-                .frontmatter
+                .metadata
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .map(|candidate| candidate == value)
                 .unwrap_or(false)
         });
-        matches_tags && matches_frontmatter
+        matches_tags && matches_metadata
     }
 
     fn cosine_similarity(
@@ -1546,11 +1541,11 @@ pub enum KnowledgeGovernanceStatus {
 /// Frontmatter validation errors used by the governance workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum KnowledgeGovernanceValidationError {
-    #[error("frontmatter title is required")]
+    #[error("metadata title is required")]
     MissingTitle,
-    #[error("frontmatter summary is required")]
+    #[error("metadata summary is required")]
     MissingSummary,
-    #[error("frontmatter tags must contain at least one item")]
+    #[error("metadata tags must contain at least one item")]
     MissingTags,
 }
 
@@ -1569,7 +1564,7 @@ pub enum KnowledgeGovernanceError {
 pub struct KnowledgeGovernanceRecord {
     pub knowledge_entry_id: KnowledgeEntryId,
     pub status: KnowledgeGovernanceStatus,
-    pub frontmatter: serde_json::Value,
+    pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1578,13 +1573,13 @@ impl KnowledgeGovernanceRecord {
     pub fn new(
         knowledge_entry_id: KnowledgeEntryId,
         status: KnowledgeGovernanceStatus,
-        frontmatter: serde_json::Value,
+        metadata: serde_json::Value,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             knowledge_entry_id,
             status,
-            frontmatter,
+            metadata,
             created_at,
             updated_at: created_at,
         }
@@ -1593,7 +1588,7 @@ impl KnowledgeGovernanceRecord {
     pub fn validation_errors(&self) -> Vec<KnowledgeGovernanceValidationError> {
         let mut errors = Vec::new();
         if self
-            .frontmatter
+            .metadata
             .get("title")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
@@ -1603,7 +1598,7 @@ impl KnowledgeGovernanceRecord {
             errors.push(KnowledgeGovernanceValidationError::MissingTitle);
         }
         if self
-            .frontmatter
+            .metadata
             .get("summary")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
@@ -1613,7 +1608,7 @@ impl KnowledgeGovernanceRecord {
             errors.push(KnowledgeGovernanceValidationError::MissingSummary);
         }
         if self
-            .frontmatter
+            .metadata
             .get("tags")
             .and_then(serde_json::Value::as_array)
             .filter(|tags| !tags.is_empty())
@@ -2335,7 +2330,7 @@ pub struct KnowledgeGetEntryActionInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeCreateDraftActionInput {
     pub title: String,
-    pub content_markdown: String,
+    pub content: String,
     pub source_uri: Option<String>,
     pub source_artifact_id: Option<ArtifactId>,
     pub source_asset_id: Option<AssetId>,
@@ -2346,10 +2341,10 @@ pub struct KnowledgeCreateDraftActionInput {
 
 impl KnowledgeCreateDraftActionInput {
     pub fn into_draft(self) -> Result<KnowledgeEntryDraft, KnowledgeValidationError> {
-        validate_draft_fields(&self.title, &self.content_markdown)?;
+        validate_draft_fields(&self.title, &self.content)?;
         Ok(KnowledgeEntryDraft {
             title: self.title,
-            content_markdown: self.content_markdown,
+            content: self.content,
             source_uri: self.source_uri,
             source_artifact_id: self.source_artifact_id,
             source_asset_id: self.source_asset_id,
@@ -2373,14 +2368,11 @@ pub struct KnowledgeUpdateEntryActionInput {
     pub update: KnowledgeEntryUpdate,
 }
 
-fn validate_draft_fields(
-    title: &str,
-    content_markdown: &str,
-) -> Result<(), KnowledgeValidationError> {
+fn validate_draft_fields(title: &str, content: &str) -> Result<(), KnowledgeValidationError> {
     if title.trim().is_empty() {
         return Err(KnowledgeValidationError::BlankTitle);
     }
-    if content_markdown.trim().is_empty() {
+    if content.trim().is_empty() {
         return Err(KnowledgeValidationError::BlankContent);
     }
     Ok(())
@@ -2432,7 +2424,7 @@ pub enum KnowledgeRepositoryError {
     LockPoisoned,
     #[error("io error: {0}")]
     Io(String),
-    #[error("frontmatter parse error in {path}: {reason}")]
+    #[error("metadata parse error in {path}: {reason}")]
     FrontmatterParse { path: String, reason: String },
     #[error("entry already exists: {0}")]
     EntryExists(String),
@@ -2994,7 +2986,7 @@ pub trait KnowledgeRepository: Send + Sync {
 #[derive(Debug, Clone)]
 struct StoredKnowledgeEntry {
     entry_ref: KnowledgeEntryRef,
-    content_markdown: String,
+    content: String,
     tags: Vec<String>,
 }
 
@@ -3036,7 +3028,7 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
             entry_ref.id.clone(),
             StoredKnowledgeEntry {
                 entry_ref: entry_ref.clone(),
-                content_markdown: draft.content_markdown,
+                content: draft.content,
                 tags: draft.tags,
             },
         );
@@ -3068,7 +3060,7 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
             .filter(|entry| {
                 let matches_text = text.is_empty()
                     || entry.entry_ref.title.to_lowercase().contains(&text)
-                    || entry.content_markdown.to_lowercase().contains(&text);
+                    || entry.content.to_lowercase().contains(&text);
                 let matches_tags = query
                     .tags
                     .iter()
@@ -3078,7 +3070,7 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
             .map(|entry| KnowledgeSearchResult {
                 entry: entry.entry_ref.clone(),
                 score: if text.is_empty() { 0.0 } else { 1.0 },
-                snippet: Some(entry.content_markdown.chars().take(120).collect()),
+                snippet: Some(entry.content.chars().take(120).collect()),
                 permission_required: false,
                 confidentiality: None,
             })
@@ -3118,8 +3110,8 @@ impl KnowledgeRepository for MemoryKnowledgeRepository {
         if let Some(title) = update.title {
             stored.entry_ref.title = title;
         }
-        if let Some(content) = update.content_markdown {
-            stored.content_markdown = content;
+        if let Some(content) = update.content {
+            stored.content = content;
         }
         if let Some(tags) = update.tags {
             stored.tags = tags;
@@ -3239,8 +3231,8 @@ mod tests {
         "2026-05-24T12:00:00Z".parse().unwrap()
     }
 
-    fn draft(title: &str, content_markdown: &str, tags: Vec<&str>) -> KnowledgeEntryDraft {
-        KnowledgeEntryDraft::new(title, content_markdown, ts())
+    fn draft(title: &str, content: &str, tags: Vec<&str>) -> KnowledgeEntryDraft {
+        KnowledgeEntryDraft::new(title, content, ts())
             .with_source_uri("https://example.com/source")
             .with_source_artifact_id("artifact-source-1")
             .with_source_asset_id("asset-source-1")
@@ -3248,10 +3240,10 @@ mod tests {
             .with_metadata(serde_json::json!({ "source": "test" }))
     }
 
-    fn create_draft_input(title: &str, content_markdown: &str) -> KnowledgeCreateDraftActionInput {
+    fn create_draft_input(title: &str, content: &str) -> KnowledgeCreateDraftActionInput {
         KnowledgeCreateDraftActionInput {
             title: title.to_string(),
-            content_markdown: content_markdown.to_string(),
+            content: content.to_string(),
             source_uri: Some("https://example.com/source".to_string()),
             source_artifact_id: Some(ArtifactId::from("artifact-source-1")),
             source_asset_id: Some(AssetId::from("asset-source-1")),
@@ -3537,7 +3529,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deterministic_fulltext_backend_indexes_title_body_tags_and_frontmatter() {
+    async fn deterministic_fulltext_backend_indexes_title_body_tags_and_metadata() {
         let mut backend = DeterministicFullTextKnowledgeBackend::new();
         backend
             .rebuild(KnowledgeIndexRebuildRequest {
@@ -3554,7 +3546,7 @@ mod tests {
                         "long-term governance".to_string(),
                     )
                     .with_tags(vec!["knowledge".to_string()])
-                    .with_frontmatter(serde_json::json!({ "domain": "memory" })),
+                    .with_metadata(serde_json::json!({ "domain": "memory" })),
                 ],
                 requested_at: ts(),
             })
@@ -3644,7 +3636,7 @@ mod tests {
             "long-term memory and asset governance".to_string(),
         )
         .with_tags(vec!["memory".to_string(), "agent-os".to_string()])
-        .with_frontmatter(serde_json::json!({ "status": "active" }));
+        .with_metadata(serde_json::json!({ "status": "active" }));
         let second = KnowledgeIndexDocument::new(
             KnowledgeEntryRef {
                 id: KnowledgeEntryId::from("knowledge-entry-2"),
@@ -3682,7 +3674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_fulltext_index_filters_by_tags_and_frontmatter() {
+    async fn memory_fulltext_index_filters_by_tags_and_metadata() {
         let mut index = MemoryFullTextKnowledgeIndex::new();
         index
             .rebuild(KnowledgeIndexRebuildRequest {
@@ -3699,7 +3691,7 @@ mod tests {
                         "memory index content".to_string(),
                     )
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter(serde_json::json!({ "status": "published" })),
+                    .with_metadata(serde_json::json!({ "status": "published" })),
                     KnowledgeIndexDocument::new(
                         KnowledgeEntryRef {
                             id: KnowledgeEntryId::from("knowledge-entry-2"),
@@ -3712,7 +3704,7 @@ mod tests {
                         "memory index content".to_string(),
                     )
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter(serde_json::json!({ "status": "draft" })),
+                    .with_metadata(serde_json::json!({ "status": "draft" })),
                 ],
                 requested_at: ts(),
             })
@@ -3723,7 +3715,7 @@ mod tests {
             .query(
                 &KnowledgeFullTextQuery::new("memory")
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter_filter("status", "published"),
+                    .with_metadata_filter("status", "published"),
             )
             .await
             .unwrap();
@@ -3792,7 +3784,7 @@ mod tests {
         assert_eq!(query.text, "agent memory");
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
-        assert!(query.frontmatter_filters.is_empty());
+        assert!(query.metadata_filters.is_empty());
     }
 
     #[test]
@@ -3987,7 +3979,7 @@ mod tests {
     }
 
     #[test]
-    fn governance_validates_required_frontmatter_for_active_entries() {
+    fn governance_validates_required_metadata_for_active_entries() {
         let valid = KnowledgeGovernanceRecord::new(
             KnowledgeEntryId::from("knowledge-entry-1"),
             KnowledgeGovernanceStatus::Draft,
@@ -4074,7 +4066,7 @@ mod tests {
         assert!(matches!(err, KnowledgeGovernanceError::ValidationFailed(_)));
         assert!(
             store.active_index_entry_ids().await.unwrap().is_empty(),
-            "invalid frontmatter must not enter active index"
+            "invalid metadata must not enter active index"
         );
     }
 
@@ -4485,7 +4477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_search_applies_tags_and_frontmatter_to_both_paths() {
+    async fn hybrid_search_applies_tags_and_metadata_to_both_paths() {
         let mut full_text = MemoryFullTextKnowledgeIndex::new();
         let mut semantic = MemorySemanticKnowledgeIndex::new();
         let matching = sample_entry("knowledge-entry-a", "AgentOS Memory");
@@ -4496,7 +4488,7 @@ mod tests {
                 .upsert(
                     KnowledgeIndexDocument::new(entry.clone(), "agent memory")
                         .with_tags(vec!["memory".to_string()])
-                        .with_frontmatter(serde_json::json!({ "tier": tier })),
+                        .with_metadata(serde_json::json!({ "tier": tier })),
                 )
                 .await
                 .unwrap();
@@ -4507,7 +4499,7 @@ mod tests {
                         KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
                     )
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter(serde_json::json!({ "tier": tier })),
+                    .with_metadata(serde_json::json!({ "tier": tier })),
                 )
                 .await
                 .unwrap();
@@ -4518,10 +4510,10 @@ mod tests {
             .query(&KnowledgeHybridQuery::new(
                 KnowledgeFullTextQuery::new("agent")
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter_filter("tier", "gold"),
+                    .with_metadata_filter("tier", "gold"),
                 KnowledgeSemanticQuery::new(KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap())
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter_filter("tier", "gold"),
+                    .with_metadata_filter("tier", "gold"),
             ))
             .await
             .unwrap();
@@ -4640,7 +4632,7 @@ mod tests {
         assert_eq!(query.embedding.values(), &[1.0, 0.0]);
         assert_eq!(query.limit, 10);
         assert!(query.tags.is_empty());
-        assert!(query.frontmatter_filters.is_empty());
+        assert!(query.metadata_filters.is_empty());
     }
 
     #[test]
@@ -4701,7 +4693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_semantic_index_filters_by_tags_and_frontmatter() {
+    async fn memory_semantic_index_filters_by_tags_and_metadata() {
         let mut index = MemorySemanticKnowledgeIndex::new();
         index
             .rebuild_embeddings(KnowledgeEmbeddingRebuildRequest {
@@ -4718,7 +4710,7 @@ mod tests {
                         KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
                     )
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter(serde_json::json!({ "status": "published" })),
+                    .with_metadata(serde_json::json!({ "status": "published" })),
                     KnowledgeEmbeddingDocument::new(
                         KnowledgeEntryRef {
                             id: KnowledgeEntryId::from("knowledge-entry-2"),
@@ -4731,7 +4723,7 @@ mod tests {
                         KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
                     )
                     .with_tags(vec!["memory".to_string()])
-                    .with_frontmatter(serde_json::json!({ "status": "draft" })),
+                    .with_metadata(serde_json::json!({ "status": "draft" })),
                 ],
                 requested_at: ts(),
             })
@@ -4744,7 +4736,7 @@ mod tests {
                     KnowledgeEmbeddingVector::new(vec![1.0, 0.0]).unwrap(),
                 )
                 .with_tags(vec!["memory".to_string()])
-                .with_frontmatter_filter("status", "published"),
+                .with_metadata_filter("status", "published"),
             )
             .await
             .unwrap();
@@ -5433,9 +5425,9 @@ mod tests {
                     asset_id: None,
                     created_at: ts(),
                 },
-                body_markdown: "public content".to_string(),
+                body: "public content".to_string(),
                 tags: vec![],
-                frontmatter: serde_json::json!({}),
+                metadata: serde_json::json!({}),
             })
             .await
             .unwrap();
@@ -5449,9 +5441,9 @@ mod tests {
                     asset_id: None,
                     created_at: ts(),
                 },
-                body_markdown: "secret content".to_string(),
+                body: "secret content".to_string(),
                 tags: vec![],
-                frontmatter: serde_json::json!({}),
+                metadata: serde_json::json!({}),
             })
             .await
             .unwrap();
@@ -5493,9 +5485,9 @@ mod tests {
                     asset_id: None,
                     created_at: ts(),
                 },
-                body_markdown: "secret content".to_string(),
+                body: "secret content".to_string(),
                 tags: vec![],
-                frontmatter: serde_json::json!({}),
+                metadata: serde_json::json!({}),
             })
             .await
             .unwrap();
@@ -5540,9 +5532,9 @@ mod tests {
                     asset_id: None,
                     created_at: ts(),
                 },
-                body_markdown: "knowledge body".to_string(),
+                body: "knowledge body".to_string(),
                 tags: vec![],
-                frontmatter: serde_json::json!({}),
+                metadata: serde_json::json!({}),
             })
             .await
             .unwrap();

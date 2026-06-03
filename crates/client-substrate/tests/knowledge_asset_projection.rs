@@ -13,7 +13,7 @@ fn host_can_project_knowledge_results_with_citations() {
             confidentiality: Some("internal".to_string()),
             permission_required: true,
             citations: vec![ClientCitationRef {
-                source_uri: Some("file:///kb/agent-os.md".to_string()),
+                source_uri: Some("agentos://knowledge/entry-1".to_string()),
                 artifact_id: None,
                 asset_id: Some("asset-1".to_string()),
                 evidence_label: Some("source note".to_string()),

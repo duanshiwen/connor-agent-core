@@ -108,7 +108,7 @@ The full response helper accepts the standard Go backend API envelope:
           "entry_id": "notes/alpha",
           "object_id": "notes/alpha",
           "title": "Alpha",
-          "content_markdown": "# Alpha",
+          "content": "# Alpha",
           "summary": "summary",
           "tags": ["agentos"],
           "metadata": {},
